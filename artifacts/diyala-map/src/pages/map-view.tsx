@@ -9,13 +9,7 @@ export function MapView() {
   const [userLocation, setUserLocation] = useState<{ lat: number; lng: number } | null>(null);
   const [routeTarget, setRouteTarget] = useState<Clinic | null>(null);
 
-  const handleNavigate = (clinic: Clinic) => {
-    setRouteTarget(clinic);
-  };
-
-  const handleCloseRoute = () => {
-    setRouteTarget(null);
-  };
+  const handleClearRoute = () => setRouteTarget(null);
 
   return (
     <div className="flex flex-col h-screen w-full bg-background overflow-hidden dark scanline" dir="rtl">
@@ -28,15 +22,16 @@ export function MapView() {
           userLocation={userLocation}
           onUserLocationChange={setUserLocation}
           routeTarget={routeTarget}
-          onClearRoute={handleCloseRoute}
+          onNavigate={setRouteTarget}
+          onClearRoute={handleClearRoute}
         />
         <Sidebar
           clinic={selectedClinic}
-          onClose={() => { setSelectedClinic(null); handleCloseRoute(); }}
+          onClose={() => { setSelectedClinic(null); handleClearRoute(); }}
           userLocation={userLocation}
-          onNavigate={handleNavigate}
+          onNavigate={setRouteTarget}
           routeTarget={routeTarget}
-          onClearRoute={handleCloseRoute}
+          onClearRoute={handleClearRoute}
         />
       </main>
     </div>
