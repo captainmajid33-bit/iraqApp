@@ -1,35 +1,55 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
-import { Clinic } from '@/data/clinics';
+import { MapItem, FilterKind } from '@/data/types';
 
 interface ClinicMapProps {
-  clinics: Clinic[];
-  onSelectClinic: (clinic: Clinic) => void;
-  selectedClinic: Clinic | null;
+  items: MapItem[];
+  activeFilter: FilterKind;
+  onFilterChange: (f: FilterKind) => void;
+  onSelectItem: (item: MapItem) => void;
+  selectedItem: MapItem | null;
   userLocation: { lat: number; lng: number } | null;
   onUserLocationChange: (loc: { lat: number; lng: number } | null) => void;
-  routeTarget: Clinic | null;
-  onNavigate: (clinic: Clinic) => void;
+  routeTarget: MapItem | null;
+  onNavigate: (item: MapItem) => void;
   onClearRoute: () => void;
 }
 
-function createMarkerIcon(isOpen: boolean, selected: boolean): L.DivIcon {
+// ── Marker icons ─────────────────────────────────────────────────────────────
+function clinicIcon(isOpen: boolean, selected: boolean): L.DivIcon {
   const color = isOpen ? '#00f5d4' : '#ff2d78';
   const size = selected ? 44 : 36;
-  const pulse = isOpen && !selected;
   return L.divIcon({
     className: '',
     html: `<div style="width:${size}px;height:${size}px;position:relative;display:flex;align-items:center;justify-content:center;">
-      ${pulse ? `<div style="position:absolute;inset:0;border-radius:50%;background:${color};opacity:0.2;animation:lf-ping 2s cubic-bezier(0,0,0.2,1) infinite;"></div>` : ''}
-      <div style="position:absolute;inset:0;border-radius:50%;border:2px solid ${color};box-shadow:0 0 ${selected ? 20 : 12}px ${color},0 0 ${selected ? 40 : 24}px ${color}88;"></div>
+      ${isOpen && !selected ? `<div style="position:absolute;inset:0;border-radius:50%;background:${color};opacity:0.2;animation:lf-ping 2s cubic-bezier(0,0,0.2,1) infinite;"></div>` : ''}
+      <div style="position:absolute;inset:0;border-radius:50%;border:2px solid ${color};box-shadow:0 0 ${selected?20:12}px ${color},0 0 ${selected?40:24}px ${color}88;"></div>
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none">
         <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2z" fill="${color}" opacity="0.3"/>
         <path d="M13 7h-2v4H7v2h4v4h2v-4h4v-2h-4V7z" fill="${color}"/>
       </svg>
     </div>`,
-    iconSize: [size, size],
-    iconAnchor: [size / 2, size / 2],
+    iconSize: [size, size], iconAnchor: [size/2, size/2],
+  });
+}
+
+function restaurantIcon(isOpen: boolean, selected: boolean): L.DivIcon {
+  const color = isOpen ? '#ff9500' : '#ff2d78';
+  const size = selected ? 44 : 36;
+  return L.divIcon({
+    className: '',
+    html: `<div style="width:${size}px;height:${size}px;position:relative;display:flex;align-items:center;justify-content:center;">
+      ${isOpen && !selected ? `<div style="position:absolute;inset:0;border-radius:50%;background:${color};opacity:0.2;animation:lf-ping 2s cubic-bezier(0,0,0.2,1) infinite;"></div>` : ''}
+      <div style="position:absolute;inset:0;border-radius:50%;border:2px solid ${color};box-shadow:0 0 ${selected?20:12}px ${color},0 0 ${selected?40:24}px ${color}88;"></div>
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none">
+        <path d="M18 3v18M15 3c0 3.314 2.686 6 3 6v6" stroke="${color}" stroke-width="1.8" stroke-linecap="round"/>
+        <path d="M6 3v6.5A3.5 3.5 0 0 0 9.5 13H10v8" stroke="${color}" stroke-width="1.8" stroke-linecap="round"/>
+        <path d="M3 3v6.5A3.5 3.5 0 0 0 6.5 13" stroke="${color}" stroke-width="1.8" stroke-linecap="round"/>
+        <line x1="3" y1="8" x2="10" y2="8" stroke="${color}" stroke-width="1.5"/>
+      </svg>
+    </div>`,
+    iconSize: [size, size], iconAnchor: [size/2, size/2],
   });
 }
 
@@ -41,379 +61,334 @@ function createUserIcon(): L.DivIcon {
       <div style="position:absolute;inset:-4px;border-radius:50%;border:2px solid #f5c518;opacity:0.5;"></div>
       <div style="width:14px;height:14px;border-radius:50%;background:#f5c518;box-shadow:0 0 12px #f5c518,0 0 24px #f5c51888;border:2px solid #fff;"></div>
     </div>`,
-    iconSize: [20, 20],
-    iconAnchor: [10, 10],
+    iconSize: [20,20], iconAnchor: [10,10],
   });
 }
 
+// ── Route drawing ─────────────────────────────────────────────────────────────
 function drawRoute(
-  map: L.Map,
-  userLoc: { lat: number; lng: number },
-  clinic: Clinic,
-  onDone: (info: { distanceKm: number; durationMin: number } | null) => void,
-  onLoading: (v: boolean) => void,
-  glowRef: React.MutableRefObject<L.Polyline | null>,
-  lineRef: React.MutableRefObject<L.Polyline | null>,
+  map: L.Map, userLoc: {lat:number;lng:number}, item: MapItem,
+  onDone: (info:{distanceKm:number;durationMin:number}|null)=>void,
+  onLoading: (v:boolean)=>void,
+  glowRef: React.MutableRefObject<L.Polyline|null>,
+  lineRef: React.MutableRefObject<L.Polyline|null>,
 ) {
   glowRef.current?.remove(); glowRef.current = null;
   lineRef.current?.remove(); lineRef.current = null;
-  onDone(null);
-  onLoading(true);
-
-  fetch(
-    `https://router.project-osrm.org/route/v1/driving/${userLoc.lng},${userLoc.lat};${clinic.lng},${clinic.lat}?overview=full&geometries=geojson`
-  )
-    .then(r => r.json())
-    .then(data => {
-      const route = data.routes?.[0];
-      if (!route) return;
-      const coords: [number, number][] = route.geometry.coordinates.map(([lng, lat]: [number, number]) => [lat, lng]);
-      glowRef.current = L.polyline(coords, { color: '#f5c518', weight: 12, opacity: 0.12, lineCap: 'round', lineJoin: 'round' }).addTo(map);
-      lineRef.current = L.polyline(coords, { color: '#f5c518', weight: 3, opacity: 1, lineCap: 'round', lineJoin: 'round', dashArray: '12 7' }).addTo(map);
-      onDone({ distanceKm: route.distance / 1000, durationMin: route.duration / 60 });
-      map.flyToBounds(L.latLngBounds(coords), { padding: [70, 70], duration: 1.5 });
+  onDone(null); onLoading(true);
+  fetch(`https://router.project-osrm.org/route/v1/driving/${userLoc.lng},${userLoc.lat};${item.lng},${item.lat}?overview=full&geometries=geojson`)
+    .then(r=>r.json())
+    .then(data=>{
+      const route = data.routes?.[0]; if (!route) return;
+      const coords:[number,number][] = route.geometry.coordinates.map(([lng,lat]:[number,number])=>[lat,lng]);
+      glowRef.current = L.polyline(coords,{color:'#f5c518',weight:12,opacity:0.12,lineCap:'round',lineJoin:'round'}).addTo(map);
+      lineRef.current = L.polyline(coords,{color:'#f5c518',weight:3,opacity:1,lineCap:'round',lineJoin:'round',dashArray:'12 7'}).addTo(map);
+      onDone({distanceKm:route.distance/1000,durationMin:route.duration/60});
+      map.flyToBounds(L.latLngBounds(coords),{padding:[70,70],duration:1.5});
     })
-    .catch(() => onDone(null))
-    .finally(() => onLoading(false));
+    .catch(()=>onDone(null))
+    .finally(()=>onLoading(false));
 }
 
+// ── Component ─────────────────────────────────────────────────────────────────
 export function ClinicMap({
-  clinics, onSelectClinic, selectedClinic,
+  items, activeFilter, onFilterChange,
+  onSelectItem, selectedItem,
   userLocation, onUserLocationChange,
   routeTarget, onNavigate, onClearRoute,
 }: ClinicMapProps) {
   const mapContainer = useRef<HTMLDivElement>(null);
-  const mapRef = useRef<L.Map | null>(null);
-  const markersRef = useRef<{ [id: number]: L.Marker }>({});
-  const userMarkerRef = useRef<L.Marker | null>(null);
-  const userCircleRef = useRef<L.Circle | null>(null);
-  const routeGlowRef = useRef<L.Polyline | null>(null);
-  const routeLineRef = useRef<L.Polyline | null>(null);
+  const mapRef = useRef<L.Map|null>(null);
+  const markersRef = useRef<{[id:number]:L.Marker}>({});
+  const userMarkerRef = useRef<L.Marker|null>(null);
+  const userCircleRef = useRef<L.Circle|null>(null);
+  const routeGlowRef = useRef<L.Polyline|null>(null);
+  const routeLineRef = useRef<L.Polyline|null>(null);
 
-  // Keep latest callbacks in refs so Leaflet popup handlers are always current
-  const onSelectRef = useRef(onSelectClinic);
+  const onSelectRef = useRef(onSelectItem);
   const onNavigateRef = useRef(onNavigate);
   const userLocationRef = useRef(userLocation);
-  const locateAndNavigateRef = useRef<((clinic: Clinic) => void) | null>(null);
+  const locateAndNavigateRef = useRef<((item:MapItem)=>void)|null>(null);
 
-  useEffect(() => { onSelectRef.current = onSelectClinic; }, [onSelectClinic]);
-  useEffect(() => { onNavigateRef.current = onNavigate; }, [onNavigate]);
-  useEffect(() => { userLocationRef.current = userLocation; }, [userLocation]);
+  useEffect(()=>{onSelectRef.current=onSelectItem;},[onSelectItem]);
+  useEffect(()=>{onNavigateRef.current=onNavigate;},[onNavigate]);
+  useEffect(()=>{userLocationRef.current=userLocation;},[userLocation]);
 
-  const [locating, setLocating] = useState(false);
-  const [locateError, setLocateError] = useState<string | null>(null);
-  const [routeLoading, setRouteLoading] = useState(false);
-  const [routeInfo, setRouteInfo] = useState<{ distanceKm: number; durationMin: number } | null>(null);
+  const [locating,setLocating] = useState(false);
+  const [locateError,setLocateError] = useState<string|null>(null);
+  const [routeLoading,setRouteLoading] = useState(false);
+  const [routeInfo,setRouteInfo] = useState<{distanceKm:number;durationMin:number}|null>(null);
 
-  // Locate user and optionally navigate to a clinic after
-  const locateUser = useCallback((afterLocate?: (loc: { lat: number; lng: number }) => void) => {
-    if (!navigator.geolocation) { setLocateError('الجهاز لا يدعم تحديد الموقع'); return; }
+  const locateUser = useCallback((afterLocate?:(loc:{lat:number;lng:number})=>void)=>{
+    if (!navigator.geolocation){setLocateError('الجهاز لا يدعم تحديد الموقع');return;}
     setLocating(true); setLocateError(null);
     navigator.geolocation.getCurrentPosition(
-      ({ coords: { latitude: lat, longitude: lng, accuracy } }) => {
+      ({coords:{latitude:lat,longitude:lng,accuracy}})=>{
         setLocating(false);
-        const loc = { lat, lng };
-        onUserLocationChange(loc);
-        userLocationRef.current = loc;
-        userMarkerRef.current?.remove();
-        userCircleRef.current?.remove();
-        userMarkerRef.current = L.marker([lat, lng], { icon: createUserIcon(), zIndexOffset: 1000 }).addTo(mapRef.current!);
-        userCircleRef.current = L.circle([lat, lng], { radius: accuracy, color: '#f5c518', fillColor: '#f5c518', fillOpacity: 0.08, weight: 1, dashArray: '4 4' }).addTo(mapRef.current!);
-        if (!afterLocate) mapRef.current?.flyTo([lat, lng], 16, { duration: 1.5 });
+        const loc={lat,lng};
+        onUserLocationChange(loc); userLocationRef.current=loc;
+        userMarkerRef.current?.remove(); userCircleRef.current?.remove();
+        userMarkerRef.current=L.marker([lat,lng],{icon:createUserIcon(),zIndexOffset:1000}).addTo(mapRef.current!);
+        userCircleRef.current=L.circle([lat,lng],{radius:accuracy,color:'#f5c518',fillColor:'#f5c518',fillOpacity:0.08,weight:1,dashArray:'4 4'}).addTo(mapRef.current!);
+        if (!afterLocate) mapRef.current?.flyTo([lat,lng],16,{duration:1.5});
         afterLocate?.(loc);
       },
-      (err) => {
+      (err)=>{
         setLocating(false);
-        if (err.code === 1) setLocateError('تم رفض صلاحية الموقع');
-        else if (err.code === 2) setLocateError('تعذّر تحديد الموقع');
+        if (err.code===1) setLocateError('تم رفض صلاحية الموقع');
+        else if (err.code===2) setLocateError('تعذّر تحديد الموقع');
         else setLocateError('انتهت مهلة تحديد الموقع');
       },
-      { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+      {enableHighAccuracy:true,timeout:10000,maximumAge:0}
     );
-  }, [onUserLocationChange]);
+  },[onUserLocationChange]);
 
-  // Store locateAndNavigate in ref so popup buttons can call it
-  useEffect(() => {
-    locateAndNavigateRef.current = (clinic: Clinic) => {
-      const loc = userLocationRef.current;
-      if (loc) {
-        onNavigateRef.current(clinic);
+  useEffect(()=>{
+    locateAndNavigateRef.current=(item:MapItem)=>{
+      const loc=userLocationRef.current;
+      if (loc){
+        onNavigateRef.current(item);
       } else {
-        locateUser((newLoc) => {
-          // After location is obtained, draw route
-          if (mapRef.current) {
-            drawRoute(mapRef.current, newLoc, clinic, setRouteInfo, setRouteLoading, routeGlowRef, routeLineRef);
-          }
-          onNavigateRef.current(clinic);
+        locateUser((newLoc)=>{
+          if (mapRef.current) drawRoute(mapRef.current,newLoc,item,setRouteInfo,setRouteLoading,routeGlowRef,routeLineRef);
+          onNavigateRef.current(item);
         });
       }
     };
-  }, [locateUser]);
+  },[locateUser]);
 
   // Init map
-  useEffect(() => {
-    if (!mapContainer.current || mapRef.current) return;
-
-    const style = document.createElement('style');
-    style.textContent = `
-      @keyframes lf-ping { 75%, 100% { transform: scale(2.5); opacity: 0; } }
-      @keyframes lf-spin  { to { transform: rotate(360deg); } }
-      .leaflet-container { background: #0a0d14 !important; font-family: 'Rajdhani', sans-serif; }
-      .leaflet-tile-pane { filter: brightness(0.9); }
-      .leaflet-control-zoom a {
-        background: #0d1117 !important; color: #00f5d4 !important;
-        border-color: #00f5d4 !important; font-family: 'Orbitron', sans-serif; box-shadow: 0 0 8px #00f5d422;
-      }
-      .leaflet-control-zoom a:hover { background: #00f5d422 !important; box-shadow: 0 0 16px #00f5d4 !important; }
-      .leaflet-control-attribution { background: rgba(0,0,0,0.7) !important; color: #00f5d488 !important; font-size: 10px; }
-      .leaflet-control-attribution a { color: #00f5d4 !important; }
-
-      /* Custom popup styles */
-      .clinic-popup .leaflet-popup-content-wrapper {
-        background: rgba(5,8,15,0.97) !important;
-        border: 1px solid #00f5d4 !important;
-        border-radius: 2px !important;
-        box-shadow: 0 0 20px #00f5d444, 0 0 40px #00f5d422 !important;
-        padding: 0 !important;
-        min-width: 220px;
-      }
-      .clinic-popup .leaflet-popup-content { margin: 0 !important; width: auto !important; }
-      .clinic-popup .leaflet-popup-tip-container { display: none; }
-      .clinic-popup .leaflet-popup-close-button {
-        color: #00f5d4 !important; font-size: 18px !important;
-        top: 6px !important; right: 8px !important;
-        width: 20px !important; height: 20px !important;
-      }
-      .popup-nav-btn {
-        width: 100%; padding: 9px 0; margin-top: 10px;
-        background: rgba(245,197,24,0.1);
-        border: 1px solid #f5c518;
-        color: #f5c518; font-family: 'Orbitron', monospace;
-        font-size: 11px; letter-spacing: 0.08em;
-        cursor: pointer; transition: all 0.2s;
-        display: flex; align-items: center; justify-content: center; gap: 7px;
-        box-shadow: 0 0 10px rgba(245,197,24,0.2);
-      }
-      .popup-nav-btn:hover { background: rgba(245,197,24,0.22); box-shadow: 0 0 18px rgba(245,197,24,0.45); }
-      .popup-nav-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-      .popup-details-btn {
-        width: 100%; padding: 7px 0;
-        background: rgba(0,245,212,0.07);
-        border: 1px solid #00f5d466;
-        color: #00f5d4; font-family: 'Rajdhani', sans-serif;
-        font-size: 12px; letter-spacing: 0.06em;
-        cursor: pointer; transition: all 0.2s;
-      }
-      .popup-details-btn:hover { background: rgba(0,245,212,0.15); border-color: #00f5d4; }
+  useEffect(()=>{
+    if (!mapContainer.current||mapRef.current) return;
+    const style=document.createElement('style');
+    style.textContent=`
+      @keyframes lf-ping{75%,100%{transform:scale(2.5);opacity:0;}}
+      @keyframes lf-spin{to{transform:rotate(360deg);}}
+      .leaflet-container{background:#0a0d14!important;font-family:'Rajdhani',sans-serif;}
+      .leaflet-tile-pane{filter:brightness(0.9);}
+      .leaflet-control-zoom a{background:#0d1117!important;color:#00f5d4!important;border-color:#00f5d4!important;font-family:'Orbitron',sans-serif;box-shadow:0 0 8px #00f5d422;}
+      .leaflet-control-zoom a:hover{background:#00f5d422!important;box-shadow:0 0 16px #00f5d4!important;}
+      .leaflet-control-attribution{background:rgba(0,0,0,0.7)!important;color:#00f5d488!important;font-size:10px;}
+      .leaflet-control-attribution a{color:#00f5d4!important;}
+      .map-popup .leaflet-popup-content-wrapper{background:rgba(5,8,15,0.97)!important;border-radius:2px!important;padding:0!important;min-width:220px;}
+      .map-popup.clinic-pop .leaflet-popup-content-wrapper{border:1px solid #00f5d4!important;box-shadow:0 0 20px #00f5d444,0 0 40px #00f5d422!important;}
+      .map-popup.resto-pop .leaflet-popup-content-wrapper{border:1px solid #ff9500!important;box-shadow:0 0 20px #ff950044,0 0 40px #ff950022!important;}
+      .map-popup .leaflet-popup-content{margin:0!important;width:auto!important;}
+      .map-popup .leaflet-popup-tip-container{display:none;}
+      .map-popup .leaflet-popup-close-button{color:#aaa!important;font-size:18px!important;top:6px!important;right:8px!important;}
+      .popup-nav-btn{width:100%;padding:9px 0;margin-top:10px;background:rgba(245,197,24,0.1);border:1px solid #f5c518;color:#f5c518;font-family:'Orbitron',monospace;font-size:11px;letter-spacing:0.08em;cursor:pointer;transition:all 0.2s;display:flex;align-items:center;justify-content:center;gap:7px;box-shadow:0 0 10px rgba(245,197,24,0.2);}
+      .popup-nav-btn:hover{background:rgba(245,197,24,0.22);box-shadow:0 0 18px rgba(245,197,24,0.45);}
+      .popup-details-btn{width:100%;padding:7px 0;border:none;background:transparent;color:#aaa;font-family:'Rajdhani',sans-serif;font-size:12px;letter-spacing:0.06em;cursor:pointer;transition:all 0.2s;border-top:1px solid rgba(255,255,255,0.06);margin-top:4px;}
+      .popup-details-btn:hover{color:#fff;}
     `;
     document.head.appendChild(style);
-
-    mapRef.current = L.map(mapContainer.current, { center: [33.7451, 44.6488], zoom: 13, zoomControl: true });
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/">CARTO</a>',
-      subdomains: 'abcd', maxZoom: 20,
+    mapRef.current=L.map(mapContainer.current,{center:[33.7451,44.6488],zoom:13,zoomControl:true});
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',{
+      attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/">CARTO</a>',
+      subdomains:'abcd',maxZoom:20,
     }).addTo(mapRef.current);
+    return ()=>{mapRef.current?.remove();mapRef.current=null;style.remove();};
+  },[]);
 
-    return () => { mapRef.current?.remove(); mapRef.current = null; style.remove(); };
-  }, []);
+  // Build popup
+  const buildPopup = useCallback((item: MapItem)=>{
+    const isClinic = item.kind==='clinic';
+    const accentColor = isClinic ? '#00f5d4' : '#ff9500';
+    const isOpen = item.status==='مفتوح';
+    const statusColor = isOpen ? accentColor : '#ff2d78';
 
-  // Build popup DOM for a clinic
-  const buildPopup = useCallback((clinic: Clinic) => {
-    const isOpen = clinic.status === 'مفتوح';
-    const statusColor = isOpen ? '#00f5d4' : '#ff2d78';
+    const el=document.createElement('div');
+    el.style.cssText='padding:14px 16px 12px;direction:rtl;min-width:215px;';
 
-    const el = document.createElement('div');
-    el.style.cssText = 'padding:14px 16px 12px;direction:rtl;min-width:210px;';
-    el.innerHTML = `
-      <div style="font-family:Orbitron,sans-serif;font-size:9px;color:#00f5d488;letter-spacing:0.12em;margin-bottom:4px;">
-        ID:${clinic.id.toString().padStart(4,'0')} · ${clinic.lat.toFixed(3)},${clinic.lng.toFixed(3)}
+    const sub = isClinic
+      ? `${'specialty' in item ? item.specialty : ''} · ${'doctor' in item ? item.doctor : ''}`
+      : `${'cuisine' in item ? item.cuisine : ''} · ${'type' in item ? item.type : ''}`;
+
+    const stars = !isClinic && 'rating' in item
+      ? `<div style="color:#f5c518;font-size:13px;margin-bottom:3px;">${'★'.repeat(item.rating as number)}${'☆'.repeat(5-(item.rating as number))}</div>`
+      : '';
+
+    el.innerHTML=`
+      <div style="font-family:Orbitron,sans-serif;font-size:9px;color:${accentColor}88;letter-spacing:0.12em;margin-bottom:4px;">
+        ${isClinic?'🏥 MEDICAL':'🍽️ DINING'} · ID:${item.id.toString().padStart(4,'0')}
       </div>
-      <div style="font-family:Rajdhani,sans-serif;font-size:16px;font-weight:700;color:#e8f8f5;line-height:1.2;margin-bottom:8px;">${clinic.name}</div>
-      <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">
+      <div style="font-family:Rajdhani,sans-serif;font-size:16px;font-weight:700;color:#e8f8f5;line-height:1.2;margin-bottom:6px;">${item.name}</div>
+      ${stars}
+      <div style="display:flex;align-items:center;gap:6px;margin-bottom:3px;">
         <div style="width:7px;height:7px;border-radius:50%;background:${statusColor};box-shadow:0 0 6px ${statusColor};flex-shrink:0;"></div>
-        <span style="font-family:Rajdhani,sans-serif;font-size:12px;color:${statusColor};letter-spacing:0.05em;">${clinic.status} · ${clinic.specialty}</span>
+        <span style="font-family:Rajdhani,sans-serif;font-size:12px;color:${statusColor};letter-spacing:0.04em;">${item.status}</span>
       </div>
-      <div style="font-family:Rajdhani,sans-serif;font-size:11px;color:#ffffff55;margin-bottom:2px;">${clinic.doctor}</div>
+      <div style="font-family:Rajdhani,sans-serif;font-size:11px;color:#ffffff55;">${sub}</div>
     `;
 
-    // Navigate button
-    const navBtn = document.createElement('button');
-    navBtn.className = 'popup-nav-btn';
-    navBtn.innerHTML = `
-      <svg width="13" height="13" viewBox="0 0 24 24" fill="none">
-        <path d="M3 11l19-9-9 19-2-8-8-2z" fill="#f5c518"/>
-      </svg>
-      الذهاب إليه
-    `;
-    navBtn.addEventListener('click', () => {
-      locateAndNavigateRef.current?.(clinic);
-      mapRef.current?.closePopup();
-    });
+    const navBtn=document.createElement('button');
+    navBtn.className='popup-nav-btn';
+    navBtn.innerHTML=`<svg width="13" height="13" viewBox="0 0 24 24" fill="none"><path d="M3 11l19-9-9 19-2-8-8-2z" fill="#f5c518"/></svg>الذهاب إليه`;
+    navBtn.addEventListener('click',()=>{locateAndNavigateRef.current?.(item);mapRef.current?.closePopup();});
 
-    // Details button
-    const detailsBtn = document.createElement('button');
-    detailsBtn.className = 'popup-details-btn';
-    detailsBtn.textContent = 'عرض التفاصيل';
-    detailsBtn.addEventListener('click', () => {
-      onSelectRef.current(clinic);
-      mapRef.current?.closePopup();
-    });
+    const detailsBtn=document.createElement('button');
+    detailsBtn.className='popup-details-btn';
+    detailsBtn.textContent='عرض التفاصيل ←';
+    detailsBtn.addEventListener('click',()=>{onSelectRef.current(item);mapRef.current?.closePopup();});
 
     el.appendChild(navBtn);
-    const gap = document.createElement('div');
-    gap.style.height = '6px';
-    el.appendChild(gap);
     el.appendChild(detailsBtn);
-
     return el;
-  }, []);
+  },[]);
 
-  // Sync clinic markers
-  useEffect(() => {
+  // Sync markers
+  useEffect(()=>{
     if (!mapRef.current) return;
-    Object.values(markersRef.current).forEach(m => m.remove());
-    markersRef.current = {};
+    Object.values(markersRef.current).forEach(m=>m.remove());
+    markersRef.current={};
 
-    clinics.forEach(clinic => {
-      const isOpen = clinic.status === 'مفتوح';
-      const isSelected = selectedClinic?.id === clinic.id;
+    const visible=items.filter(i=>i.kind===activeFilter);
+    visible.forEach(item=>{
+      const isOpen=item.status==='مفتوح';
+      const isSelected=selectedItem?.id===item.id;
+      const icon=item.kind==='clinic'
+        ? clinicIcon(isOpen,isSelected)
+        : restaurantIcon(isOpen,isSelected);
 
-      const marker = L.marker([clinic.lat, clinic.lng], {
-        icon: createMarkerIcon(isOpen, isSelected),
-      }).addTo(mapRef.current!);
-
-      const popup = L.popup({ className: 'clinic-popup', offset: [0, -8], closeButton: true, autoClose: true, autoPan: true })
-        .setContent(buildPopup(clinic));
-
+      const popupClass=`map-popup ${item.kind==='clinic'?'clinic-pop':'resto-pop'}`;
+      const marker=L.marker([item.lat,item.lng],{icon}).addTo(mapRef.current!);
+      const popup=L.popup({className:popupClass,offset:[0,-8],closeButton:true,autoClose:true,autoPan:true}).setContent(buildPopup(item));
       marker.bindPopup(popup);
-
-      // Open popup on click instead of going to sidebar directly
-      marker.on('click', () => {
-        marker.openPopup();
-        mapRef.current?.flyTo([clinic.lat, clinic.lng], 15, { duration: 0.8 });
-      });
-
-      markersRef.current[clinic.id] = marker;
+      marker.on('click',()=>{marker.openPopup();mapRef.current?.flyTo([item.lat,item.lng],15,{duration:0.8});});
+      markersRef.current[item.id]=marker;
     });
-  }, [clinics, selectedClinic, buildPopup]);
+  },[items,activeFilter,selectedItem,buildPopup]);
 
-  // Update icons when selection changes
-  useEffect(() => {
-    clinics.forEach(clinic => {
-      markersRef.current[clinic.id]?.setIcon(
-        createMarkerIcon(clinic.status === 'مفتوح', selectedClinic?.id === clinic.id)
+  // Update selected icon
+  useEffect(()=>{
+    items.filter(i=>i.kind===activeFilter).forEach(item=>{
+      const isOpen=item.status==='مفتوح';
+      const isSelected=selectedItem?.id===item.id;
+      markersRef.current[item.id]?.setIcon(
+        item.kind==='clinic' ? clinicIcon(isOpen,isSelected) : restaurantIcon(isOpen,isSelected)
       );
     });
-  }, [selectedClinic, clinics]);
+  },[selectedItem,items,activeFilter]);
 
-  // Draw route when routeTarget + userLocation are both set
-  useEffect(() => {
-    routeGlowRef.current?.remove(); routeGlowRef.current = null;
-    routeLineRef.current?.remove(); routeLineRef.current = null;
+  // Draw route
+  useEffect(()=>{
+    routeGlowRef.current?.remove(); routeGlowRef.current=null;
+    routeLineRef.current?.remove(); routeLineRef.current=null;
     setRouteInfo(null);
-    if (!routeTarget || !userLocation || !mapRef.current) return;
-    drawRoute(mapRef.current, userLocation, routeTarget, setRouteInfo, setRouteLoading, routeGlowRef, routeLineRef);
-  }, [routeTarget, userLocation]);
+    if (!routeTarget||!userLocation||!mapRef.current) return;
+    drawRoute(mapRef.current,userLocation,routeTarget,setRouteInfo,setRouteLoading,routeGlowRef,routeLineRef);
+  },[routeTarget,userLocation]);
+
+  const clinicCount = items.filter(i=>i.kind==='clinic').length;
+  const restCount = items.filter(i=>i.kind==='restaurant').length;
 
   return (
     <div className="relative w-full h-full">
-      <div ref={mapContainer} className="absolute inset-0" style={{ zIndex: 0 }} />
+      <div ref={mapContainer} className="absolute inset-0" style={{zIndex:0}} />
 
-      {/* Locate Me Button */}
-      <button
-        onClick={() => locateUser()}
-        disabled={locating}
-        title="تحديد موقعي"
+      {/* ── Filter Tabs ── */}
+      <div style={{
+        position:'absolute',top:'12px',left:'50%',transform:'translateX(-50%)',
+        zIndex:1000,display:'flex',gap:'0',
+        border:'1px solid rgba(255,255,255,0.12)',
+        boxShadow:'0 0 24px rgba(0,0,0,0.7)',
+        backdropFilter:'blur(12px)',
+      }}>
+        {([
+          {kind:'clinic' as FilterKind, label:'الأطباء', labelEn:'MEDICAL', count:clinicCount, color:'#00f5d4',
+           icon:`<svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2z" fill="currentColor" opacity="0.3"/><path d="M13 7h-2v4H7v2h4v4h2v-4h4v-2h-4V7z" fill="currentColor"/></svg>`},
+          {kind:'restaurant' as FilterKind, label:'المطاعم', labelEn:'DINING', count:restCount, color:'#ff9500',
+           icon:`<svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M18 3v18M15 3c0 3.314 2.686 6 3 6v6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M6 3v6.5A3.5 3.5 0 0 0 9.5 13H10v8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M3 3v6.5A3.5 3.5 0 0 0 6.5 13" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><line x1="3" y1="8" x2="10" y2="8" stroke="currentColor" stroke-width="1.5"/></svg>`},
+        ] as const).map(tab=>{
+          const active=activeFilter===tab.kind;
+          return (
+            <button
+              key={tab.kind}
+              onClick={()=>onFilterChange(tab.kind)}
+              style={{
+                padding:'9px 20px',
+                background: active ? `${tab.color}22` : 'rgba(5,8,15,0.92)',
+                border:'none',
+                borderBottom: active ? `2px solid ${tab.color}` : '2px solid transparent',
+                color: active ? tab.color : '#ffffff55',
+                fontFamily:'Orbitron,sans-serif',fontSize:'10px',letterSpacing:'0.1em',
+                cursor:'pointer',transition:'all 0.2s',
+                display:'flex',flexDirection:'column',alignItems:'center',gap:'3px',
+                boxShadow: active ? `inset 0 0 16px ${tab.color}22` : 'none',
+                minWidth:'110px',
+              }}
+            >
+              <div style={{display:'flex',alignItems:'center',gap:'6px',color:active?tab.color:'#ffffff55'}}
+                dangerouslySetInnerHTML={{__html: tab.icon.replace('currentColor', active?tab.color:'#ffffff55') + `<span>${tab.labelEn}</span>`}}
+              />
+              <span style={{fontSize:'11px',fontFamily:'Rajdhani,sans-serif',letterSpacing:'0.04em',opacity:0.8}}>{tab.label} ({tab.count})</span>
+            </button>
+          );
+        })}
+      </div>
+
+      {/* ── Locate Me ── */}
+      <button onClick={()=>locateUser()} disabled={locating} title="تحديد موقعي"
         style={{
-          position: 'absolute', bottom: '96px', left: '6px', zIndex: 1000,
-          width: '34px', height: '34px',
-          background: userLocation ? '#f5c51822' : '#0d1117',
-          border: '2px solid #f5c518',
-          boxShadow: locating ? '0 0 18px #f5c518, 0 0 36px #f5c51888' : userLocation ? '0 0 12px #f5c518' : '0 0 6px #f5c51844',
-          borderRadius: '4px', cursor: locating ? 'wait' : 'pointer',
-          display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0, transition: 'all 0.3s',
-        }}
-      >
+          position:'absolute',bottom:'96px',left:'6px',zIndex:1000,
+          width:'34px',height:'34px',
+          background:userLocation?'#f5c51822':'#0d1117',
+          border:'2px solid #f5c518',
+          boxShadow:locating?'0 0 18px #f5c518,0 0 36px #f5c51888':userLocation?'0 0 12px #f5c518':'0 0 6px #f5c51844',
+          borderRadius:'4px',cursor:locating?'wait':'pointer',
+          display:'flex',alignItems:'center',justifyContent:'center',padding:0,transition:'all 0.3s',
+        }}>
         {locating
-          ? <svg width="16" height="16" viewBox="0 0 24 24" fill="none" style={{ animation: 'lf-spin 1s linear infinite' }}>
-              <circle cx="12" cy="12" r="9" stroke="#f5c518" strokeWidth="2" strokeDasharray="28 8" strokeLinecap="round"/>
-            </svg>
-          : <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
-              <circle cx="12" cy="12" r="3" fill="#f5c518"/>
-              <path d="M12 2v3M12 19v3M2 12h3M19 12h3" stroke="#f5c518" strokeWidth="2" strokeLinecap="round"/>
-              <circle cx="12" cy="12" r="7" stroke="#f5c518" strokeWidth="1.5" opacity="0.6"/>
-            </svg>
+          ? <svg width="16" height="16" viewBox="0 0 24 24" fill="none" style={{animation:'lf-spin 1s linear infinite'}}><circle cx="12" cy="12" r="9" stroke="#f5c518" strokeWidth="2" strokeDasharray="28 8" strokeLinecap="round"/></svg>
+          : <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="3" fill="#f5c518"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3" stroke="#f5c518" strokeWidth="2" strokeLinecap="round"/><circle cx="12" cy="12" r="7" stroke="#f5c518" strokeWidth="1.5" opacity="0.6"/></svg>
         }
       </button>
 
-      {/* Locate Error */}
+      {/* ── Locate Error ── */}
       {locateError && (
-        <div style={{
-          position: 'absolute', bottom: '140px', left: '6px', zIndex: 1000,
-          background: 'rgba(0,0,0,0.92)', border: '1px solid #ff2d78',
-          color: '#ff2d78', fontSize: '11px', padding: '8px 12px',
-          fontFamily: 'Rajdhani, sans-serif', letterSpacing: '0.04em',
-          boxShadow: '0 0 12px #ff2d7844', maxWidth: '180px',
-        }}>
+        <div style={{position:'absolute',bottom:'140px',left:'6px',zIndex:1000,background:'rgba(0,0,0,0.92)',border:'1px solid #ff2d78',color:'#ff2d78',fontSize:'11px',padding:'8px 12px',fontFamily:'Rajdhani,sans-serif',boxShadow:'0 0 12px #ff2d7844',maxWidth:'180px'}}>
           {locateError}
-          <button onClick={() => setLocateError(null)} style={{ display: 'block', marginTop: '4px', color: '#ff2d7888', fontSize: '10px', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>اغلق ×</button>
+          <button onClick={()=>setLocateError(null)} style={{display:'block',marginTop:'4px',color:'#ff2d7888',fontSize:'10px',background:'none',border:'none',cursor:'pointer',padding:0}}>اغلق ×</button>
         </div>
       )}
 
-      {/* Route Loading */}
+      {/* ── Route Loading ── */}
       {routeLoading && (
-        <div style={{
-          position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%,-50%)',
-          zIndex: 1000, background: 'rgba(0,0,0,0.92)', border: '1px solid #f5c518',
-          color: '#f5c518', fontSize: '12px', padding: '14px 24px',
-          fontFamily: 'Orbitron, sans-serif', letterSpacing: '0.1em',
-          boxShadow: '0 0 28px #f5c51866', textAlign: 'center',
-        }}>
-          <div style={{ marginBottom: '5px' }}>CALCULATING ROUTE...</div>
-          <div style={{ fontSize: '10px', opacity: 0.6 }}>جاري حساب المسار</div>
+        <div style={{position:'absolute',top:'50%',left:'50%',transform:'translate(-50%,-50%)',zIndex:1000,background:'rgba(0,0,0,0.92)',border:'1px solid #f5c518',color:'#f5c518',fontSize:'12px',padding:'14px 24px',fontFamily:'Orbitron,sans-serif',letterSpacing:'0.1em',boxShadow:'0 0 28px #f5c51866',textAlign:'center'}}>
+          <div style={{marginBottom:'5px'}}>CALCULATING ROUTE...</div>
+          <div style={{fontSize:'10px',opacity:0.6}}>جاري حساب المسار</div>
         </div>
       )}
 
-      {/* Route Info Banner */}
+      {/* ── Route Info Banner ── */}
       {routeInfo && !routeLoading && (
-        <div style={{
-          position: 'absolute', top: '12px', left: '50%', transform: 'translateX(-50%)',
-          zIndex: 1000, background: 'rgba(5,8,15,0.95)', border: '1px solid #f5c518',
-          color: '#f5c518', padding: '10px 20px',
-          fontFamily: 'Orbitron, sans-serif', fontSize: '11px', letterSpacing: '0.08em',
-          boxShadow: '0 0 24px #f5c51866', display: 'flex', gap: '20px', alignItems: 'center',
-        }}>
-          <span>
-            <div style={{ opacity: 0.55, fontSize: '9px', marginBottom: '2px' }}>DISTANCE</div>
-            {routeInfo.distanceKm.toFixed(1)} كم
-          </span>
-          <div style={{ width: '1px', height: '28px', background: '#f5c51844' }} />
-          <span>
-            <div style={{ opacity: 0.55, fontSize: '9px', marginBottom: '2px' }}>ETA</div>
-            {Math.ceil(routeInfo.durationMin)} دقيقة
-          </span>
-          <div style={{ width: '1px', height: '28px', background: '#f5c51844' }} />
-          <button onClick={onClearRoute} style={{ background: 'none', border: 'none', color: '#f5c518', cursor: 'pointer', fontSize: '20px', lineHeight: 1, padding: '0 4px', opacity: 0.7 }} title="إلغاء">×</button>
+        <div style={{position:'absolute',bottom:'24px',left:'50%',transform:'translateX(-50%)',zIndex:1000,background:'rgba(5,8,15,0.95)',border:'1px solid #f5c518',color:'#f5c518',padding:'10px 20px',fontFamily:'Orbitron,sans-serif',fontSize:'11px',letterSpacing:'0.08em',boxShadow:'0 0 24px #f5c51866',display:'flex',gap:'20px',alignItems:'center'}}>
+          <span><div style={{opacity:0.55,fontSize:'9px',marginBottom:'2px'}}>DISTANCE</div>{routeInfo.distanceKm.toFixed(1)} كم</span>
+          <div style={{width:'1px',height:'28px',background:'#f5c51844'}}/>
+          <span><div style={{opacity:0.55,fontSize:'9px',marginBottom:'2px'}}>ETA</div>{Math.ceil(routeInfo.durationMin)} دقيقة</span>
+          <div style={{width:'1px',height:'28px',background:'#f5c51844'}}/>
+          <button onClick={onClearRoute} style={{background:'none',border:'none',color:'#f5c518',cursor:'pointer',fontSize:'20px',lineHeight:1,padding:'0 4px',opacity:0.7}}>×</button>
         </div>
       )}
 
-      {/* Legend */}
-      <div style={{
-        position: 'absolute', bottom: '24px', left: '46px', zIndex: 1000,
-        background: 'rgba(0,0,0,0.87)', border: '1px solid rgba(0,245,212,0.35)',
-        padding: '13px 16px', backdropFilter: 'blur(8px)', fontFamily: 'Rajdhani, sans-serif',
-      }}>
-        <div style={{ color: '#00f5d4', fontSize: '10px', letterSpacing: '0.15em', borderBottom: '1px solid rgba(0,245,212,0.2)', paddingBottom: '8px', marginBottom: '10px' }}>LEGEND</div>
-        {[
-          { color: '#00f5d4', label: 'عيادة مفتوحة' },
-          { color: '#ff2d78', label: 'عيادة مغلقة' },
-          { color: '#f5c518', label: 'موقعك / المسار' },
-        ].map(({ color, label }) => (
-          <div key={label} style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '7px' }}>
-            <div style={{ width: '10px', height: '10px', borderRadius: '50%', background: color, boxShadow: `0 0 7px ${color}`, flexShrink: 0 }} />
-            <span style={{ color, fontSize: '12px' }}>{label}</span>
-          </div>
-        ))}
+      {/* ── Legend ── */}
+      <div style={{position:'absolute',bottom:'24px',left:'46px',zIndex:1000,background:'rgba(0,0,0,0.87)',border:'1px solid rgba(255,255,255,0.1)',padding:'13px 16px',backdropFilter:'blur(8px)',fontFamily:'Rajdhani,sans-serif'}}>
+        <div style={{color:'#ffffff66',fontSize:'10px',letterSpacing:'0.15em',borderBottom:'1px solid rgba(255,255,255,0.08)',paddingBottom:'8px',marginBottom:'10px'}}>LEGEND</div>
+        {activeFilter==='clinic' ? <>
+          {[{color:'#00f5d4',label:'عيادة مفتوحة'},{color:'#ff2d78',label:'عيادة مغلقة'},{color:'#f5c518',label:'موقعك / المسار'}].map(({color,label})=>(
+            <div key={label} style={{display:'flex',alignItems:'center',gap:'10px',marginBottom:'7px'}}>
+              <div style={{width:'10px',height:'10px',borderRadius:'50%',background:color,boxShadow:`0 0 7px ${color}`,flexShrink:0}}/>
+              <span style={{color,fontSize:'12px'}}>{label}</span>
+            </div>
+          ))}
+        </> : <>
+          {[{color:'#ff9500',label:'مطعم مفتوح'},{color:'#ff2d78',label:'مطعم مغلق'},{color:'#f5c518',label:'موقعك / المسار'}].map(({color,label})=>(
+            <div key={label} style={{display:'flex',alignItems:'center',gap:'10px',marginBottom:'7px'}}>
+              <div style={{width:'10px',height:'10px',borderRadius:'50%',background:color,boxShadow:`0 0 7px ${color}`,flexShrink:0}}/>
+              <span style={{color,fontSize:'12px'}}>{label}</span>
+            </div>
+          ))}
+        </>}
       </div>
     </div>
   );

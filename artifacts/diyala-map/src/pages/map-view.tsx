@@ -2,12 +2,23 @@ import { useState } from "react";
 import { Header } from "@/components/Header";
 import { Sidebar } from "@/components/Sidebar";
 import { ClinicMap } from "@/components/ClinicMap";
-import { Clinic, clinics } from "@/data/clinics";
+import { clinics } from "@/data/clinics";
+import { restaurants } from "@/data/restaurants";
+import { MapItem, FilterKind } from "@/data/types";
+
+const allItems: MapItem[] = [...clinics, ...restaurants];
 
 export function MapView() {
-  const [selectedClinic, setSelectedClinic] = useState<Clinic | null>(null);
+  const [activeFilter, setActiveFilter] = useState<FilterKind>('clinic');
+  const [selectedItem, setSelectedItem] = useState<MapItem | null>(null);
   const [userLocation, setUserLocation] = useState<{ lat: number; lng: number } | null>(null);
-  const [routeTarget, setRouteTarget] = useState<Clinic | null>(null);
+  const [routeTarget, setRouteTarget] = useState<MapItem | null>(null);
+
+  const handleFilterChange = (f: FilterKind) => {
+    setActiveFilter(f);
+    setSelectedItem(null);
+    setRouteTarget(null);
+  };
 
   const handleClearRoute = () => setRouteTarget(null);
 
@@ -16,9 +27,11 @@ export function MapView() {
       <Header />
       <main className="flex-1 relative flex">
         <ClinicMap
-          clinics={clinics}
-          onSelectClinic={setSelectedClinic}
-          selectedClinic={selectedClinic}
+          items={allItems}
+          activeFilter={activeFilter}
+          onFilterChange={handleFilterChange}
+          onSelectItem={setSelectedItem}
+          selectedItem={selectedItem}
           userLocation={userLocation}
           onUserLocationChange={setUserLocation}
           routeTarget={routeTarget}
@@ -26,8 +39,8 @@ export function MapView() {
           onClearRoute={handleClearRoute}
         />
         <Sidebar
-          clinic={selectedClinic}
-          onClose={() => { setSelectedClinic(null); handleClearRoute(); }}
+          item={selectedItem}
+          onClose={() => { setSelectedItem(null); handleClearRoute(); }}
           userLocation={userLocation}
           onNavigate={setRouteTarget}
           routeTarget={routeTarget}
