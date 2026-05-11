@@ -9,7 +9,7 @@ export function Header() {
         </div>
         <div className="flex flex-col">
           <h1 className="text-2xl font-bold font-mono tracking-wider neon-text text-primary">خريطة الرعاية الصحية</h1>
-          <span className="text-xs tracking-widest text-primary/70 font-mono">محافظة ديالى • SYSTEM ONLINE</span>
+          <span className="text-xs tracking-widest text-primary/70 font-mono">ديالى بالذكاء الاصطناعي • SYSTEM ONLINE</span>
         </div>
       </div>
 
