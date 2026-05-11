@@ -8,8 +8,8 @@ export function Header() {
           <MapPin className="text-primary w-6 h-6 animate-pulse" />
         </div>
         <div className="flex flex-col">
-          <h1 className="text-2xl font-bold font-mono tracking-wider neon-text text-primary">خريطة الرعاية الصحية</h1>
-          <span className="text-xs tracking-widest text-primary/70 font-mono">ديالى بالذكاء الاصطناعي • SYSTEM ONLINE</span>
+          <h1 className="text-2xl font-bold font-mono tracking-wider neon-text text-primary">ديالى بالذكاء الاصطناعي</h1>
+          <span className="text-xs tracking-widest text-primary/70 font-mono">خريطة العيادات الصحية • SYSTEM ONLINE</span>
         </div>
       </div>
 
