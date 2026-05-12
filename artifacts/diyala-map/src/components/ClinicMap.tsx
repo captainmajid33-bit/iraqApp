@@ -83,15 +83,37 @@ function makeIcon(kind: string, catMap: Map<string, Category>, isOpen: boolean, 
   });
 }
 
-function createUserIcon(): L.DivIcon {
+function createUserArrowIcon(heading: number | null): L.DivIcon {
+  const rot = heading !== null ? heading : 0;
+  const hasHeading = heading !== null;
+  // GTA V-style neon arrow
   return L.divIcon({
     className: '',
-    html: `<div style="width:20px;height:20px;position:relative;display:flex;align-items:center;justify-content:center;">
-      <div style="position:absolute;inset:-10px;border-radius:50%;background:#f5c518;opacity:0.15;animation:lf-ping 2s cubic-bezier(0,0,0.2,1) infinite;"></div>
-      <div style="position:absolute;inset:-4px;border-radius:50%;border:2px solid #f5c518;opacity:0.5;"></div>
-      <div style="width:14px;height:14px;border-radius:50%;background:#f5c518;box-shadow:0 0 12px #f5c518,0 0 24px #f5c51888;border:2px solid #fff;"></div>
+    html: `<div style="width:44px;height:44px;position:relative;display:flex;align-items:center;justify-content:center;">
+      <!-- outer pulse ring -->
+      <div style="position:absolute;inset:0;border-radius:50%;background:#00f5d4;opacity:0.10;animation:lf-ping 2.2s cubic-bezier(0,0,0.2,1) infinite;"></div>
+      <!-- accuracy ring -->
+      <div style="position:absolute;inset:4px;border-radius:50%;border:1.5px solid #00f5d466;"></div>
+      <!-- rotatable arrow -->
+      <svg width="44" height="44" viewBox="0 0 44 44" fill="none"
+           style="position:absolute;inset:0;transform:rotate(${rot}deg);transition:transform 0.4s ease;">
+        <!-- glow shadow arrow -->
+        <path d="M22 6 L29 32 L22 27 L15 32 Z" fill="#00f5d433" filter="url(#ug)"/>
+        <!-- main neon arrow -->
+        <path d="M22 6 L29 32 L22 27 L15 32 Z"
+              fill="#00f5d4" stroke="#00f5d4" stroke-width="0.8" stroke-linejoin="round"/>
+        <!-- center core -->
+        <circle cx="22" cy="22" r="3" fill="#ffffff" opacity="0.95"/>
+        <circle cx="22" cy="22" r="5" fill="#00f5d4" opacity="0.2"/>
+        <defs>
+          <filter id="ug" x="-50%" y="-50%" width="200%" height="200%">
+            <feGaussianBlur stdDeviation="3" result="b"/>
+          </filter>
+        </defs>
+      </svg>
+      ${!hasHeading ? `<div style="position:absolute;bottom:-1px;left:50%;transform:translateX(-50%);width:6px;height:6px;border-radius:50%;background:#f5c518;box-shadow:0 0 8px #f5c518;"></div>` : ''}
     </div>`,
-    iconSize: [20,20], iconAnchor: [10,10],
+    iconSize: [44,44], iconAnchor: [22,22],
   });
 }
 
@@ -136,6 +158,11 @@ export function ClinicMap({
   const routeGlowRef   = useRef<L.Polyline|null>(null);
   const routeLineRef   = useRef<L.Polyline|null>(null);
   const catStyleRef    = useRef<HTMLStyleElement|null>(null);
+  // User location tracking
+  const watchIdRef     = useRef<number|null>(null);
+  const headingRef     = useRef<number|null>(null);
+  const [userHeading, setUserHeading] = useState<number|null>(null);
+  const [isTracking,  setIsTracking]  = useState(false);
 
   // Stable refs for callbacks
   const onSelectRef          = useRef(onSelectItem);
@@ -187,29 +214,103 @@ export function ClinicMap({
     setRouteInfo(null);
   },[]);
 
+  // Update user marker icon (position + heading) without re-mounting
+  const refreshUserMarker = useCallback((lat:number, lng:number, heading:number|null, accuracy:number)=>{
+    if (!mapRef.current) return;
+    const icon = createUserArrowIcon(heading);
+    if (userMarkerRef.current) {
+      userMarkerRef.current.setLatLng([lat,lng]);
+      userMarkerRef.current.setIcon(icon);
+    } else {
+      userMarkerRef.current = L.marker([lat,lng],{icon,zIndexOffset:1000}).addTo(mapRef.current);
+    }
+    if (userCircleRef.current) {
+      (userCircleRef.current as any).setLatLng([lat,lng]);
+      (userCircleRef.current as any).setRadius(accuracy);
+    } else {
+      userCircleRef.current = L.circle([lat,lng],{
+        radius:accuracy,color:'#00f5d4',fillColor:'#00f5d4',
+        fillOpacity:0.06,weight:1,dashArray:'5 5',
+      }).addTo(mapRef.current);
+    }
+  },[]);
+
   const locateUser = useCallback((afterLocate?:(loc:{lat:number;lng:number})=>void)=>{
     if (!navigator.geolocation){setLocateError('الجهاز لا يدعم تحديد الموقع');return;}
+    // Stop any existing watch
+    if (watchIdRef.current !== null) {
+      navigator.geolocation.clearWatch(watchIdRef.current);
+      watchIdRef.current = null;
+    }
     setLocating(true); setLocateError(null);
-    navigator.geolocation.getCurrentPosition(
-      ({coords:{latitude:lat,longitude:lng,accuracy}})=>{
+    let firstFix = true;
+
+    watchIdRef.current = navigator.geolocation.watchPosition(
+      ({coords:{latitude:lat,longitude:lng,accuracy,heading:geoHeading}})=>{
         setLocating(false);
-        const loc={lat,lng};
-        onUserLocationChange(loc); userLocationRef.current=loc;
-        userMarkerRef.current?.remove(); userCircleRef.current?.remove();
-        userMarkerRef.current=L.marker([lat,lng],{icon:createUserIcon(),zIndexOffset:1000}).addTo(mapRef.current!);
-        userCircleRef.current=L.circle([lat,lng],{radius:accuracy,color:'#f5c518',fillColor:'#f5c518',fillOpacity:0.08,weight:1,dashArray:'4 4'}).addTo(mapRef.current!);
-        if (!afterLocate) mapRef.current?.flyTo([lat,lng],16,{duration:1.5});
-        afterLocate?.(loc);
+        setIsTracking(true);
+        const loc = {lat,lng};
+        onUserLocationChange(loc); userLocationRef.current = loc;
+
+        // Prefer GPS heading when available (only non-null when moving)
+        const h = (geoHeading !== null && !isNaN(geoHeading)) ? geoHeading : headingRef.current;
+        headingRef.current = h;
+        setUserHeading(h);
+        refreshUserMarker(lat, lng, h, accuracy);
+
+        if (firstFix) {
+          firstFix = false;
+          if (!afterLocate) mapRef.current?.flyTo([lat,lng],16,{animate:true,duration:1.5});
+          afterLocate?.(loc);
+        }
       },
       (err)=>{
         setLocating(false);
+        setIsTracking(false);
         if (err.code===1)      setLocateError('تم رفض صلاحية الموقع');
         else if (err.code===2) setLocateError('تعذّر تحديد الموقع');
         else                   setLocateError('انتهت مهلة تحديد الموقع');
       },
-      {enableHighAccuracy:true,timeout:10000,maximumAge:0}
+      {enableHighAccuracy:true,timeout:12000,maximumAge:3000}
     );
-  },[onUserLocationChange]);
+  },[onUserLocationChange, refreshUserMarker]);
+
+  // DeviceOrientation compass (mobile) — updates heading ref + marker
+  useEffect(()=>{
+    function handleOrientation(e: DeviceOrientationEvent) {
+      const alpha = (e as any).webkitCompassHeading ?? e.alpha;
+      if (alpha === null || alpha === undefined) return;
+      // webkitCompassHeading is 0=North; e.alpha is 0=North going clockwise on iOS
+      // We subtract from 360 for standard map bearing
+      const bearing = (e as any).webkitCompassHeading !== undefined
+        ? (e as any).webkitCompassHeading
+        : (360 - (alpha ?? 0)) % 360;
+      headingRef.current = bearing;
+      setUserHeading(bearing);
+      // Only update marker if we're tracking
+      if (userMarkerRef.current && userLocationRef.current) {
+        userMarkerRef.current.setIcon(createUserArrowIcon(bearing));
+      }
+    }
+    // Request permission on iOS 13+
+    if (typeof (DeviceOrientationEvent as any).requestPermission === 'function') {
+      (DeviceOrientationEvent as any).requestPermission()
+        .then((s:string)=>{ if(s==='granted') window.addEventListener('deviceorientation',handleOrientation,true); })
+        .catch(()=>{});
+    } else {
+      window.addEventListener('deviceorientation', handleOrientation, true);
+    }
+    return ()=>{ window.removeEventListener('deviceorientation', handleOrientation, true); };
+  },[]);
+
+  // Cleanup watchPosition on unmount
+  useEffect(()=>{
+    return ()=>{
+      if (watchIdRef.current !== null) {
+        navigator.geolocation.clearWatch(watchIdRef.current);
+      }
+    };
+  },[]);
 
   useEffect(()=>{
     locateAndNavigateRef.current=(item:MapItem)=>{
@@ -436,22 +537,109 @@ export function ClinicMap({
         </button>
       )}
 
-      {/* ── Locate Me ── */}
-      <button onClick={()=>locateUser()} disabled={locating} title="تحديد موقعي"
-        style={{position:'absolute',bottom:'96px',left:'6px',zIndex:1000,width:'34px',height:'34px',background:userLocation?'#f5c51822':'#0d1117',border:'2px solid #f5c518',boxShadow:locating?'0 0 18px #f5c518':'0 0 6px #f5c51844',borderRadius:'4px',cursor:locating?'wait':'pointer',display:'flex',alignItems:'center',justifyContent:'center',padding:0,transition:'all 0.3s'}}>
-        {locating
-          ? <svg width="16" height="16" viewBox="0 0 24 24" fill="none" style={{animation:'lf-spin 1s linear infinite'}}><circle cx="12" cy="12" r="9" stroke="#f5c518" strokeWidth="2" strokeDasharray="28 8" strokeLinecap="round"/></svg>
-          : <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="3" fill="#f5c518"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3" stroke="#f5c518" strokeWidth="2" strokeLinecap="round"/><circle cx="12" cy="12" r="7" stroke="#f5c518" strokeWidth="1.5" opacity="0.6"/></svg>
-        }
-      </button>
+      {/* ── GTA V GPS Button ── */}
+      <div style={{position:'absolute',bottom:'24px',left:'20px',zIndex:1001,display:'flex',flexDirection:'column',alignItems:'center',gap:'8px'}}>
+        {/* Error toast */}
+        {locateError && (
+          <div style={{background:'rgba(5,8,15,0.97)',border:'1px solid #ff2d78',color:'#ff2d78',fontSize:'11px',padding:'8px 12px',fontFamily:'Rajdhani,sans-serif',maxWidth:'180px',marginBottom:'4px',boxShadow:'0 0 18px rgba(255,45,120,0.3)',backdropFilter:'blur(12px)'}}>
+            {locateError}
+            <button onClick={()=>setLocateError(null)} style={{display:'block',marginTop:'4px',color:'#ff2d7888',fontSize:'10px',background:'none',border:'none',cursor:'pointer',padding:0}}>اغلق ×</button>
+          </div>
+        )}
+        {/* Tracking badge */}
+        {isTracking && !locating && (
+          <div style={{
+            display:'flex',alignItems:'center',gap:'6px',
+            padding:'4px 10px',background:'rgba(0,245,212,0.08)',
+            border:'1px solid #00f5d444',
+            fontFamily:'Orbitron,sans-serif',fontSize:'8px',
+            color:'#00f5d4',letterSpacing:'0.12em',
+            backdropFilter:'blur(10px)',
+          }}>
+            <div style={{width:'5px',height:'5px',borderRadius:'50%',background:'#00f5d4',boxShadow:'0 0 8px #00f5d4',animation:'lf-ping 1.8s ease-in-out infinite'}}/>
+            LIVE TRACKING
+          </div>
+        )}
+        {/* Main circular GPS button */}
+        <button
+          onClick={()=>{
+            if (isTracking && userLocation) {
+              // Already tracking — re-center on user
+              mapRef.current?.flyTo([userLocation.lat, userLocation.lng], 16, {animate:true, duration:1.5});
+            } else {
+              locateUser();
+            }
+          }}
+          disabled={locating}
+          title={isTracking ? 'العودة لموقعي' : 'تحديد موقعي'}
+          style={{
+            width:'56px', height:'56px',
+            borderRadius:'50%',
+            background: isTracking
+              ? 'radial-gradient(circle at 38% 38%, rgba(0,245,212,0.22), rgba(0,245,212,0.06))'
+              : 'radial-gradient(circle at 38% 38%, rgba(0,212,255,0.14), rgba(13,17,23,0.98))',
+            border: isTracking ? '2px solid #00f5d4' : '2px solid #00d4ff',
+            boxShadow: isTracking
+              ? '0 0 20px rgba(0,245,212,0.55), 0 0 40px rgba(0,245,212,0.2), inset 0 0 12px rgba(0,245,212,0.08)'
+              : '0 0 12px rgba(0,212,255,0.35), 0 0 24px rgba(0,212,255,0.1)',
+            cursor: locating ? 'wait' : 'pointer',
+            display:'flex', alignItems:'center', justifyContent:'center',
+            padding:0, transition:'all 0.35s cubic-bezier(0.4,0,0.2,1)',
+            backdropFilter:'blur(14px)',
+            position:'relative',
+            overflow:'hidden',
+          }}
+          onMouseEnter={e=>{
+            if (!locating) (e.currentTarget as HTMLElement).style.boxShadow = isTracking
+              ? '0 0 30px rgba(0,245,212,0.8), 0 0 60px rgba(0,245,212,0.3), inset 0 0 18px rgba(0,245,212,0.12)'
+              : '0 0 24px rgba(0,212,255,0.7), 0 0 48px rgba(0,212,255,0.25)';
+          }}
+          onMouseLeave={e=>{
+            (e.currentTarget as HTMLElement).style.boxShadow = isTracking
+              ? '0 0 20px rgba(0,245,212,0.55), 0 0 40px rgba(0,245,212,0.2), inset 0 0 12px rgba(0,245,212,0.08)'
+              : '0 0 12px rgba(0,212,255,0.35), 0 0 24px rgba(0,212,255,0.1)';
+          }}
+        >
+          {locating ? (
+            /* Spinner while acquiring lock */
+            <svg width="28" height="28" viewBox="0 0 28 28" fill="none" style={{animation:'lf-spin 0.9s linear infinite'}}>
+              <circle cx="14" cy="14" r="10" stroke={isTracking?'#00f5d4':'#00d4ff'} strokeWidth="2" strokeDasharray="22 14" strokeLinecap="round"/>
+              <circle cx="14" cy="14" r="5" stroke={isTracking?'#00f5d4':'#00d4ff'} strokeWidth="1.5" strokeDasharray="10 6" strokeLinecap="round" opacity="0.5"/>
+            </svg>
+          ) : isTracking ? (
+            /* Re-center icon when tracking */
+            <svg width="26" height="26" viewBox="0 0 24 24" fill="none">
+              <circle cx="12" cy="12" r="3.5" fill="#00f5d4"/>
+              <circle cx="12" cy="12" r="7" stroke="#00f5d4" strokeWidth="1.5" opacity="0.6"/>
+              <path d="M12 2v3M12 19v3M2 12h3M19 12h3" stroke="#00f5d4" strokeWidth="2" strokeLinecap="round"/>
+              <circle cx="12" cy="12" r="10.5" stroke="#00f5d4" strokeWidth="1" strokeDasharray="3 3" opacity="0.35"/>
+            </svg>
+          ) : (
+            /* GPS crosshair icon when idle */
+            <svg width="26" height="26" viewBox="0 0 24 24" fill="none">
+              <path d="M12 2v3M12 19v3M2 12h3M19 12h3" stroke="#00d4ff" strokeWidth="2" strokeLinecap="round"/>
+              <circle cx="12" cy="12" r="7" stroke="#00d4ff" strokeWidth="1.5" opacity="0.7"/>
+              <circle cx="12" cy="12" r="3" stroke="#00d4ff" strokeWidth="1.8"/>
+              <circle cx="12" cy="12" r="1.2" fill="#00d4ff"/>
+            </svg>
+          )}
+          {/* Ripple effect when active */}
+          {isTracking && (
+            <div style={{position:'absolute',inset:0,borderRadius:'50%',background:'rgba(0,245,212,0.06)',animation:'lf-ping 2.5s ease-in-out infinite'}}/>
+          )}
+        </button>
 
-      {/* ── Locate Error ── */}
-      {locateError && (
-        <div style={{position:'absolute',bottom:'140px',left:'6px',zIndex:1000,background:'rgba(0,0,0,0.92)',border:'1px solid #ff2d78',color:'#ff2d78',fontSize:'11px',padding:'8px 12px',fontFamily:'Rajdhani,sans-serif',maxWidth:'180px'}}>
-          {locateError}
-          <button onClick={()=>setLocateError(null)} style={{display:'block',marginTop:'4px',color:'#ff2d7888',fontSize:'10px',background:'none',border:'none',cursor:'pointer',padding:0}}>اغلق ×</button>
-        </div>
-      )}
+        {/* Heading badge */}
+        {isTracking && userHeading !== null && (
+          <div style={{
+            fontFamily:'Orbitron,sans-serif',fontSize:'9px',
+            color:'#00f5d488',letterSpacing:'0.1em',
+            textAlign:'center',
+          }}>
+            {Math.round(userHeading)}°
+          </div>
+        )}
+      </div>
 
       {/* ── Route Loading ── */}
       {routeLoading && (
@@ -471,7 +659,7 @@ export function ClinicMap({
 
       {/* ── Legend ── */}
       {categories.length > 0 && (
-        <div style={{position:'absolute',bottom:'20px',left:'6px',zIndex:1000,background:'rgba(5,8,15,0.88)',border:'1px solid rgba(255,255,255,0.07)',padding:'10px 14px',backdropFilter:'blur(10px)',minWidth:'150px'}}>
+        <div style={{position:'absolute',bottom:'20px',left:'92px',zIndex:1000,background:'rgba(5,8,15,0.88)',border:'1px solid rgba(255,255,255,0.07)',padding:'10px 14px',backdropFilter:'blur(10px)',minWidth:'150px'}}>
           <div style={{fontFamily:'Orbitron,sans-serif',fontSize:'9px',color:'rgba(255,255,255,0.3)',letterSpacing:'0.15em',marginBottom:'8px'}}>LEGEND</div>
           {categories.map(cat=>(
             <div key={cat.slug} style={{display:'flex',alignItems:'center',gap:'8px',marginBottom:'5px',cursor:'pointer'}} onClick={()=>onFilterChange(cat.slug)}>
