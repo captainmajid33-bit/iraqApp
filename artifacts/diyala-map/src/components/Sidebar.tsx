@@ -1,10 +1,11 @@
-import { MapItem } from "@/data/types";
-import { X, Phone, Clock, MapPin, User, Stethoscope, AlertTriangle, Navigation, XCircle, Utensils, Star, Pill, Fuel } from "lucide-react";
+import { MapItem, Category } from "@/data/types";
+import { X, Phone, Clock, MapPin, User, AlertTriangle, Navigation, XCircle, Star } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
 import { Button } from "@/components/ui/button";
 
 interface SidebarProps {
   item: MapItem | null;
+  categories: Category[];
   onClose: () => void;
   userLocation: { lat: number; lng: number } | null;
   onNavigate: (item: MapItem) => void;
@@ -20,41 +21,37 @@ function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number) {
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
 }
 
-const KIND_CONFIG = {
-  clinic:      { color: '#00f5d4', label: 'MEDICAL TARGET',   footer: 'DIYALA HEALTH DIRECTORATE' },
-  restaurant:  { color: '#ff9500', label: 'DINING TARGET',    footer: 'DIYALA DINING GUIDE' },
-  pharmacy:    { color: '#c77dff', label: 'PHARMACY TARGET',  footer: 'DIYALA PHARMACY NETWORK' },
-  gas_station: { color: '#f5c518', label: 'FUEL STATION',     footer: 'DIYALA FUEL NETWORK' },
-};
-
 function getDetails(item: MapItem): string {
   const a = item as any;
   if (a.details) return a.details;
-  if (item.kind === 'clinic')     return [a.doctor, a.specialty].filter(Boolean).join(' — ');
-  if (item.kind === 'restaurant') return [a.cuisine, a.type].filter(Boolean).join(' · ');
-  if (item.kind === 'pharmacy')   return [a.pharmacist, a.type].filter(Boolean).join(' · ');
-  if (item.kind === 'gas_station') return a.details ?? '';
-  return '';
+  if (item.kind === 'clinic')      return [a.doctor, a.specialty].filter(Boolean).join(' — ');
+  if (item.kind === 'restaurant')  return [a.cuisine, a.type].filter(Boolean).join(' · ');
+  if (item.kind === 'pharmacy')    return [a.pharmacist, a.type].filter(Boolean).join(' · ');
+  return a.details ?? '';
 }
 
-function getHeaderIcon(kind: MapItem['kind']) {
-  if (kind === 'clinic')     return Stethoscope;
-  if (kind === 'restaurant') return Utensils;
-  if (kind === 'pharmacy')   return Pill;
-  return Fuel;
-}
+// Fallback colors for known kinds when not in categories list
+const FALLBACK_COLORS: Record<string, string> = {
+  clinic:      '#00f5d4',
+  restaurant:  '#ff9500',
+  pharmacy:    '#c77dff',
+  gas_station: '#f5c518',
+};
 
-export function Sidebar({ item, onClose, userLocation, onNavigate, routeTarget, onClearRoute }: SidebarProps) {
+export function Sidebar({ item, categories, onClose, userLocation, onNavigate, routeTarget, onClearRoute }: SidebarProps) {
   if (!item) return null;
 
-  const cfg = KIND_CONFIG[item.kind] ?? KIND_CONFIG.clinic;
-  const accentColor = cfg.color;
-  const accentDim = `${accentColor}18`;
-  const isNavigating = routeTarget?.id === item.id;
-  const distanceKm = userLocation ? haversineKm(userLocation.lat, userLocation.lng, item.lat, item.lng) : null;
-  const HeaderIcon = getHeaderIcon(item.kind);
-  const details = getDetails(item);
-  const rating = (item as any).rating as number | undefined;
+  const cat = categories.find(c => c.slug === item.kind);
+  const accentColor = cat?.color ?? FALLBACK_COLORS[item.kind] ?? '#00f5d4';
+  const accentDim   = `${accentColor}18`;
+  const catLabel    = cat ? `${cat.labelEn.toUpperCase()} TARGET` : item.kind.toUpperCase().replace(/_/g, ' ');
+  const catEmoji    = cat?.icon ?? '📍';
+  const catFooter   = cat ? `DIYALA ${cat.labelEn.toUpperCase()} NETWORK` : 'DIYALA NETWORK';
+
+  const isNavigating  = routeTarget?.id === item.id;
+  const distanceKm    = userLocation ? haversineKm(userLocation.lat, userLocation.lng, item.lat, item.lng) : null;
+  const details       = getDetails(item);
+  const rating        = (item as any).rating as number | undefined;
 
   return (
     <AnimatePresence>
@@ -70,8 +67,8 @@ export function Sidebar({ item, onClose, userLocation, onNavigate, routeTarget, 
         {/* Header */}
         <div className="p-4 flex items-center justify-between shrink-0" style={{ borderBottom: `1px solid ${accentColor}30`, background: accentDim }}>
           <div className="flex items-center gap-2">
-            <HeaderIcon className="w-4 h-4" style={{ color: accentColor }} />
-            <h2 className="text-sm font-mono font-bold tracking-wider" style={{ color: accentColor }}>{cfg.label}</h2>
+            <span style={{ fontSize: "16px" }}>{catEmoji}</span>
+            <h2 className="text-sm font-mono font-bold tracking-wider" style={{ color: accentColor }}>{catLabel}</h2>
           </div>
           <button onClick={onClose} className="p-1 transition-colors rounded" style={{ color: accentColor }}
             onMouseEnter={e=>(e.currentTarget.style.background=accentDim)}
@@ -120,12 +117,10 @@ export function Sidebar({ item, onClose, userLocation, onNavigate, routeTarget, 
 
           {/* Info rows */}
           <div className="space-y-2">
-            {details && (
-              <InfoRow icon={<User/>} label="التفاصيل" value={details} color={accentColor}/>
-            )}
-            <InfoRow icon={<MapPin/>}  label="العنوان"       value={item.address} color={accentColor}/>
-            <InfoRow icon={<Phone/>}   label="الهاتف"        value={item.phone}   color={accentColor} font="font-mono"/>
-            <InfoRow icon={<Clock/>}   label="ساعات العمل"  value={item.hours}   color={accentColor} font="font-mono"/>
+            {details && <InfoRow icon={<User/>}    label="التفاصيل"      value={details}    color={accentColor}/>}
+            <InfoRow icon={<MapPin/>}  label="العنوان"        value={item.address} color={accentColor}/>
+            <InfoRow icon={<Phone/>}   label="الهاتف"         value={item.phone}   color={accentColor} font="font-mono"/>
+            <InfoRow icon={<Clock/>}   label="ساعات العمل"    value={item.hours}   color={accentColor} font="font-mono"/>
           </div>
 
           {/* Buttons */}
@@ -155,7 +150,7 @@ export function Sidebar({ item, onClose, userLocation, onNavigate, routeTarget, 
 
         <div className="p-2 text-center shrink-0" style={{ borderTop:`1px solid ${accentColor}20`, background:accentDim }}>
           <span className="text-[10px] font-mono tracking-widest" style={{color:`${accentColor}55`}}>
-            {cfg.footer} · AI SYSTEM
+            {catFooter} · AI SYSTEM
           </span>
         </div>
       </motion.aside>

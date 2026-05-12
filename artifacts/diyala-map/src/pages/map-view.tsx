@@ -1,30 +1,48 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { Header } from "@/components/Header";
 import { Sidebar } from "@/components/Sidebar";
 import { ClinicMap } from "@/components/ClinicMap";
 import { AdminModal } from "@/components/AdminModal";
-import { MapItem, FilterKind } from "@/data/types";
+import { MapItem, Category } from "@/data/types";
 
-const POLL_INTERVAL = 15_000; // 15 seconds
+const POLL_MS = 15_000;
 
 export function MapView() {
-  const [activeFilter, setActiveFilter] = useState<FilterKind>("clinic");
+  const [items, setItems] = useState<MapItem[]>([]);
+  const [categories, setCategories] = useState<Category[]>([]);
+  const [activeFilter, setActiveFilter] = useState<string>("");
+  const [loading, setLoading] = useState(true);
+
   const [selectedItem, setSelectedItem] = useState<MapItem | null>(null);
   const [userLocation, setUserLocation] = useState<{ lat: number; lng: number } | null>(null);
   const [routeTarget, setRouteTarget] = useState<MapItem | null>(null);
-
-  const adminMode = false;
   const [adminCoords, setAdminCoords] = useState<{ lat: number; lng: number } | null>(null);
 
-  const [items, setItems] = useState<MapItem[]>([]);
-  const [loading, setLoading] = useState(true);
+  const firstCatRef = useRef("");
 
-  const fetchLocations = useCallback(async () => {
+  const fetchAll = useCallback(async () => {
     try {
-      const res = await fetch("/api/locations");
-      if (!res.ok) return;
-      const data = await res.json();
-      setItems(data.map((loc: any) => ({ ...loc, kind: loc.category as FilterKind })));
+      const [locRes, catRes] = await Promise.all([
+        fetch("/api/locations"),
+        fetch("/api/categories"),
+      ]);
+      if (locRes.ok) {
+        const locs = await locRes.json();
+        setItems(locs.map((loc: any) => ({ ...loc, kind: loc.category })));
+      }
+      if (catRes.ok) {
+        const cats: Category[] = await catRes.json();
+        if (Array.isArray(cats) && cats.length > 0) {
+          // Sort alphabetically by labelEn
+          const sorted = [...cats].sort((a, b) => a.labelEn.localeCompare(b.labelEn));
+          setCategories(sorted);
+          // Set initial filter to first category once
+          if (!firstCatRef.current) {
+            firstCatRef.current = sorted[0].slug;
+            setActiveFilter(sorted[0].slug);
+          }
+        }
+      }
     } catch {
       // silent
     } finally {
@@ -32,14 +50,13 @@ export function MapView() {
     }
   }, []);
 
-  // Initial fetch + polling for real-time sync with admin changes
   useEffect(() => {
-    fetchLocations();
-    const interval = setInterval(fetchLocations, POLL_INTERVAL);
-    return () => clearInterval(interval);
-  }, [fetchLocations]);
+    fetchAll();
+    const iv = setInterval(fetchAll, POLL_MS);
+    return () => clearInterval(iv);
+  }, [fetchAll]);
 
-  const handleFilterChange = (f: FilterKind) => {
+  const handleFilterChange = (f: string) => {
     setActiveFilter(f);
     setSelectedItem(null);
     setRouteTarget(null);
@@ -51,7 +68,7 @@ export function MapView() {
   };
 
   const handleAdminDelete = useCallback(async (item: MapItem) => {
-    try { await fetch(`/api/locations/${item.id}`, { method: "DELETE" }); } catch { /* ignore */ }
+    try { await fetch(`/api/locations/${item.id}`, { method: "DELETE" }); } catch { /* */ }
     setItems(prev => prev.filter(i => i.id !== item.id));
     if (selectedItem?.id === item.id) setSelectedItem(null);
     if (routeTarget?.id === item.id) setRouteTarget(null);
@@ -71,6 +88,7 @@ export function MapView() {
 
         <ClinicMap
           items={items}
+          categories={categories}
           activeFilter={activeFilter}
           onFilterChange={handleFilterChange}
           onSelectItem={setSelectedItem}
@@ -80,13 +98,14 @@ export function MapView() {
           routeTarget={routeTarget}
           onNavigate={setRouteTarget}
           onClearRoute={() => setRouteTarget(null)}
-          adminMode={adminMode}
+          adminMode={false}
           onMapClick={(latlng) => { setAdminCoords(latlng); setSelectedItem(null); }}
           onAdminDelete={handleAdminDelete}
         />
 
         <Sidebar
           item={selectedItem}
+          categories={categories}
           onClose={() => { setSelectedItem(null); setRouteTarget(null); }}
           userLocation={userLocation}
           onNavigate={setRouteTarget}

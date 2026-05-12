@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
-import { MapItem, FilterKind } from '@/data/types';
+import { MapItem, Category } from '@/data/types';
 
 interface ClinicMapProps {
   items: MapItem[];
-  activeFilter: FilterKind;
-  onFilterChange: (f: FilterKind) => void;
+  categories: Category[];
+  activeFilter: string;
+  onFilterChange: (f: string) => void;
   onSelectItem: (item: MapItem) => void;
   selectedItem: MapItem | null;
   userLocation: { lat: number; lng: number } | null;
@@ -19,49 +20,61 @@ interface ClinicMapProps {
   onAdminDelete?: (item: MapItem) => void;
 }
 
-const COLORS: Record<FilterKind, { open: string; closed: string }> = {
-  clinic:      { open: '#00f5d4', closed: '#ff2d78' },
-  restaurant:  { open: '#ff9500', closed: '#ff2d78' },
-  pharmacy:    { open: '#c77dff', closed: '#ff2d78' },
-  gas_station: { open: '#f5c518', closed: '#ff2d78' },
+// ── Fallback colors for the 4 original kinds ──────────────────────────────────
+const FALLBACK_COLORS: Record<string, { open: string }> = {
+  clinic:      { open: '#00f5d4' },
+  restaurant:  { open: '#ff9500' },
+  pharmacy:    { open: '#c77dff' },
+  gas_station: { open: '#f5c518' },
 };
 
-// ── Icons ─────────────────────────────────────────────────────────────────────
-function makeIcon(kind: FilterKind, isOpen: boolean, selected: boolean): L.DivIcon {
-  const color = isOpen ? COLORS[kind].open : COLORS[kind].closed;
-  const size = selected ? 44 : 36;
-  const pulse = isOpen && !selected;
+function getCatColor(slug: string, catMap: Map<string, Category>): string {
+  return catMap.get(slug)?.color ?? FALLBACK_COLORS[slug]?.open ?? '#7b2ff7';
+}
 
-  const svgBody = kind === 'clinic'
-    /* stethoscope */
-    ? `<path d="M7 2v5a5 5 0 0010 0V2" stroke="${color}" stroke-width="1.8" stroke-linecap="round" fill="none"/>
-       <path d="M12 7v6" stroke="${color}" stroke-width="1.8" stroke-linecap="round"/>
-       <circle cx="12" cy="17" r="3" fill="${color}" fill-opacity="0.25" stroke="${color}" stroke-width="1.5"/>
-       <circle cx="12" cy="17" r="1.2" fill="${color}"/>`
-    : kind === 'restaurant'
-    /* fork & knife */
-    ? `<path d="M18 3v18M15 3c0 3.314 2.686 6 3 6v6" stroke="${color}" stroke-width="1.8" stroke-linecap="round"/>
-       <path d="M6 3v6.5A3.5 3.5 0 0 0 9.5 13H10v8" stroke="${color}" stroke-width="1.8" stroke-linecap="round"/>
-       <path d="M3 3v6.5A3.5 3.5 0 0 0 6.5 13" stroke="${color}" stroke-width="1.8" stroke-linecap="round"/>
-       <line x1="3" y1="8" x2="10" y2="8" stroke="${color}" stroke-width="1.5"/>`
-    : kind === 'pharmacy'
-    /* capsule */
-    ? `<rect x="8" y="3" width="8" height="18" rx="4" fill="${color}" fill-opacity="0.15" stroke="${color}" stroke-width="1.5"/>
-       <path d="M8 3h8a4 4 0 0 1 0 0v9H8V7a4 4 0 0 1 0-4z" fill="${color}" fill-opacity="0.55"/>
-       <rect x="8" y="3" width="8" height="18" rx="4" fill="none" stroke="${color}" stroke-width="1.5"/>
-       <line x1="8" y1="12" x2="16" y2="12" stroke="${color}" stroke-width="1.2"/>`
-    /* fuel pump */
-    : `<rect x="3" y="5" width="11" height="16" rx="1.5" fill="${color}" fill-opacity="0.15" stroke="${color}" stroke-width="1.5"/>
-       <rect x="5" y="8" width="7" height="4" rx="1" fill="${color}" fill-opacity="0.5"/>
-       <path d="M14 8h2a2 2 0 0 1 2 2v4a1.5 1.5 0 0 0 3 0V9l-3-3" stroke="${color}" stroke-width="1.5" stroke-linecap="round" fill="none"/>
-       <line x1="3" y1="21" x2="14" y2="21" stroke="${color}" stroke-width="1.5" stroke-linecap="round"/>`;
+// ── Static SVG bodies for original 4 kinds ───────────────────────────────────
+function getSvgBody(kind: string, color: string): string | null {
+  if (kind === 'clinic')
+    return `<path d="M7 2v5a5 5 0 0010 0V2" stroke="${color}" stroke-width="1.8" stroke-linecap="round" fill="none"/>
+            <path d="M12 7v6" stroke="${color}" stroke-width="1.8" stroke-linecap="round"/>
+            <circle cx="12" cy="17" r="3" fill="${color}" fill-opacity="0.25" stroke="${color}" stroke-width="1.5"/>
+            <circle cx="12" cy="17" r="1.2" fill="${color}"/>`;
+  if (kind === 'restaurant')
+    return `<path d="M18 3v18M15 3c0 3.314 2.686 6 3 6v6" stroke="${color}" stroke-width="1.8" stroke-linecap="round"/>
+            <path d="M6 3v6.5A3.5 3.5 0 0 0 9.5 13H10v8" stroke="${color}" stroke-width="1.8" stroke-linecap="round"/>
+            <path d="M3 3v6.5A3.5 3.5 0 0 0 6.5 13" stroke="${color}" stroke-width="1.8" stroke-linecap="round"/>
+            <line x1="3" y1="8" x2="10" y2="8" stroke="${color}" stroke-width="1.5"/>`;
+  if (kind === 'pharmacy')
+    return `<rect x="8" y="3" width="8" height="18" rx="4" fill="${color}" fill-opacity="0.15" stroke="${color}" stroke-width="1.5"/>
+            <path d="M8 3h8a4 4 0 0 1 0 0v9H8V7a4 4 0 0 1 0-4z" fill="${color}" fill-opacity="0.55"/>
+            <rect x="8" y="3" width="8" height="18" rx="4" fill="none" stroke="${color}" stroke-width="1.5"/>
+            <line x1="8" y1="12" x2="16" y2="12" stroke="${color}" stroke-width="1.2"/>`;
+  if (kind === 'gas_station')
+    return `<rect x="3" y="5" width="11" height="16" rx="1.5" fill="${color}" fill-opacity="0.15" stroke="${color}" stroke-width="1.5"/>
+            <rect x="5" y="8" width="7" height="4" rx="1" fill="${color}" fill-opacity="0.5"/>
+            <path d="M14 8h2a2 2 0 0 1 2 2v4a1.5 1.5 0 0 0 3 0V9l-3-3" stroke="${color}" stroke-width="1.5" stroke-linecap="round" fill="none"/>
+            <line x1="3" y1="21" x2="14" y2="21" stroke="${color}" stroke-width="1.5" stroke-linecap="round"/>`;
+  return null;
+}
+
+// ── Icon factory ──────────────────────────────────────────────────────────────
+function makeIcon(kind: string, catMap: Map<string, Category>, isOpen: boolean, selected: boolean): L.DivIcon {
+  const baseColor = getCatColor(kind, catMap);
+  const color     = isOpen ? baseColor : '#ff2d78';
+  const emoji     = catMap.get(kind)?.icon ?? '📍';
+  const size      = selected ? 44 : 36;
+  const pulse     = isOpen && !selected;
+  const svgBody   = getSvgBody(kind, color);
 
   return L.divIcon({
     className: '',
     html: `<div style="width:${size}px;height:${size}px;position:relative;display:flex;align-items:center;justify-content:center;">
       ${pulse ? `<div style="position:absolute;inset:0;border-radius:50%;background:${color};opacity:0.18;animation:lf-ping 2s cubic-bezier(0,0,0.2,1) infinite;"></div>` : ''}
       <div style="position:absolute;inset:0;border-radius:50%;border:2px solid ${color};box-shadow:0 0 ${selected?20:12}px ${color},0 0 ${selected?40:24}px ${color}88;"></div>
-      <svg width="15" height="15" viewBox="0 0 24 24" fill="none">${svgBody}</svg>
+      ${svgBody
+        ? `<svg width="15" height="15" viewBox="0 0 24 24" fill="none">${svgBody}</svg>`
+        : `<span style="font-size:${Math.round(size*0.4)}px;position:relative;z-index:1;line-height:1;user-select:none">${emoji}</span>`
+      }
     </div>`,
     iconSize: [size, size], iconAnchor: [size/2, size/2],
   });
@@ -87,11 +100,9 @@ function drawRoute(
   glowRef: React.MutableRefObject<L.Polyline|null>,
   lineRef: React.MutableRefObject<L.Polyline|null>,
 ) {
-  // Always clear old route first
   glowRef.current?.remove(); glowRef.current = null;
   lineRef.current?.remove(); lineRef.current = null;
   onDone(null); onLoading(true);
-
   fetch(`https://router.project-osrm.org/route/v1/driving/${userLoc.lng},${userLoc.lat};${item.lng},${item.lat}?overview=full&geometries=geojson`)
     .then(r=>r.json())
     .then(data=>{
@@ -108,27 +119,31 @@ function drawRoute(
 
 // ── Component ─────────────────────────────────────────────────────────────────
 export function ClinicMap({
-  items, activeFilter, onFilterChange,
+  items, categories, activeFilter, onFilterChange,
   onSelectItem, selectedItem,
   userLocation, onUserLocationChange,
   routeTarget, onNavigate, onClearRoute,
   adminMode = false, onMapClick, onAdminDelete,
 }: ClinicMapProps) {
   const mapContainer = useRef<HTMLDivElement>(null);
-  const mapRef = useRef<L.Map|null>(null);
-  const markersRef = useRef<{[id:number]:L.Marker}>({});
-  const userMarkerRef = useRef<L.Marker|null>(null);
-  const userCircleRef = useRef<L.Circle|null>(null);
-  const routeGlowRef = useRef<L.Polyline|null>(null);
-  const routeLineRef = useRef<L.Polyline|null>(null);
+  const mapRef       = useRef<L.Map|null>(null);
+  const markersRef   = useRef<{[id:number]:L.Marker}>({});
+  const userMarkerRef  = useRef<L.Marker|null>(null);
+  const userCircleRef  = useRef<L.Circle|null>(null);
+  const routeGlowRef   = useRef<L.Polyline|null>(null);
+  const routeLineRef   = useRef<L.Polyline|null>(null);
+  const catStyleRef    = useRef<HTMLStyleElement|null>(null);
 
-  const onSelectRef = useRef(onSelectItem);
-  const onNavigateRef = useRef(onNavigate);
-  const userLocationRef = useRef(userLocation);
-  const onMapClickRef = useRef(onMapClick);
-  const onAdminDeleteRef = useRef(onAdminDelete);
-  const adminModeRef = useRef(adminMode);
+  // Stable refs for callbacks
+  const onSelectRef          = useRef(onSelectItem);
+  const onNavigateRef        = useRef(onNavigate);
+  const userLocationRef      = useRef(userLocation);
+  const onMapClickRef        = useRef(onMapClick);
+  const onAdminDeleteRef     = useRef(onAdminDelete);
+  const adminModeRef         = useRef(adminMode);
   const locateAndNavigateRef = useRef<((item:MapItem)=>void)|null>(null);
+  // Live category map — accessed in buildPopup without closure issues
+  const catMapRef = useRef<Map<string,Category>>(new Map());
 
   useEffect(()=>{onSelectRef.current=onSelectItem;},[onSelectItem]);
   useEffect(()=>{onNavigateRef.current=onNavigate;},[onNavigate]);
@@ -137,15 +152,31 @@ export function ClinicMap({
   useEffect(()=>{onAdminDeleteRef.current=onAdminDelete;},[onAdminDelete]);
   useEffect(()=>{
     adminModeRef.current=adminMode;
-    if (mapRef.current) {
-      mapRef.current.getContainer().style.cursor = adminMode ? 'crosshair' : '';
-    }
+    if (mapRef.current) mapRef.current.getContainer().style.cursor = adminMode ? 'crosshair' : '';
   },[adminMode]);
 
-  const [locating,setLocating] = useState(false);
-  const [locateError,setLocateError] = useState<string|null>(null);
+  // Keep catMap in sync
+  useEffect(()=>{
+    catMapRef.current = new Map(categories.map(c=>[c.slug,c]));
+  },[categories]);
+
+  // Inject per-category popup CSS whenever categories change
+  useEffect(()=>{
+    if (!catStyleRef.current) {
+      catStyleRef.current = document.createElement('style');
+      document.head.appendChild(catStyleRef.current);
+    }
+    catStyleRef.current.textContent = categories.map(cat=>`
+      .cat-${cat.slug} .leaflet-popup-content-wrapper{border:1px solid ${cat.color}!important;box-shadow:0 0 20px ${cat.color}44!important;}
+    `).join('') + `
+      .cat-fallback .leaflet-popup-content-wrapper{border:1px solid #7b2ff7!important;box-shadow:0 0 20px #7b2ff744!important;}
+    `;
+  },[categories]);
+
+  const [locating,setLocating]         = useState(false);
+  const [locateError,setLocateError]   = useState<string|null>(null);
   const [routeLoading,setRouteLoading] = useState(false);
-  const [routeInfo,setRouteInfo] = useState<{distanceKm:number;durationMin:number}|null>(null);
+  const [routeInfo,setRouteInfo]       = useState<{distanceKm:number;durationMin:number}|null>(null);
 
   const clearRouteVisuals = useCallback(()=>{
     routeGlowRef.current?.remove(); routeGlowRef.current=null;
@@ -169,9 +200,9 @@ export function ClinicMap({
       },
       (err)=>{
         setLocating(false);
-        if (err.code===1) setLocateError('تم رفض صلاحية الموقع');
+        if (err.code===1)      setLocateError('تم رفض صلاحية الموقع');
         else if (err.code===2) setLocateError('تعذّر تحديد الموقع');
-        else setLocateError('انتهت مهلة تحديد الموقع');
+        else                   setLocateError('انتهت مهلة تحديد الموقع');
       },
       {enableHighAccuracy:true,timeout:10000,maximumAge:0}
     );
@@ -179,9 +210,9 @@ export function ClinicMap({
 
   useEffect(()=>{
     locateAndNavigateRef.current=(item:MapItem)=>{
-      clearRouteVisuals(); // always clear first
+      clearRouteVisuals();
       const loc=userLocationRef.current;
-      if (loc){
+      if (loc) {
         onNavigateRef.current(item);
       } else {
         locateUser((newLoc)=>{
@@ -192,7 +223,7 @@ export function ClinicMap({
     };
   },[locateUser,clearRouteVisuals]);
 
-  // Init map
+  // Init map once
   useEffect(()=>{
     if (!mapContainer.current||mapRef.current) return;
     const style=document.createElement('style');
@@ -206,10 +237,6 @@ export function ClinicMap({
       .leaflet-control-attribution{background:rgba(0,0,0,0.7)!important;color:#00f5d488!important;font-size:10px;}
       .leaflet-control-attribution a{color:#00f5d4!important;}
       .map-popup .leaflet-popup-content-wrapper{background:rgba(5,8,15,0.97)!important;border-radius:2px!important;padding:0!important;min-width:220px;}
-      .map-popup.clinic-pop  .leaflet-popup-content-wrapper{border:1px solid #00f5d4!important;box-shadow:0 0 20px #00f5d444!important;}
-      .map-popup.resto-pop   .leaflet-popup-content-wrapper{border:1px solid #ff9500!important;box-shadow:0 0 20px #ff950044!important;}
-      .map-popup.pharma-pop  .leaflet-popup-content-wrapper{border:1px solid #c77dff!important;box-shadow:0 0 20px #c77dff44!important;}
-      .map-popup.gas-pop     .leaflet-popup-content-wrapper{border:1px solid #f5c518!important;box-shadow:0 0 20px #f5c51844!important;}
       .map-popup .leaflet-popup-content{margin:0!important;width:auto!important;}
       .map-popup .leaflet-popup-tip-container{display:none;}
       .map-popup .leaflet-popup-close-button{color:#aaa!important;font-size:18px!important;top:6px!important;right:8px!important;}
@@ -219,6 +246,7 @@ export function ClinicMap({
       .popup-details-btn:hover{color:#fff;}
       .popup-delete-btn{width:100%;padding:8px 0;border:1px solid rgba(255,45,120,0.4);background:transparent;color:#ff2d78;font-family:'Rajdhani',sans-serif;font-size:12px;letter-spacing:0.06em;cursor:pointer;transition:all 0.25s;display:flex;align-items:center;justify-content:center;gap:7px;border-radius:2px;}
       .popup-delete-btn:hover{background:rgba(255,45,120,0.12);border-color:#ff2d78;}
+      .filter-tabs-bar::-webkit-scrollbar{display:none;}
     `;
     document.head.appendChild(style);
     mapRef.current=L.map(mapContainer.current,{center:[33.7451,44.6488],zoom:13,zoomControl:true});
@@ -227,38 +255,35 @@ export function ClinicMap({
       subdomains:'abcd',maxZoom:20,
     }).addTo(mapRef.current);
     mapRef.current.on('click',(e:L.LeafletMouseEvent)=>{
-      if (adminModeRef.current) {
-        onMapClickRef.current?.({lat:e.latlng.lat,lng:e.latlng.lng});
-      }
+      if (adminModeRef.current) onMapClickRef.current?.({lat:e.latlng.lat,lng:e.latlng.lng});
     });
-    return ()=>{mapRef.current?.remove();mapRef.current=null;style.remove();};
+    return ()=>{
+      mapRef.current?.remove(); mapRef.current=null;
+      style.remove();
+      catStyleRef.current?.remove(); catStyleRef.current=null;
+    };
   },[]);
 
-  // Build popup DOM
+  // Build popup DOM — reads catMapRef so no stale closure
   const buildPopup = useCallback((item: MapItem)=>{
-    const color = item.status==='مفتوح' ? COLORS[item.kind].open : COLORS[item.kind].closed;
-    const kindLabel = item.kind==='clinic'?'🏥 MEDICAL'
-      :item.kind==='restaurant'?'🍽️ DINING'
-      :item.kind==='pharmacy'?'💊 PHARMACY'
-      :'⛽ FUEL';
+    const cat   = catMapRef.current.get(item.kind);
+    const base  = cat?.color ?? FALLBACK_COLORS[item.kind]?.open ?? '#7b2ff7';
+    const color = item.status==='مفتوح' ? base : '#ff2d78';
+    const emoji = cat?.icon ?? '📍';
+    const labelEn = cat?.labelEn?.toUpperCase() ?? item.kind.toUpperCase().replace(/_/g,' ');
 
-    const sub = 'details' in item && (item as any).details
-      ? (item as any).details
-      : item.kind==='clinic' && 'specialty' in item
-      ? `${(item as any).specialty}`
-      : item.kind==='restaurant' && 'cuisine' in item
-      ? `${(item as any).cuisine} · ${(item as any).type}`
-      : item.kind==='pharmacy' && 'type' in item
-      ? `${(item as any).type}`
-      : '';
+    const sub = (item as any).details
+      ?? (item.kind==='clinic' ? [(item as any).doctor,(item as any).specialty].filter(Boolean).join(' — ') : '')
+      ?? (item.kind==='restaurant' ? [(item as any).cuisine,(item as any).type].filter(Boolean).join(' · ') : '')
+      ?? '';
 
-    const stars = item.kind==='restaurant' && 'rating' in item
+    const stars = typeof (item as any).rating === 'number' && (item as any).rating > 0
       ? `<div style="color:#f5c518;font-size:12px;margin-bottom:2px;">${'★'.repeat((item as any).rating)}${'☆'.repeat(5-(item as any).rating)}</div>` : '';
 
     const el=document.createElement('div');
     el.style.cssText='padding:14px 16px 12px;direction:rtl;min-width:215px;';
     el.innerHTML=`
-      <div style="font-family:Orbitron,sans-serif;font-size:9px;color:${color}88;letter-spacing:0.12em;margin-bottom:4px;">${kindLabel} · ID:${item.id.toString().padStart(4,'0')}</div>
+      <div style="font-family:Orbitron,sans-serif;font-size:9px;color:${color}88;letter-spacing:0.12em;margin-bottom:4px;">${emoji} ${labelEn} · ID:${item.id.toString().padStart(4,'0')}</div>
       <div style="font-family:Rajdhani,sans-serif;font-size:16px;font-weight:700;color:#e8f8f5;line-height:1.2;margin-bottom:5px;">${item.name}</div>
       ${stars}
       <div style="display:flex;align-items:center;gap:6px;margin-bottom:2px;">
@@ -281,24 +306,20 @@ export function ClinicMap({
     el.appendChild(navBtn);
     el.appendChild(detailsBtn);
 
-    // Admin delete button
     if (adminModeRef.current) {
       const sep=document.createElement('div');
       sep.style.cssText='height:1px;background:rgba(255,45,120,0.2);margin:8px 0 6px;';
       el.appendChild(sep);
-
       const deleteBtn=document.createElement('button');
       deleteBtn.className='popup-delete-btn';
       deleteBtn.innerHTML=`<svg width="13" height="13" viewBox="0 0 24 24" fill="none"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6" stroke="#ff2d78" stroke-width="1.8" stroke-linecap="round"/><path d="M10 11v6M14 11v6" stroke="#ff2d78" stroke-width="1.6" stroke-linecap="round"/></svg>حذف هذا الموقع`;
-
       let confirmed=false;
       deleteBtn.addEventListener('click',()=>{
-        if (!confirmed) {
+        if (!confirmed){
           confirmed=true;
           deleteBtn.innerHTML=`<svg width="13" height="13" viewBox="0 0 24 24" fill="none"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6" stroke="#ff2d78" stroke-width="1.8" stroke-linecap="round"/></svg>تأكيد الحذف؟`;
           deleteBtn.style.background='rgba(255,45,120,0.2)';
-          deleteBtn.style.boxShadow='0 0 12px rgba(255,45,120,0.4)';
-          setTimeout(()=>{ confirmed=false; deleteBtn.innerHTML=`<svg width="13" height="13" viewBox="0 0 24 24" fill="none"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6" stroke="#ff2d78" stroke-width="1.8" stroke-linecap="round"/><path d="M10 11v6M14 11v6" stroke="#ff2d78" stroke-width="1.6" stroke-linecap="round"/></svg>حذف هذا الموقع`; deleteBtn.style.background='transparent'; deleteBtn.style.boxShadow='none'; },3000);
+          setTimeout(()=>{confirmed=false;deleteBtn.innerHTML=`<svg width="13" height="13" viewBox="0 0 24 24" fill="none"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6" stroke="#ff2d78" stroke-width="1.8" stroke-linecap="round"/><path d="M10 11v6M14 11v6" stroke="#ff2d78" stroke-width="1.6" stroke-linecap="round"/></svg>حذف هذا الموقع`;deleteBtn.style.background='transparent';},3000);
         } else {
           onAdminDeleteRef.current?.(item);
           mapRef.current?.closePopup();
@@ -306,34 +327,35 @@ export function ClinicMap({
       });
       el.appendChild(deleteBtn);
     }
-
     return el;
   },[]);
 
-  // Sync markers
+  // Sync markers whenever items / activeFilter / selectedItem changes
   useEffect(()=>{
     if (!mapRef.current) return;
     Object.values(markersRef.current).forEach(m=>m.remove());
     markersRef.current={};
-    items.filter(i=>i.kind===activeFilter && i.status!=='معطّل').forEach(item=>{
-      const isOpen=item.status==='مفتوح';
-      const isSelected=selectedItem?.id===item.id;
-      const popupClass=`map-popup ${item.kind==='clinic'?'clinic-pop':item.kind==='restaurant'?'resto-pop':item.kind==='pharmacy'?'pharma-pop':'gas-pop'}`;
-      const marker=L.marker([item.lat,item.lng],{icon:makeIcon(item.kind,isOpen,isSelected)}).addTo(mapRef.current!);
-      marker.bindPopup(L.popup({className:popupClass,offset:[0,-8],closeButton:true,autoClose:true,autoPan:true}).setContent(buildPopup(item)));
-      marker.on('click',()=>{marker.openPopup();mapRef.current?.flyTo([item.lat,item.lng],15,{duration:0.8});});
-      markersRef.current[item.id]=marker;
-    });
+    items
+      .filter(i=>i.kind===activeFilter && i.status!=='معطّل')
+      .forEach(item=>{
+        const isOpen    = item.status==='مفتوح';
+        const isSelected= selectedItem?.id===item.id;
+        const popupClass= `map-popup cat-${item.kind}`;
+        const marker    = L.marker([item.lat,item.lng],{icon:makeIcon(item.kind,catMapRef.current,isOpen,isSelected)}).addTo(mapRef.current!);
+        marker.bindPopup(L.popup({className:popupClass,offset:[0,-8],closeButton:true,autoClose:true,autoPan:true}).setContent(buildPopup(item)));
+        marker.on('click',()=>{marker.openPopup();mapRef.current?.flyTo([item.lat,item.lng],15,{duration:0.8});});
+        markersRef.current[item.id]=marker;
+      });
   },[items,activeFilter,selectedItem,buildPopup]);
 
-  // Update selected icon
+  // Update selected icon without full re-render
   useEffect(()=>{
     items.filter(i=>i.kind===activeFilter && i.status!=='معطّل').forEach(item=>{
-      markersRef.current[item.id]?.setIcon(makeIcon(item.kind,item.status==='مفتوح',selectedItem?.id===item.id));
+      markersRef.current[item.id]?.setIcon(makeIcon(item.kind,catMapRef.current,item.status==='مفتوح',selectedItem?.id===item.id));
     });
   },[selectedItem,items,activeFilter]);
 
-  // Draw route (clears old one first)
+  // Draw route
   useEffect(()=>{
     clearRouteVisuals();
     if (!routeTarget||!userLocation||!mapRef.current) return;
@@ -342,35 +364,59 @@ export function ClinicMap({
 
   const handleCancelRoute = () => { clearRouteVisuals(); onClearRoute(); };
 
-  const tabs = [
-    {kind:'clinic'       as FilterKind, labelEn:'MEDICAL',   label:'الأطباء',    emoji:'🏥'},
-    {kind:'restaurant'   as FilterKind, labelEn:'DINING',    label:'المطاعم',    emoji:'🍽️'},
-    {kind:'pharmacy'     as FilterKind, labelEn:'PHARMACY',  label:'الصيدليات',  emoji:'💊'},
-    {kind:'gas_station'  as FilterKind, labelEn:'FUEL',      label:'محطات الوقود', emoji:'⛽'},
-  ];
-
+  // ── Render ────────────────────────────────────────────────────────────────
   return (
     <div className="relative w-full h-full">
       <div ref={mapContainer} className="absolute inset-0" style={{zIndex:0}} />
 
-      {/* ── Filter Tabs ── */}
-      <div style={{position:'absolute',top:'12px',left:'50%',transform:'translateX(-50%)',zIndex:1000,display:'flex',border:'1px solid rgba(255,255,255,0.1)',backdropFilter:'blur(14px)',boxShadow:'0 4px 32px rgba(0,0,0,0.8)'}}>
-        {tabs.map(tab=>{
-          const active=activeFilter===tab.kind;
-          const c=COLORS[tab.kind].open;
-          const count=items.filter(i=>i.kind===tab.kind).length;
-          return (
-            <button key={tab.kind} onClick={()=>onFilterChange(tab.kind)}
-              style={{padding:'8px 18px',background:active?`${c}18`:'rgba(5,8,15,0.92)',border:'none',borderBottom:active?`2px solid ${c}`:'2px solid transparent',color:active?c:'#ffffff44',fontFamily:'Orbitron,sans-serif',fontSize:'10px',letterSpacing:'0.1em',cursor:'pointer',transition:'all 0.2s',display:'flex',flexDirection:'column',alignItems:'center',gap:'3px',minWidth:'100px',boxShadow:active?`inset 0 0 20px ${c}18`:'none'}}>
-              <span style={{fontSize:'13px'}}>{tab.emoji}</span>
-              <span>{tab.labelEn}</span>
-              <span style={{fontSize:'11px',fontFamily:'Rajdhani,sans-serif',opacity:0.8}}>{tab.label} ({count})</span>
-            </button>
-          );
-        })}
+      {/* ── Filter Tabs — scrollable, unlimited categories ── */}
+      <div
+        className="filter-tabs-bar"
+        style={{
+          position:'absolute',top:'12px',left:'50%',transform:'translateX(-50%)',
+          zIndex:1000,display:'flex',maxWidth:'calc(100vw - 24px)',
+          overflowX:'auto',scrollbarWidth:'none',msOverflowStyle:'none',
+          border:'1px solid rgba(255,255,255,0.1)',
+          backdropFilter:'blur(14px)',boxShadow:'0 4px 32px rgba(0,0,0,0.8)',
+        } as React.CSSProperties}
+      >
+        {categories.length === 0
+          ? /* Skeleton while loading */
+            [1,2,3,4].map(n=>(
+              <div key={n} style={{width:'100px',height:'72px',background:'rgba(5,8,15,0.92)',borderBottom:'2px solid transparent',flexShrink:0,display:'flex',alignItems:'center',justifyContent:'center'}}>
+                <div style={{width:'60px',height:'10px',background:'rgba(255,255,255,0.06)',borderRadius:'2px'}}/>
+              </div>
+            ))
+          : categories.map(cat=>{
+              const active = activeFilter===cat.slug;
+              const c = active ? cat.color : 'rgba(255,255,255,0.35)';
+              const count = items.filter(i=>i.kind===cat.slug && i.status!=='معطّل').length;
+              return (
+                <button key={cat.slug} onClick={()=>onFilterChange(cat.slug)}
+                  style={{
+                    padding:'8px 16px',
+                    background:active?`${cat.color}18`:'rgba(5,8,15,0.92)',
+                    border:'none',
+                    borderBottom:active?`2px solid ${cat.color}`:'2px solid transparent',
+                    color:c,
+                    fontFamily:'Orbitron,sans-serif',fontSize:'10px',letterSpacing:'0.1em',
+                    cursor:'pointer',transition:'all 0.2s',
+                    display:'flex',flexDirection:'column',alignItems:'center',gap:'3px',
+                    minWidth:'90px',flexShrink:0,
+                    boxShadow:active?`inset 0 0 20px ${cat.color}18`:'none',
+                  }}>
+                  <span style={{fontSize:'15px'}}>{cat.icon}</span>
+                  <span style={{whiteSpace:'nowrap'}}>{cat.labelEn.toUpperCase()}</span>
+                  <span style={{fontSize:'11px',fontFamily:'Rajdhani,sans-serif',opacity:0.8,whiteSpace:'nowrap'}}>
+                    {cat.labelAr} ({count})
+                  </span>
+                </button>
+              );
+            })
+        }
       </div>
 
-      {/* ── Cancel Route Button (always visible when route active) ── */}
+      {/* ── Cancel Route ── */}
       {(routeTarget || routeInfo) && (
         <button onClick={handleCancelRoute}
           style={{position:'absolute',top:'12px',right:'12px',zIndex:1000,padding:'9px 16px',background:'rgba(255,45,120,0.12)',border:'1px solid #ff2d78',color:'#ff2d78',fontFamily:'Orbitron,sans-serif',fontSize:'10px',letterSpacing:'0.1em',cursor:'pointer',display:'flex',alignItems:'center',gap:'8px',boxShadow:'0 0 16px rgba(255,45,120,0.3)',backdropFilter:'blur(10px)',transition:'all 0.2s'}}
@@ -408,28 +454,30 @@ export function ClinicMap({
 
       {/* ── Route Info Banner ── */}
       {routeInfo && !routeLoading && (
-        <div style={{position:'absolute',bottom:'24px',left:'50%',transform:'translateX(-50%)',zIndex:1000,background:'rgba(5,8,15,0.95)',border:'1px solid #f5c518',color:'#f5c518',padding:'10px 20px',fontFamily:'Orbitron,sans-serif',fontSize:'11px',letterSpacing:'0.08em',boxShadow:'0 0 24px #f5c51866',display:'flex',gap:'20px',alignItems:'center'}}>
-          <span><div style={{opacity:0.55,fontSize:'9px',marginBottom:'2px'}}>DISTANCE</div>{routeInfo.distanceKm.toFixed(1)} كم</span>
-          <div style={{width:'1px',height:'28px',background:'#f5c51844'}}/>
-          <span><div style={{opacity:0.55,fontSize:'9px',marginBottom:'2px'}}>ETA</div>{Math.ceil(routeInfo.durationMin)} دقيقة</span>
+        <div style={{position:'absolute',bottom:'20px',left:'50%',transform:'translateX(-50%)',zIndex:1000,background:'rgba(5,8,15,0.96)',border:'1px solid #f5c518',color:'#f5c518',padding:'10px 24px',fontFamily:'Orbitron,sans-serif',fontSize:'11px',letterSpacing:'0.1em',boxShadow:'0 0 24px #f5c51844',display:'flex',gap:'24px',alignItems:'center',backdropFilter:'blur(10px)'}}>
+          <span>🛣️ {routeInfo.distanceKm.toFixed(1)} كم</span>
+          <span>⏱ {Math.round(routeInfo.durationMin)} دقيقة</span>
         </div>
       )}
 
       {/* ── Legend ── */}
-      <div style={{position:'absolute',bottom:'24px',left:'46px',zIndex:1000,background:'rgba(0,0,0,0.87)',border:'1px solid rgba(255,255,255,0.1)',padding:'13px 16px',backdropFilter:'blur(8px)',fontFamily:'Rajdhani,sans-serif'}}>
-        <div style={{color:'#ffffff44',fontSize:'10px',letterSpacing:'0.15em',borderBottom:'1px solid rgba(255,255,255,0.08)',paddingBottom:'8px',marginBottom:'10px'}}>LEGEND</div>
-        {(activeFilter==='clinic'
-          ? [{color:'#00f5d4',label:'عيادة مفتوحة'},{color:'#ff2d78',label:'عيادة مغلقة'}]
-          : activeFilter==='restaurant'
-          ? [{color:'#ff9500',label:'مطعم مفتوح'},{color:'#ff2d78',label:'مطعم مغلق'}]
-          : [{color:'#c77dff',label:'صيدلية مفتوحة'},{color:'#ff2d78',label:'صيدلية مغلقة'}]
-        ).concat([{color:'#f5c518',label:'موقعك / المسار'}]).map(({color,label})=>(
-          <div key={label} style={{display:'flex',alignItems:'center',gap:'10px',marginBottom:'7px'}}>
-            <div style={{width:'10px',height:'10px',borderRadius:'50%',background:color,boxShadow:`0 0 7px ${color}`,flexShrink:0}}/>
-            <span style={{color,fontSize:'12px'}}>{label}</span>
+      {categories.length > 0 && (
+        <div style={{position:'absolute',bottom:'20px',left:'6px',zIndex:1000,background:'rgba(5,8,15,0.88)',border:'1px solid rgba(255,255,255,0.07)',padding:'10px 14px',backdropFilter:'blur(10px)',minWidth:'150px'}}>
+          <div style={{fontFamily:'Orbitron,sans-serif',fontSize:'9px',color:'rgba(255,255,255,0.3)',letterSpacing:'0.15em',marginBottom:'8px'}}>LEGEND</div>
+          {categories.map(cat=>(
+            <div key={cat.slug} style={{display:'flex',alignItems:'center',gap:'8px',marginBottom:'5px',cursor:'pointer'}} onClick={()=>onFilterChange(cat.slug)}>
+              <div style={{width:'8px',height:'8px',borderRadius:'50%',background:cat.color,boxShadow:`0 0 6px ${cat.color}`,flexShrink:0}}/>
+              <span style={{fontFamily:'Rajdhani,sans-serif',fontSize:'12px',color:activeFilter===cat.slug?cat.color:'rgba(255,255,255,0.55)',transition:'color 0.2s'}}>
+                {cat.icon} {cat.labelAr}
+              </span>
+            </div>
+          ))}
+          <div style={{display:'flex',alignItems:'center',gap:'8px',marginTop:'6px',paddingTop:'6px',borderTop:'1px solid rgba(255,255,255,0.07)'}}>
+            <div style={{width:'8px',height:'8px',borderRadius:'50%',background:'#f5c518',boxShadow:'0 0 6px #f5c518',flexShrink:0}}/>
+            <span style={{fontFamily:'Rajdhani,sans-serif',fontSize:'12px',color:'rgba(255,255,255,0.45)'}}>موقعك / المسار</span>
           </div>
-        ))}
-      </div>
+        </div>
+      )}
     </div>
   );
 }

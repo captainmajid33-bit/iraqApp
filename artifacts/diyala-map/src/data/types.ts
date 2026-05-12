@@ -1,7 +1,31 @@
-import { Clinic } from './clinics';
-import { Restaurant } from './restaurants';
-import { Pharmacy } from './pharmacies';
-import { GasStation } from './gas_stations';
+export type FilterKind = string;
 
-export type MapItem = Clinic | Restaurant | Pharmacy | GasStation;
-export type FilterKind = 'clinic' | 'restaurant' | 'pharmacy' | 'gas_station';
+export interface MapItem {
+  id: number;
+  kind: string;
+  category: string;
+  name: string;
+  details?: string;
+  address: string;
+  phone: string;
+  hours: string;
+  status: string;
+  rating?: number | null;
+  lat: number;
+  lng: number;
+  // legacy static-data fields kept for compat
+  doctor?: string;
+  specialty?: string;
+  cuisine?: string;
+  type?: string;
+  pharmacist?: string;
+}
+
+export interface Category {
+  id: number;
+  slug: string;
+  labelAr: string;
+  labelEn: string;
+  color: string;
+  icon: string;
+}
