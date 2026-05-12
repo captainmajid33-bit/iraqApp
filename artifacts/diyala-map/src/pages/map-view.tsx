@@ -4,9 +4,10 @@ import { Sidebar } from "@/components/Sidebar";
 import { ClinicMap } from "@/components/ClinicMap";
 import { clinics } from "@/data/clinics";
 import { restaurants } from "@/data/restaurants";
+import { pharmacies } from "@/data/pharmacies";
 import { MapItem, FilterKind } from "@/data/types";
 
-const allItems: MapItem[] = [...clinics, ...restaurants];
+const allItems: MapItem[] = [...clinics, ...restaurants, ...pharmacies];
 
 export function MapView() {
   const [activeFilter, setActiveFilter] = useState<FilterKind>('clinic');
@@ -20,12 +21,10 @@ export function MapView() {
     setRouteTarget(null);
   };
 
-  const handleClearRoute = () => setRouteTarget(null);
-
   return (
-    <div className="flex flex-col h-screen w-full bg-background overflow-hidden dark scanline" dir="rtl">
+    <div className="flex flex-col h-screen w-full bg-background overflow-hidden dark" dir="rtl">
       <Header />
-      <main className="flex-1 relative flex">
+      <main className="flex-1 relative flex overflow-hidden">
         <ClinicMap
           items={allItems}
           activeFilter={activeFilter}
@@ -36,15 +35,15 @@ export function MapView() {
           onUserLocationChange={setUserLocation}
           routeTarget={routeTarget}
           onNavigate={setRouteTarget}
-          onClearRoute={handleClearRoute}
+          onClearRoute={() => setRouteTarget(null)}
         />
         <Sidebar
           item={selectedItem}
-          onClose={() => { setSelectedItem(null); handleClearRoute(); }}
+          onClose={() => { setSelectedItem(null); setRouteTarget(null); }}
           userLocation={userLocation}
           onNavigate={setRouteTarget}
           routeTarget={routeTarget}
-          onClearRoute={handleClearRoute}
+          onClearRoute={() => setRouteTarget(null)}
         />
       </main>
     </div>

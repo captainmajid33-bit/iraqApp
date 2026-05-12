@@ -16,38 +16,38 @@ interface ClinicMapProps {
   onClearRoute: () => void;
 }
 
-// ── Marker icons ─────────────────────────────────────────────────────────────
-function clinicIcon(isOpen: boolean, selected: boolean): L.DivIcon {
-  const color = isOpen ? '#00f5d4' : '#ff2d78';
-  const size = selected ? 44 : 36;
-  return L.divIcon({
-    className: '',
-    html: `<div style="width:${size}px;height:${size}px;position:relative;display:flex;align-items:center;justify-content:center;">
-      ${isOpen && !selected ? `<div style="position:absolute;inset:0;border-radius:50%;background:${color};opacity:0.2;animation:lf-ping 2s cubic-bezier(0,0,0.2,1) infinite;"></div>` : ''}
-      <div style="position:absolute;inset:0;border-radius:50%;border:2px solid ${color};box-shadow:0 0 ${selected?20:12}px ${color},0 0 ${selected?40:24}px ${color}88;"></div>
-      <svg width="15" height="15" viewBox="0 0 24 24" fill="none">
-        <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2z" fill="${color}" opacity="0.3"/>
-        <path d="M13 7h-2v4H7v2h4v4h2v-4h4v-2h-4V7z" fill="${color}"/>
-      </svg>
-    </div>`,
-    iconSize: [size, size], iconAnchor: [size/2, size/2],
-  });
-}
+const COLORS: Record<FilterKind, { open: string; closed: string }> = {
+  clinic:     { open: '#00f5d4', closed: '#ff2d78' },
+  restaurant: { open: '#ff9500', closed: '#ff2d78' },
+  pharmacy:   { open: '#c77dff', closed: '#ff2d78' },
+};
 
-function restaurantIcon(isOpen: boolean, selected: boolean): L.DivIcon {
-  const color = isOpen ? '#ff9500' : '#ff2d78';
+// ── Icons ─────────────────────────────────────────────────────────────────────
+function makeIcon(kind: FilterKind, isOpen: boolean, selected: boolean): L.DivIcon {
+  const color = isOpen ? COLORS[kind].open : COLORS[kind].closed;
   const size = selected ? 44 : 36;
+  const pulse = isOpen && !selected;
+
+  const svgBody = kind === 'clinic'
+    ? `<path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2z" fill="${color}" opacity="0.3"/>
+       <path d="M13 7h-2v4H7v2h4v4h2v-4h4v-2h-4V7z" fill="${color}"/>`
+    : kind === 'restaurant'
+    ? `<path d="M18 3v18M15 3c0 3.314 2.686 6 3 6v6" stroke="${color}" stroke-width="1.8" stroke-linecap="round"/>
+       <path d="M6 3v6.5A3.5 3.5 0 0 0 9.5 13H10v8" stroke="${color}" stroke-width="1.8" stroke-linecap="round"/>
+       <path d="M3 3v6.5A3.5 3.5 0 0 0 6.5 13" stroke="${color}" stroke-width="1.8" stroke-linecap="round"/>
+       <line x1="3" y1="8" x2="10" y2="8" stroke="${color}" stroke-width="1.5"/>`
+    /* pharmacy */
+    : `<rect x="9" y="3" width="6" height="18" rx="1.5" fill="${color}" opacity="0.35"/>
+       <rect x="3" y="9" width="18" height="6" rx="1.5" fill="${color}" opacity="0.35"/>
+       <rect x="10.5" y="4.5" width="3" height="15" rx="1" fill="${color}"/>
+       <rect x="4.5" y="10.5" width="15" height="3" rx="1" fill="${color}"/>`;
+
   return L.divIcon({
     className: '',
     html: `<div style="width:${size}px;height:${size}px;position:relative;display:flex;align-items:center;justify-content:center;">
-      ${isOpen && !selected ? `<div style="position:absolute;inset:0;border-radius:50%;background:${color};opacity:0.2;animation:lf-ping 2s cubic-bezier(0,0,0.2,1) infinite;"></div>` : ''}
+      ${pulse ? `<div style="position:absolute;inset:0;border-radius:50%;background:${color};opacity:0.18;animation:lf-ping 2s cubic-bezier(0,0,0.2,1) infinite;"></div>` : ''}
       <div style="position:absolute;inset:0;border-radius:50%;border:2px solid ${color};box-shadow:0 0 ${selected?20:12}px ${color},0 0 ${selected?40:24}px ${color}88;"></div>
-      <svg width="15" height="15" viewBox="0 0 24 24" fill="none">
-        <path d="M18 3v18M15 3c0 3.314 2.686 6 3 6v6" stroke="${color}" stroke-width="1.8" stroke-linecap="round"/>
-        <path d="M6 3v6.5A3.5 3.5 0 0 0 9.5 13H10v8" stroke="${color}" stroke-width="1.8" stroke-linecap="round"/>
-        <path d="M3 3v6.5A3.5 3.5 0 0 0 6.5 13" stroke="${color}" stroke-width="1.8" stroke-linecap="round"/>
-        <line x1="3" y1="8" x2="10" y2="8" stroke="${color}" stroke-width="1.5"/>
-      </svg>
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none">${svgBody}</svg>
     </div>`,
     iconSize: [size, size], iconAnchor: [size/2, size/2],
   });
@@ -73,9 +73,11 @@ function drawRoute(
   glowRef: React.MutableRefObject<L.Polyline|null>,
   lineRef: React.MutableRefObject<L.Polyline|null>,
 ) {
+  // Always clear old route first
   glowRef.current?.remove(); glowRef.current = null;
   lineRef.current?.remove(); lineRef.current = null;
   onDone(null); onLoading(true);
+
   fetch(`https://router.project-osrm.org/route/v1/driving/${userLoc.lng},${userLoc.lat};${item.lng},${item.lat}?overview=full&geometries=geojson`)
     .then(r=>r.json())
     .then(data=>{
@@ -119,6 +121,12 @@ export function ClinicMap({
   const [routeLoading,setRouteLoading] = useState(false);
   const [routeInfo,setRouteInfo] = useState<{distanceKm:number;durationMin:number}|null>(null);
 
+  const clearRouteVisuals = useCallback(()=>{
+    routeGlowRef.current?.remove(); routeGlowRef.current=null;
+    routeLineRef.current?.remove(); routeLineRef.current=null;
+    setRouteInfo(null);
+  },[]);
+
   const locateUser = useCallback((afterLocate?:(loc:{lat:number;lng:number})=>void)=>{
     if (!navigator.geolocation){setLocateError('الجهاز لا يدعم تحديد الموقع');return;}
     setLocating(true); setLocateError(null);
@@ -145,6 +153,7 @@ export function ClinicMap({
 
   useEffect(()=>{
     locateAndNavigateRef.current=(item:MapItem)=>{
+      clearRouteVisuals(); // always clear first
       const loc=userLocationRef.current;
       if (loc){
         onNavigateRef.current(item);
@@ -155,7 +164,7 @@ export function ClinicMap({
         });
       }
     };
-  },[locateUser]);
+  },[locateUser,clearRouteVisuals]);
 
   // Init map
   useEffect(()=>{
@@ -166,17 +175,18 @@ export function ClinicMap({
       @keyframes lf-spin{to{transform:rotate(360deg);}}
       .leaflet-container{background:#0a0d14!important;font-family:'Rajdhani',sans-serif;}
       .leaflet-tile-pane{filter:brightness(0.9);}
-      .leaflet-control-zoom a{background:#0d1117!important;color:#00f5d4!important;border-color:#00f5d4!important;font-family:'Orbitron',sans-serif;box-shadow:0 0 8px #00f5d422;}
-      .leaflet-control-zoom a:hover{background:#00f5d422!important;box-shadow:0 0 16px #00f5d4!important;}
+      .leaflet-control-zoom a{background:#0d1117!important;color:#00f5d4!important;border-color:#00f5d4!important;font-family:'Orbitron',sans-serif;}
+      .leaflet-control-zoom a:hover{background:#00f5d422!important;}
       .leaflet-control-attribution{background:rgba(0,0,0,0.7)!important;color:#00f5d488!important;font-size:10px;}
       .leaflet-control-attribution a{color:#00f5d4!important;}
       .map-popup .leaflet-popup-content-wrapper{background:rgba(5,8,15,0.97)!important;border-radius:2px!important;padding:0!important;min-width:220px;}
-      .map-popup.clinic-pop .leaflet-popup-content-wrapper{border:1px solid #00f5d4!important;box-shadow:0 0 20px #00f5d444,0 0 40px #00f5d422!important;}
-      .map-popup.resto-pop .leaflet-popup-content-wrapper{border:1px solid #ff9500!important;box-shadow:0 0 20px #ff950044,0 0 40px #ff950022!important;}
+      .map-popup.clinic-pop .leaflet-popup-content-wrapper{border:1px solid #00f5d4!important;box-shadow:0 0 20px #00f5d444!important;}
+      .map-popup.resto-pop  .leaflet-popup-content-wrapper{border:1px solid #ff9500!important;box-shadow:0 0 20px #ff950044!important;}
+      .map-popup.pharma-pop .leaflet-popup-content-wrapper{border:1px solid #c77dff!important;box-shadow:0 0 20px #c77dff44!important;}
       .map-popup .leaflet-popup-content{margin:0!important;width:auto!important;}
       .map-popup .leaflet-popup-tip-container{display:none;}
       .map-popup .leaflet-popup-close-button{color:#aaa!important;font-size:18px!important;top:6px!important;right:8px!important;}
-      .popup-nav-btn{width:100%;padding:9px 0;margin-top:10px;background:rgba(245,197,24,0.1);border:1px solid #f5c518;color:#f5c518;font-family:'Orbitron',monospace;font-size:11px;letter-spacing:0.08em;cursor:pointer;transition:all 0.2s;display:flex;align-items:center;justify-content:center;gap:7px;box-shadow:0 0 10px rgba(245,197,24,0.2);}
+      .popup-nav-btn{width:100%;padding:9px 0;margin-top:10px;background:rgba(245,197,24,0.1);border:1px solid #f5c518;color:#f5c518;font-family:'Orbitron',monospace;font-size:11px;letter-spacing:0.08em;cursor:pointer;transition:all 0.2s;display:flex;align-items:center;justify-content:center;gap:7px;}
       .popup-nav-btn:hover{background:rgba(245,197,24,0.22);box-shadow:0 0 18px rgba(245,197,24,0.45);}
       .popup-details-btn{width:100%;padding:7px 0;border:none;background:transparent;color:#aaa;font-family:'Rajdhani',sans-serif;font-size:12px;letter-spacing:0.06em;cursor:pointer;transition:all 0.2s;border-top:1px solid rgba(255,255,255,0.06);margin-top:4px;}
       .popup-details-btn:hover{color:#fff;}
@@ -190,33 +200,31 @@ export function ClinicMap({
     return ()=>{mapRef.current?.remove();mapRef.current=null;style.remove();};
   },[]);
 
-  // Build popup
+  // Build popup DOM
   const buildPopup = useCallback((item: MapItem)=>{
-    const isClinic = item.kind==='clinic';
-    const accentColor = isClinic ? '#00f5d4' : '#ff9500';
-    const isOpen = item.status==='مفتوح';
-    const statusColor = isOpen ? accentColor : '#ff2d78';
+    const color = item.status==='مفتوح' ? COLORS[item.kind].open : COLORS[item.kind].closed;
+    const kindLabel = item.kind==='clinic'?'🏥 MEDICAL':item.kind==='restaurant'?'🍽️ DINING':'💊 PHARMACY';
+
+    const sub = item.kind==='clinic' && 'specialty' in item
+      ? `${(item as any).specialty}`
+      : item.kind==='restaurant' && 'cuisine' in item
+      ? `${(item as any).cuisine} · ${(item as any).type}`
+      : item.kind==='pharmacy' && 'type' in item
+      ? `${(item as any).type}`
+      : '';
+
+    const stars = item.kind==='restaurant' && 'rating' in item
+      ? `<div style="color:#f5c518;font-size:12px;margin-bottom:2px;">${'★'.repeat((item as any).rating)}${'☆'.repeat(5-(item as any).rating)}</div>` : '';
 
     const el=document.createElement('div');
     el.style.cssText='padding:14px 16px 12px;direction:rtl;min-width:215px;';
-
-    const sub = isClinic
-      ? `${'specialty' in item ? item.specialty : ''} · ${'doctor' in item ? item.doctor : ''}`
-      : `${'cuisine' in item ? item.cuisine : ''} · ${'type' in item ? item.type : ''}`;
-
-    const stars = !isClinic && 'rating' in item
-      ? `<div style="color:#f5c518;font-size:13px;margin-bottom:3px;">${'★'.repeat(item.rating as number)}${'☆'.repeat(5-(item.rating as number))}</div>`
-      : '';
-
     el.innerHTML=`
-      <div style="font-family:Orbitron,sans-serif;font-size:9px;color:${accentColor}88;letter-spacing:0.12em;margin-bottom:4px;">
-        ${isClinic?'🏥 MEDICAL':'🍽️ DINING'} · ID:${item.id.toString().padStart(4,'0')}
-      </div>
-      <div style="font-family:Rajdhani,sans-serif;font-size:16px;font-weight:700;color:#e8f8f5;line-height:1.2;margin-bottom:6px;">${item.name}</div>
+      <div style="font-family:Orbitron,sans-serif;font-size:9px;color:${color}88;letter-spacing:0.12em;margin-bottom:4px;">${kindLabel} · ID:${item.id.toString().padStart(4,'0')}</div>
+      <div style="font-family:Rajdhani,sans-serif;font-size:16px;font-weight:700;color:#e8f8f5;line-height:1.2;margin-bottom:5px;">${item.name}</div>
       ${stars}
-      <div style="display:flex;align-items:center;gap:6px;margin-bottom:3px;">
-        <div style="width:7px;height:7px;border-radius:50%;background:${statusColor};box-shadow:0 0 6px ${statusColor};flex-shrink:0;"></div>
-        <span style="font-family:Rajdhani,sans-serif;font-size:12px;color:${statusColor};letter-spacing:0.04em;">${item.status}</span>
+      <div style="display:flex;align-items:center;gap:6px;margin-bottom:2px;">
+        <div style="width:7px;height:7px;border-radius:50%;background:${color};box-shadow:0 0 6px ${color};flex-shrink:0;"></div>
+        <span style="font-family:Rajdhani,sans-serif;font-size:12px;color:${color};">${item.status}</span>
       </div>
       <div style="font-family:Rajdhani,sans-serif;font-size:11px;color:#ffffff55;">${sub}</div>
     `;
@@ -241,19 +249,12 @@ export function ClinicMap({
     if (!mapRef.current) return;
     Object.values(markersRef.current).forEach(m=>m.remove());
     markersRef.current={};
-
-    const visible=items.filter(i=>i.kind===activeFilter);
-    visible.forEach(item=>{
+    items.filter(i=>i.kind===activeFilter).forEach(item=>{
       const isOpen=item.status==='مفتوح';
       const isSelected=selectedItem?.id===item.id;
-      const icon=item.kind==='clinic'
-        ? clinicIcon(isOpen,isSelected)
-        : restaurantIcon(isOpen,isSelected);
-
-      const popupClass=`map-popup ${item.kind==='clinic'?'clinic-pop':'resto-pop'}`;
-      const marker=L.marker([item.lat,item.lng],{icon}).addTo(mapRef.current!);
-      const popup=L.popup({className:popupClass,offset:[0,-8],closeButton:true,autoClose:true,autoPan:true}).setContent(buildPopup(item));
-      marker.bindPopup(popup);
+      const popupClass=`map-popup ${item.kind==='clinic'?'clinic-pop':item.kind==='restaurant'?'resto-pop':'pharma-pop'}`;
+      const marker=L.marker([item.lat,item.lng],{icon:makeIcon(item.kind,isOpen,isSelected)}).addTo(mapRef.current!);
+      marker.bindPopup(L.popup({className:popupClass,offset:[0,-8],closeButton:true,autoClose:true,autoPan:true}).setContent(buildPopup(item)));
       marker.on('click',()=>{marker.openPopup();mapRef.current?.flyTo([item.lat,item.lng],15,{duration:0.8});});
       markersRef.current[item.id]=marker;
     });
@@ -262,82 +263,60 @@ export function ClinicMap({
   // Update selected icon
   useEffect(()=>{
     items.filter(i=>i.kind===activeFilter).forEach(item=>{
-      const isOpen=item.status==='مفتوح';
-      const isSelected=selectedItem?.id===item.id;
-      markersRef.current[item.id]?.setIcon(
-        item.kind==='clinic' ? clinicIcon(isOpen,isSelected) : restaurantIcon(isOpen,isSelected)
-      );
+      markersRef.current[item.id]?.setIcon(makeIcon(item.kind,item.status==='مفتوح',selectedItem?.id===item.id));
     });
   },[selectedItem,items,activeFilter]);
 
-  // Draw route
+  // Draw route (clears old one first)
   useEffect(()=>{
-    routeGlowRef.current?.remove(); routeGlowRef.current=null;
-    routeLineRef.current?.remove(); routeLineRef.current=null;
-    setRouteInfo(null);
+    clearRouteVisuals();
     if (!routeTarget||!userLocation||!mapRef.current) return;
     drawRoute(mapRef.current,userLocation,routeTarget,setRouteInfo,setRouteLoading,routeGlowRef,routeLineRef);
-  },[routeTarget,userLocation]);
+  },[routeTarget,userLocation,clearRouteVisuals]);
 
-  const clinicCount = items.filter(i=>i.kind==='clinic').length;
-  const restCount = items.filter(i=>i.kind==='restaurant').length;
+  const handleCancelRoute = () => { clearRouteVisuals(); onClearRoute(); };
+
+  const tabs = [
+    {kind:'clinic'      as FilterKind, labelEn:'MEDICAL',   label:'الأطباء',   emoji:'🏥'},
+    {kind:'restaurant'  as FilterKind, labelEn:'DINING',    label:'المطاعم',   emoji:'🍽️'},
+    {kind:'pharmacy'    as FilterKind, labelEn:'PHARMACY',  label:'الصيدليات', emoji:'💊'},
+  ];
 
   return (
     <div className="relative w-full h-full">
       <div ref={mapContainer} className="absolute inset-0" style={{zIndex:0}} />
 
       {/* ── Filter Tabs ── */}
-      <div style={{
-        position:'absolute',top:'12px',left:'50%',transform:'translateX(-50%)',
-        zIndex:1000,display:'flex',gap:'0',
-        border:'1px solid rgba(255,255,255,0.12)',
-        boxShadow:'0 0 24px rgba(0,0,0,0.7)',
-        backdropFilter:'blur(12px)',
-      }}>
-        {([
-          {kind:'clinic' as FilterKind, label:'الأطباء', labelEn:'MEDICAL', count:clinicCount, color:'#00f5d4',
-           icon:`<svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2z" fill="currentColor" opacity="0.3"/><path d="M13 7h-2v4H7v2h4v4h2v-4h4v-2h-4V7z" fill="currentColor"/></svg>`},
-          {kind:'restaurant' as FilterKind, label:'المطاعم', labelEn:'DINING', count:restCount, color:'#ff9500',
-           icon:`<svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M18 3v18M15 3c0 3.314 2.686 6 3 6v6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M6 3v6.5A3.5 3.5 0 0 0 9.5 13H10v8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M3 3v6.5A3.5 3.5 0 0 0 6.5 13" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><line x1="3" y1="8" x2="10" y2="8" stroke="currentColor" stroke-width="1.5"/></svg>`},
-        ] as const).map(tab=>{
+      <div style={{position:'absolute',top:'12px',left:'50%',transform:'translateX(-50%)',zIndex:1000,display:'flex',border:'1px solid rgba(255,255,255,0.1)',backdropFilter:'blur(14px)',boxShadow:'0 4px 32px rgba(0,0,0,0.8)'}}>
+        {tabs.map(tab=>{
           const active=activeFilter===tab.kind;
+          const c=COLORS[tab.kind].open;
+          const count=items.filter(i=>i.kind===tab.kind).length;
           return (
-            <button
-              key={tab.kind}
-              onClick={()=>onFilterChange(tab.kind)}
-              style={{
-                padding:'9px 20px',
-                background: active ? `${tab.color}22` : 'rgba(5,8,15,0.92)',
-                border:'none',
-                borderBottom: active ? `2px solid ${tab.color}` : '2px solid transparent',
-                color: active ? tab.color : '#ffffff55',
-                fontFamily:'Orbitron,sans-serif',fontSize:'10px',letterSpacing:'0.1em',
-                cursor:'pointer',transition:'all 0.2s',
-                display:'flex',flexDirection:'column',alignItems:'center',gap:'3px',
-                boxShadow: active ? `inset 0 0 16px ${tab.color}22` : 'none',
-                minWidth:'110px',
-              }}
-            >
-              <div style={{display:'flex',alignItems:'center',gap:'6px',color:active?tab.color:'#ffffff55'}}
-                dangerouslySetInnerHTML={{__html: tab.icon.replace('currentColor', active?tab.color:'#ffffff55') + `<span>${tab.labelEn}</span>`}}
-              />
-              <span style={{fontSize:'11px',fontFamily:'Rajdhani,sans-serif',letterSpacing:'0.04em',opacity:0.8}}>{tab.label} ({tab.count})</span>
+            <button key={tab.kind} onClick={()=>onFilterChange(tab.kind)}
+              style={{padding:'8px 18px',background:active?`${c}18`:'rgba(5,8,15,0.92)',border:'none',borderBottom:active?`2px solid ${c}`:'2px solid transparent',color:active?c:'#ffffff44',fontFamily:'Orbitron,sans-serif',fontSize:'10px',letterSpacing:'0.1em',cursor:'pointer',transition:'all 0.2s',display:'flex',flexDirection:'column',alignItems:'center',gap:'3px',minWidth:'100px',boxShadow:active?`inset 0 0 20px ${c}18`:'none'}}>
+              <span style={{fontSize:'13px'}}>{tab.emoji}</span>
+              <span>{tab.labelEn}</span>
+              <span style={{fontSize:'11px',fontFamily:'Rajdhani,sans-serif',opacity:0.8}}>{tab.label} ({count})</span>
             </button>
           );
         })}
       </div>
 
+      {/* ── Cancel Route Button (always visible when route active) ── */}
+      {(routeTarget || routeInfo) && (
+        <button onClick={handleCancelRoute}
+          style={{position:'absolute',top:'12px',right:'12px',zIndex:1000,padding:'9px 16px',background:'rgba(255,45,120,0.12)',border:'1px solid #ff2d78',color:'#ff2d78',fontFamily:'Orbitron,sans-serif',fontSize:'10px',letterSpacing:'0.1em',cursor:'pointer',display:'flex',alignItems:'center',gap:'8px',boxShadow:'0 0 16px rgba(255,45,120,0.3)',backdropFilter:'blur(10px)',transition:'all 0.2s'}}
+          onMouseEnter={e=>{(e.currentTarget as HTMLElement).style.background='rgba(255,45,120,0.25)';}}
+          onMouseLeave={e=>{(e.currentTarget as HTMLElement).style.background='rgba(255,45,120,0.12)';}}>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none"><path d="M18 6L6 18M6 6l12 12" stroke="#ff2d78" strokeWidth="2.5" strokeLinecap="round"/></svg>
+          إلغاء المسار
+        </button>
+      )}
+
       {/* ── Locate Me ── */}
       <button onClick={()=>locateUser()} disabled={locating} title="تحديد موقعي"
-        style={{
-          position:'absolute',bottom:'96px',left:'6px',zIndex:1000,
-          width:'34px',height:'34px',
-          background:userLocation?'#f5c51822':'#0d1117',
-          border:'2px solid #f5c518',
-          boxShadow:locating?'0 0 18px #f5c518,0 0 36px #f5c51888':userLocation?'0 0 12px #f5c518':'0 0 6px #f5c51844',
-          borderRadius:'4px',cursor:locating?'wait':'pointer',
-          display:'flex',alignItems:'center',justifyContent:'center',padding:0,transition:'all 0.3s',
-        }}>
+        style={{position:'absolute',bottom:'96px',left:'6px',zIndex:1000,width:'34px',height:'34px',background:userLocation?'#f5c51822':'#0d1117',border:'2px solid #f5c518',boxShadow:locating?'0 0 18px #f5c518':'0 0 6px #f5c51844',borderRadius:'4px',cursor:locating?'wait':'pointer',display:'flex',alignItems:'center',justifyContent:'center',padding:0,transition:'all 0.3s'}}>
         {locating
           ? <svg width="16" height="16" viewBox="0 0 24 24" fill="none" style={{animation:'lf-spin 1s linear infinite'}}><circle cx="12" cy="12" r="9" stroke="#f5c518" strokeWidth="2" strokeDasharray="28 8" strokeLinecap="round"/></svg>
           : <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="3" fill="#f5c518"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3" stroke="#f5c518" strokeWidth="2" strokeLinecap="round"/><circle cx="12" cy="12" r="7" stroke="#f5c518" strokeWidth="1.5" opacity="0.6"/></svg>
@@ -346,7 +325,7 @@ export function ClinicMap({
 
       {/* ── Locate Error ── */}
       {locateError && (
-        <div style={{position:'absolute',bottom:'140px',left:'6px',zIndex:1000,background:'rgba(0,0,0,0.92)',border:'1px solid #ff2d78',color:'#ff2d78',fontSize:'11px',padding:'8px 12px',fontFamily:'Rajdhani,sans-serif',boxShadow:'0 0 12px #ff2d7844',maxWidth:'180px'}}>
+        <div style={{position:'absolute',bottom:'140px',left:'6px',zIndex:1000,background:'rgba(0,0,0,0.92)',border:'1px solid #ff2d78',color:'#ff2d78',fontSize:'11px',padding:'8px 12px',fontFamily:'Rajdhani,sans-serif',maxWidth:'180px'}}>
           {locateError}
           <button onClick={()=>setLocateError(null)} style={{display:'block',marginTop:'4px',color:'#ff2d7888',fontSize:'10px',background:'none',border:'none',cursor:'pointer',padding:0}}>اغلق ×</button>
         </div>
@@ -366,29 +345,23 @@ export function ClinicMap({
           <span><div style={{opacity:0.55,fontSize:'9px',marginBottom:'2px'}}>DISTANCE</div>{routeInfo.distanceKm.toFixed(1)} كم</span>
           <div style={{width:'1px',height:'28px',background:'#f5c51844'}}/>
           <span><div style={{opacity:0.55,fontSize:'9px',marginBottom:'2px'}}>ETA</div>{Math.ceil(routeInfo.durationMin)} دقيقة</span>
-          <div style={{width:'1px',height:'28px',background:'#f5c51844'}}/>
-          <button onClick={onClearRoute} style={{background:'none',border:'none',color:'#f5c518',cursor:'pointer',fontSize:'20px',lineHeight:1,padding:'0 4px',opacity:0.7}}>×</button>
         </div>
       )}
 
       {/* ── Legend ── */}
       <div style={{position:'absolute',bottom:'24px',left:'46px',zIndex:1000,background:'rgba(0,0,0,0.87)',border:'1px solid rgba(255,255,255,0.1)',padding:'13px 16px',backdropFilter:'blur(8px)',fontFamily:'Rajdhani,sans-serif'}}>
-        <div style={{color:'#ffffff66',fontSize:'10px',letterSpacing:'0.15em',borderBottom:'1px solid rgba(255,255,255,0.08)',paddingBottom:'8px',marginBottom:'10px'}}>LEGEND</div>
-        {activeFilter==='clinic' ? <>
-          {[{color:'#00f5d4',label:'عيادة مفتوحة'},{color:'#ff2d78',label:'عيادة مغلقة'},{color:'#f5c518',label:'موقعك / المسار'}].map(({color,label})=>(
-            <div key={label} style={{display:'flex',alignItems:'center',gap:'10px',marginBottom:'7px'}}>
-              <div style={{width:'10px',height:'10px',borderRadius:'50%',background:color,boxShadow:`0 0 7px ${color}`,flexShrink:0}}/>
-              <span style={{color,fontSize:'12px'}}>{label}</span>
-            </div>
-          ))}
-        </> : <>
-          {[{color:'#ff9500',label:'مطعم مفتوح'},{color:'#ff2d78',label:'مطعم مغلق'},{color:'#f5c518',label:'موقعك / المسار'}].map(({color,label})=>(
-            <div key={label} style={{display:'flex',alignItems:'center',gap:'10px',marginBottom:'7px'}}>
-              <div style={{width:'10px',height:'10px',borderRadius:'50%',background:color,boxShadow:`0 0 7px ${color}`,flexShrink:0}}/>
-              <span style={{color,fontSize:'12px'}}>{label}</span>
-            </div>
-          ))}
-        </>}
+        <div style={{color:'#ffffff44',fontSize:'10px',letterSpacing:'0.15em',borderBottom:'1px solid rgba(255,255,255,0.08)',paddingBottom:'8px',marginBottom:'10px'}}>LEGEND</div>
+        {(activeFilter==='clinic'
+          ? [{color:'#00f5d4',label:'عيادة مفتوحة'},{color:'#ff2d78',label:'عيادة مغلقة'}]
+          : activeFilter==='restaurant'
+          ? [{color:'#ff9500',label:'مطعم مفتوح'},{color:'#ff2d78',label:'مطعم مغلق'}]
+          : [{color:'#c77dff',label:'صيدلية مفتوحة'},{color:'#ff2d78',label:'صيدلية مغلقة'}]
+        ).concat([{color:'#f5c518',label:'موقعك / المسار'}]).map(({color,label})=>(
+          <div key={label} style={{display:'flex',alignItems:'center',gap:'10px',marginBottom:'7px'}}>
+            <div style={{width:'10px',height:'10px',borderRadius:'50%',background:color,boxShadow:`0 0 7px ${color}`,flexShrink:0}}/>
+            <span style={{color,fontSize:'12px'}}>{label}</span>
+          </div>
+        ))}
       </div>
     </div>
   );
