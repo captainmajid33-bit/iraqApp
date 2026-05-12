@@ -4,14 +4,20 @@ import { z } from "zod/v4";
 import { locationsTable } from "./locations";
 
 export const ordersTable = pgTable("orders", {
-  id:          serial("id").primaryKey(),
-  locationId:  integer("location_id").notNull().references(() => locationsTable.id, { onDelete: "cascade" }),
-  phone:       text("phone").notNull(),
-  destination: text("destination").notNull(),
-  lat:         real("lat"),
-  lng:         real("lng"),
-  status:      text("status").notNull().default("pending"),
-  createdAt:   timestamp("created_at").defaultNow(),
+  id:             serial("id").primaryKey(),
+  locationId:     integer("location_id").notNull().references(() => locationsTable.id, { onDelete: "cascade" }),
+  userName:       text("user_name"),
+  phone:          text("phone").notNull(),
+  destination:    text("destination").notNull(),
+  fromLat:        real("from_lat"),
+  fromLng:        real("from_lng"),
+  toLat:          real("to_lat"),
+  toLng:          real("to_lng"),
+  estimatedPrice: integer("estimated_price"),
+  lat:            real("lat"),
+  lng:            real("lng"),
+  status:         text("status").notNull().default("pending"),
+  createdAt:      timestamp("created_at").defaultNow(),
 });
 
 export const insertOrderSchema = createInsertSchema(ordersTable).omit({

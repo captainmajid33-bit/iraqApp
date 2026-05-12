@@ -3,6 +3,7 @@ import { Header } from "@/components/Header";
 import { Sidebar } from "@/components/Sidebar";
 import { ClinicMap } from "@/components/ClinicMap";
 import { AdminModal } from "@/components/AdminModal";
+import { UserLoginOverlay } from "@/components/UserLoginOverlay";
 import { MapItem, Category } from "@/data/types";
 
 const POLL_MS = 30_000; // 30 s fallback poll (SSE handles real-time)
@@ -130,6 +131,7 @@ export function MapView() {
 
   return (
     <div className="flex flex-col h-screen w-full bg-background overflow-hidden dark" dir="rtl">
+      <UserLoginOverlay onLogin={() => {}} />
       <Header />
       <main className="flex-1 relative flex overflow-hidden">
         {loading && (
