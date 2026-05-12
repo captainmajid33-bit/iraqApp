@@ -74,7 +74,7 @@ router.patch("/locations/:id", async (req, res) => {
     if (!item) return res.status(404).json({ error: "Not found" });
     // Broadcast real-time update to all connected map clients
     broadcastLocationUpdate(item as Record<string, unknown>);
-    res.json(item);
+    res.status(200).json({ success: true, location: item });
   } catch (err: any) {
     res.status(400).json({ error: err?.message ?? "Invalid data" });
   }
