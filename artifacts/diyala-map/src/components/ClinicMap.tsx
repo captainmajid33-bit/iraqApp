@@ -29,18 +29,22 @@ function makeIcon(kind: FilterKind, isOpen: boolean, selected: boolean): L.DivIc
   const pulse = isOpen && !selected;
 
   const svgBody = kind === 'clinic'
-    ? `<path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2z" fill="${color}" opacity="0.3"/>
-       <path d="M13 7h-2v4H7v2h4v4h2v-4h4v-2h-4V7z" fill="${color}"/>`
+    /* stethoscope */
+    ? `<path d="M7 2v5a5 5 0 0010 0V2" stroke="${color}" stroke-width="1.8" stroke-linecap="round" fill="none"/>
+       <path d="M12 7v6" stroke="${color}" stroke-width="1.8" stroke-linecap="round"/>
+       <circle cx="12" cy="17" r="3" fill="${color}" fill-opacity="0.25" stroke="${color}" stroke-width="1.5"/>
+       <circle cx="12" cy="17" r="1.2" fill="${color}"/>`
     : kind === 'restaurant'
+    /* fork & knife */
     ? `<path d="M18 3v18M15 3c0 3.314 2.686 6 3 6v6" stroke="${color}" stroke-width="1.8" stroke-linecap="round"/>
        <path d="M6 3v6.5A3.5 3.5 0 0 0 9.5 13H10v8" stroke="${color}" stroke-width="1.8" stroke-linecap="round"/>
        <path d="M3 3v6.5A3.5 3.5 0 0 0 6.5 13" stroke="${color}" stroke-width="1.8" stroke-linecap="round"/>
        <line x1="3" y1="8" x2="10" y2="8" stroke="${color}" stroke-width="1.5"/>`
-    /* pharmacy */
-    : `<rect x="9" y="3" width="6" height="18" rx="1.5" fill="${color}" opacity="0.35"/>
-       <rect x="3" y="9" width="18" height="6" rx="1.5" fill="${color}" opacity="0.35"/>
-       <rect x="10.5" y="4.5" width="3" height="15" rx="1" fill="${color}"/>
-       <rect x="4.5" y="10.5" width="15" height="3" rx="1" fill="${color}"/>`;
+    /* capsule */
+    : `<rect x="8" y="3" width="8" height="18" rx="4" fill="${color}" fill-opacity="0.15" stroke="${color}" stroke-width="1.5"/>
+       <path d="M8 3h8a4 4 0 0 1 0 0v9H8V7a4 4 0 0 1 0-4z" fill="${color}" fill-opacity="0.55"/>
+       <rect x="8" y="3" width="8" height="18" rx="4" fill="none" stroke="${color}" stroke-width="1.5"/>
+       <line x1="8" y1="12" x2="16" y2="12" stroke="${color}" stroke-width="1.2"/>`;
 
   return L.divIcon({
     className: '',
