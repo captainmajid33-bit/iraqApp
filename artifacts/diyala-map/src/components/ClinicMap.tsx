@@ -315,7 +315,7 @@ export function ClinicMap({
     if (!mapRef.current) return;
     Object.values(markersRef.current).forEach(m=>m.remove());
     markersRef.current={};
-    items.filter(i=>i.kind===activeFilter).forEach(item=>{
+    items.filter(i=>i.kind===activeFilter && i.status!=='معطّل').forEach(item=>{
       const isOpen=item.status==='مفتوح';
       const isSelected=selectedItem?.id===item.id;
       const popupClass=`map-popup ${item.kind==='clinic'?'clinic-pop':item.kind==='restaurant'?'resto-pop':item.kind==='pharmacy'?'pharma-pop':'gas-pop'}`;
@@ -328,7 +328,7 @@ export function ClinicMap({
 
   // Update selected icon
   useEffect(()=>{
-    items.filter(i=>i.kind===activeFilter).forEach(item=>{
+    items.filter(i=>i.kind===activeFilter && i.status!=='معطّل').forEach(item=>{
       markersRef.current[item.id]?.setIcon(makeIcon(item.kind,item.status==='مفتوح',selectedItem?.id===item.id));
     });
   },[selectedItem,items,activeFilter]);

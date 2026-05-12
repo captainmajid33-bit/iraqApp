@@ -94,10 +94,11 @@ function LocForm({ init, cats, onSave, onCancel }: { init?: Partial<FormState & 
     <div style={{ background: C.surf2, border: `1px solid ${C.border}`, borderRadius: "4px", padding: "18px", marginBottom: "16px" }}>
       <div style={{ ...g2, marginBottom: "10px" }}>
         {row("الاسم *", "name", "اسم المكان")}
-        <div><label style={LBL}>الفئة</label>
-          <select style={{ ...FLD, cursor: "pointer" }} value={f.category} onChange={s("category")}>
-            {cats.map(c => <option key={c.slug} value={c.slug}>{c.icon} {c.labelAr}</option>)}
-          </select>
+        <div><label style={LBL}>الفئة (اكتب بحرية)</label>
+          <input style={FLD} value={f.category} onChange={s("category")} placeholder="clinic, restaurant, taxi..." onFocus={ff} onBlur={fb} list="cat-suggestions" />
+          <datalist id="cat-suggestions">
+            {cats.map(c => <option key={c.slug} value={c.slug}>{c.labelAr}</option>)}
+          </datalist>
         </div>
       </div>
       <div style={{ marginBottom: "10px" }}>{row("التفاصيل", "details", "تخصص، وصف...")}</div>
@@ -151,9 +152,19 @@ function MerchantsTab({ cats, toast }: { cats: Cat[]; toast: ReturnType<typeof u
   };
 
   const handleDelete = async (id: number, name: string) => {
-    if (!confirm(`حذف "${name}"؟`)) return;
+    if (!confirm(`حذف "${name}" نهائياً من قاعدة البيانات؟`)) return;
     await api.delete(`/api/locations/${id}`);
-    toast.show("تم الحذف"); load();
+    toast.show("تم الحذف نهائياً"); load();
+  };
+
+  const handleToggleDisable = async (loc: Loc) => {
+    const isDisabled = loc.status === "معطّل";
+    const newStatus = isDisabled ? "مفتوح" : "معطّل";
+    const r = await api.patch(`/api/locations/${loc.id}`, { status: newStatus });
+    if (r.id) {
+      toast.show(isDisabled ? `✓ تم تفعيل "${loc.name}"` : `⏸ تم تعطيل "${loc.name}" من الخريطة`);
+      load();
+    }
   };
 
   const rows = locs.filter(l =>
@@ -200,31 +211,42 @@ function MerchantsTab({ cats, toast }: { cats: Cat[]; toast: ReturnType<typeof u
                     </td>
                   </tr>
                 ) : (
-                  <tr key={loc.id} style={{ borderBottom: `1px solid rgba(123,47,247,0.1)` }}
+                  <tr key={loc.id}
+                    style={{ borderBottom: `1px solid rgba(123,47,247,0.1)`, opacity: loc.status === "معطّل" ? 0.5 : 1, transition: "opacity 0.2s" }}
                     onMouseEnter={e => (e.currentTarget.style.background = `${C.purple}08`)}
                     onMouseLeave={e => (e.currentTarget.style.background = "transparent")}>
                     <td style={{ padding: "10px 12px", color: C.dim, fontSize: "12px" }}>{i + 1}</td>
                     <td style={{ padding: "10px 12px", maxWidth: "180px" }}>
-                      <div style={{ color: C.text, fontSize: "14px", fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{loc.name}</div>
+                      <div style={{ color: C.text, fontSize: "14px", fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {loc.status === "معطّل" && <span style={{ fontSize: "10px", color: C.yellow, marginLeft: "6px", fontFamily: "Orbitron, sans-serif" }}>⏸</span>}
+                        {loc.name}
+                      </div>
                       {loc.details && <div style={{ color: C.dim, fontSize: "11px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{loc.details}</div>}
                     </td>
                     <td style={{ padding: "10px 12px" }}>
                       <span style={{ display: "inline-flex", alignItems: "center", gap: "5px", padding: "3px 8px", background: `${cat?.color ?? C.purple}18`, border: `1px solid ${cat?.color ?? C.purple}44`, color: cat?.color ?? C.purple, fontSize: "12px", borderRadius: "2px", whiteSpace: "nowrap" }}>
-                        {cat?.icon} {cat?.labelAr ?? loc.category}
+                        {cat?.icon ?? "📍"} {cat?.labelAr ?? loc.category}
                       </span>
                     </td>
                     <td style={{ padding: "10px 12px", whiteSpace: "nowrap" }}>
-                      <span style={{ color: loc.status === "مفتوح" ? C.green : C.red, fontSize: "13px" }}>● {loc.status}</span>
+                      {loc.status === "معطّل"
+                        ? <span style={{ color: C.yellow, fontSize: "13px" }}>⏸ معطّل</span>
+                        : <span style={{ color: loc.status === "مفتوح" ? C.green : C.red, fontSize: "13px" }}>● {loc.status}</span>
+                      }
                     </td>
                     <td style={{ padding: "10px 12px", fontFamily: "monospace", fontSize: "11px", color: C.dim, whiteSpace: "nowrap" }}>
                       {loc.lat.toFixed(4)}, {loc.lng.toFixed(4)}
                     </td>
                     <td style={{ padding: "10px 12px" }}>
-                      <div style={{ display: "flex", gap: "6px" }}>
+                      <div style={{ display: "flex", gap: "5px", flexWrap: "nowrap" }}>
                         <button onClick={() => { setEditId(loc.id); setShowAdd(false); }}
-                          style={{ padding: "5px 12px", background: `${C.blue}12`, border: `1px solid ${C.blue}44`, color: C.blue, fontSize: "12px", cursor: "pointer", borderRadius: "2px", fontFamily: "Rajdhani, sans-serif" }}>تعديل</button>
+                          style={{ padding: "5px 10px", background: `${C.blue}12`, border: `1px solid ${C.blue}44`, color: C.blue, fontSize: "12px", cursor: "pointer", borderRadius: "2px", fontFamily: "Rajdhani, sans-serif", whiteSpace: "nowrap" }}>تعديل</button>
+                        <button onClick={() => handleToggleDisable(loc)}
+                          style={{ padding: "5px 10px", background: loc.status === "معطّل" ? `${C.green}12` : `${C.yellow}12`, border: `1px solid ${loc.status === "معطّل" ? C.green : C.yellow}44`, color: loc.status === "معطّل" ? C.green : C.yellow, fontSize: "12px", cursor: "pointer", borderRadius: "2px", fontFamily: "Rajdhani, sans-serif", whiteSpace: "nowrap" }}>
+                          {loc.status === "معطّل" ? "تفعيل" : "تعطيل"}
+                        </button>
                         <button onClick={() => handleDelete(loc.id, loc.name)}
-                          style={{ padding: "5px 12px", background: `${C.red}12`, border: `1px solid ${C.red}44`, color: C.red, fontSize: "12px", cursor: "pointer", borderRadius: "2px", fontFamily: "Rajdhani, sans-serif" }}>حذف</button>
+                          style={{ padding: "5px 10px", background: `${C.red}12`, border: `1px solid ${C.red}44`, color: C.red, fontSize: "12px", cursor: "pointer", borderRadius: "2px", fontFamily: "Rajdhani, sans-serif", whiteSpace: "nowrap" }}>حذف</button>
                       </div>
                     </td>
                   </tr>
