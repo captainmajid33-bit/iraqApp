@@ -1,5 +1,5 @@
 import { MapItem } from "@/data/types";
-import { X, Phone, Clock, MapPin, User, Stethoscope, AlertTriangle, Navigation, XCircle, Utensils, Star, Pill } from "lucide-react";
+import { X, Phone, Clock, MapPin, User, Stethoscope, AlertTriangle, Navigation, XCircle, Utensils, Star, Pill, Fuel } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
 import { Button } from "@/components/ui/button";
 
@@ -21,21 +21,40 @@ function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number) {
 }
 
 const KIND_CONFIG = {
-  clinic:     { color: '#00f5d4', label: 'MEDICAL TARGET',  footer: 'DIYALA HEALTH DIRECTORATE' },
-  restaurant: { color: '#ff9500', label: 'DINING TARGET',   footer: 'DIYALA DINING GUIDE' },
-  pharmacy:   { color: '#c77dff', label: 'PHARMACY TARGET', footer: 'DIYALA PHARMACY NETWORK' },
+  clinic:      { color: '#00f5d4', label: 'MEDICAL TARGET',   footer: 'DIYALA HEALTH DIRECTORATE' },
+  restaurant:  { color: '#ff9500', label: 'DINING TARGET',    footer: 'DIYALA DINING GUIDE' },
+  pharmacy:    { color: '#c77dff', label: 'PHARMACY TARGET',  footer: 'DIYALA PHARMACY NETWORK' },
+  gas_station: { color: '#f5c518', label: 'FUEL STATION',     footer: 'DIYALA FUEL NETWORK' },
 };
+
+function getDetails(item: MapItem): string {
+  const a = item as any;
+  if (a.details) return a.details;
+  if (item.kind === 'clinic')     return [a.doctor, a.specialty].filter(Boolean).join(' — ');
+  if (item.kind === 'restaurant') return [a.cuisine, a.type].filter(Boolean).join(' · ');
+  if (item.kind === 'pharmacy')   return [a.pharmacist, a.type].filter(Boolean).join(' · ');
+  if (item.kind === 'gas_station') return a.details ?? '';
+  return '';
+}
+
+function getHeaderIcon(kind: MapItem['kind']) {
+  if (kind === 'clinic')     return Stethoscope;
+  if (kind === 'restaurant') return Utensils;
+  if (kind === 'pharmacy')   return Pill;
+  return Fuel;
+}
 
 export function Sidebar({ item, onClose, userLocation, onNavigate, routeTarget, onClearRoute }: SidebarProps) {
   if (!item) return null;
 
-  const cfg = KIND_CONFIG[item.kind];
+  const cfg = KIND_CONFIG[item.kind] ?? KIND_CONFIG.clinic;
   const accentColor = cfg.color;
   const accentDim = `${accentColor}18`;
   const isNavigating = routeTarget?.id === item.id;
   const distanceKm = userLocation ? haversineKm(userLocation.lat, userLocation.lng, item.lat, item.lng) : null;
-
-  const HeaderIcon = item.kind === 'clinic' ? Stethoscope : item.kind === 'restaurant' ? Utensils : Pill;
+  const HeaderIcon = getHeaderIcon(item.kind);
+  const details = getDetails(item);
+  const rating = (item as any).rating as number | undefined;
 
   return (
     <AnimatePresence>
@@ -81,10 +100,10 @@ export function Sidebar({ item, onClose, userLocation, onNavigate, routeTarget, 
               <AlertTriangle className="w-3.5 h-3.5" />
               {item.status}
             </div>
-            {item.kind === 'restaurant' && 'rating' in item && (
+            {typeof rating === 'number' && rating > 0 && (
               <div className="flex items-center gap-1">
                 {Array.from({length:5}).map((_,i)=>(
-                  <Star key={i} className="w-3.5 h-3.5" fill={i<(item as any).rating?'#f5c518':'transparent'} style={{color:'#f5c518'}}/>
+                  <Star key={i} className="w-3.5 h-3.5" fill={i < rating ? '#f5c518' : 'transparent'} style={{color:'#f5c518'}}/>
                 ))}
               </div>
             )}
@@ -101,27 +120,12 @@ export function Sidebar({ item, onClose, userLocation, onNavigate, routeTarget, 
 
           {/* Info rows */}
           <div className="space-y-2">
-            {item.kind==='clinic' && 'doctor' in item && (
-              <InfoRow icon={<User/>} label="الطبيب" value={(item as any).doctor} color={accentColor}/>
+            {details && (
+              <InfoRow icon={<User/>} label="التفاصيل" value={details} color={accentColor}/>
             )}
-            {item.kind==='clinic' && 'specialty' in item && (
-              <InfoRow icon={<Stethoscope/>} label="الاختصاص" value={(item as any).specialty} color={accentColor}/>
-            )}
-            {item.kind==='restaurant' && 'cuisine' in item && (
-              <InfoRow icon={<Utensils/>} label="المطبخ" value={(item as any).cuisine} color={accentColor}/>
-            )}
-            {item.kind==='restaurant' && 'type' in item && (
-              <InfoRow icon={<MapPin/>} label="النوع" value={(item as any).type} color={accentColor}/>
-            )}
-            {item.kind==='pharmacy' && 'pharmacist' in item && (
-              <InfoRow icon={<User/>} label="الصيدلاني" value={(item as any).pharmacist} color={accentColor}/>
-            )}
-            {item.kind==='pharmacy' && 'type' in item && (
-              <InfoRow icon={<Pill/>} label="النوع" value={(item as any).type} color={accentColor}/>
-            )}
-            <InfoRow icon={<MapPin/>} label="العنوان" value={item.address} color={accentColor}/>
-            <InfoRow icon={<Phone/>} label="الهاتف" value={item.phone} color={accentColor} font="font-mono"/>
-            <InfoRow icon={<Clock/>} label="ساعات العمل" value={item.hours} color={accentColor} font="font-mono"/>
+            <InfoRow icon={<MapPin/>}  label="العنوان"       value={item.address} color={accentColor}/>
+            <InfoRow icon={<Phone/>}   label="الهاتف"        value={item.phone}   color={accentColor} font="font-mono"/>
+            <InfoRow icon={<Clock/>}   label="ساعات العمل"  value={item.hours}   color={accentColor} font="font-mono"/>
           </div>
 
           {/* Buttons */}
@@ -162,6 +166,7 @@ export function Sidebar({ item, onClose, userLocation, onNavigate, routeTarget, 
 function InfoRow({ icon, label, value, color, font='font-sans' }: {
   icon: React.ReactNode; label: string; value: string; color: string; font?: string;
 }) {
+  if (!value) return null;
   return (
     <div className="flex items-start gap-3 p-3" style={{ background:'rgba(255,255,255,0.03)', border:`1px solid ${color}12` }}>
       <div style={{ color, marginTop:'2px', flexShrink:0 }}>{icon}</div>

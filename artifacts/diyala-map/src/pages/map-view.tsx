@@ -3,10 +3,6 @@ import { Header } from "@/components/Header";
 import { Sidebar } from "@/components/Sidebar";
 import { ClinicMap } from "@/components/ClinicMap";
 import { AdminModal } from "@/components/AdminModal";
-import { clinics as staticClinics } from "@/data/clinics";
-import { restaurants } from "@/data/restaurants";
-import { pharmacies } from "@/data/pharmacies";
-import { gasStations } from "@/data/gas_stations";
 import { MapItem, FilterKind } from "@/data/types";
 
 export function MapView() {
@@ -18,32 +14,25 @@ export function MapView() {
   const [adminMode, setAdminMode] = useState(false);
   const [adminCoords, setAdminCoords] = useState<{ lat: number; lng: number } | null>(null);
 
-  // DB items (added via admin)
-  const [dbItems, setDbItems] = useState<MapItem[]>([]);
-  // IDs of static items hidden by admin delete
-  const [hiddenStaticIds, setHiddenStaticIds] = useState<Set<number>>(new Set());
+  // All locations from DB
+  const [items, setItems] = useState<MapItem[]>([]);
+  const [loading, setLoading] = useState(true);
 
-  const fetchDbItems = useCallback(async () => {
+  const fetchLocations = useCallback(async () => {
     try {
+      setLoading(true);
       const res = await fetch("/api/locations");
-      if (!res.ok) return;
+      if (!res.ok) throw new Error("fetch failed");
       const data = await res.json();
-      setDbItems(data.map((c: any) => ({ ...c, kind: (c.category ?? "clinic") as FilterKind })));
+      setItems(data.map((loc: any) => ({ ...loc, kind: loc.category as FilterKind })));
     } catch {
-      // API not ready, silent fail
+      // keep empty
+    } finally {
+      setLoading(false);
     }
   }, []);
 
-  useEffect(() => { fetchDbItems(); }, [fetchDbItems]);
-
-  const staticItems: MapItem[] = [
-    ...staticClinics,
-    ...restaurants,
-    ...pharmacies,
-    ...gasStations,
-  ].filter(i => !hiddenStaticIds.has(i.id));
-
-  const allItems: MapItem[] = [...staticItems, ...dbItems];
+  useEffect(() => { fetchLocations(); }, [fetchLocations]);
 
   const handleFilterChange = (f: FilterKind) => {
     setActiveFilter(f);
@@ -52,25 +41,15 @@ export function MapView() {
   };
 
   const handleAdminSaved = (item: MapItem) => {
-    setDbItems(prev => [...prev, item]);
+    setItems(prev => [...prev, item]);
     setAdminCoords(null);
   };
 
   const handleAdminDelete = useCallback(async (item: MapItem) => {
-    const isDbItem = 'category' in item;
-
-    if (isDbItem) {
-      try {
-        await fetch(`/api/locations/${item.id}`, { method: "DELETE" });
-        setDbItems(prev => prev.filter(i => i.id !== item.id));
-      } catch {
-        // ignore
-      }
-    } else {
-      // Static item — hide locally
-      setHiddenStaticIds(prev => new Set([...prev, item.id]));
-    }
-
+    try {
+      await fetch(`/api/locations/${item.id}`, { method: "DELETE" });
+    } catch { /* ignore */ }
+    setItems(prev => prev.filter(i => i.id !== item.id));
     if (selectedItem?.id === item.id) setSelectedItem(null);
     if (routeTarget?.id === item.id) setRouteTarget(null);
   }, [selectedItem, routeTarget]);
@@ -79,8 +58,20 @@ export function MapView() {
     <div className="flex flex-col h-screen w-full bg-background overflow-hidden dark" dir="rtl">
       <Header />
       <main className="flex-1 relative flex overflow-hidden">
+        {loading && (
+          <div style={{
+            position: "absolute", inset: 0, zIndex: 2000,
+            display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+            background: "rgba(5,8,15,0.92)", backdropFilter: "blur(8px)",
+          }}>
+            <div style={{ width: "48px", height: "48px", border: "2px solid rgba(0,245,212,0.15)", borderTop: "2px solid #00f5d4", borderRadius: "50%", animation: "spin 1s linear infinite" }} />
+            <div style={{ marginTop: "16px", fontFamily: "Orbitron, sans-serif", fontSize: "11px", color: "#00f5d4", letterSpacing: "0.15em" }}>LOADING DATABASE...</div>
+            <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+          </div>
+        )}
+
         <ClinicMap
-          items={allItems}
+          items={items}
           activeFilter={activeFilter}
           onFilterChange={handleFilterChange}
           onSelectItem={setSelectedItem}
