@@ -64,15 +64,18 @@ router.post("/locations", requireAdmin, async (req, res) => {
 
 // ── PATCH update ───────────────────────────────────────────────────────────────
 // Auth priority (stateless — survives server restarts):
-//   1. x-admin-password == ADMIN_PASSWORD  → full update of any field
-//   2. x-admin-token    (session token)    → full update (backward compat)
-//   3. x-partner-key    (global key)       → status field only
-//   4. x-merchant-key   (per-location key) → status field only for that location
+//   1. x-admin-password == ADMIN_PASSWORD              → full update
+//   2. x-admin-token    (session token)                → full update
+//   3. x-partner-key OR Authorization: Bearer <key>   → status only
+//   4. x-merchant-key OR Authorization: Bearer <key>  → status only (per-location)
 router.patch("/locations/:id", async (req, res) => {
   const adminPassword = (req.headers["x-admin-password"] as string | undefined) ?? "";
   const adminToken    = (req.headers["x-admin-token"]    as string | undefined) ?? "";
-  const partnerKey    = (req.headers["x-partner-key"]    as string | undefined) ?? "";
-  const merchantKey   = (req.headers["x-merchant-key"]   as string | undefined) ?? "";
+  // Support both x-partner-key and Authorization: Bearer <key>
+  const authBearer    = ((req.headers["authorization"] as string | undefined) ?? "")
+                          .replace(/^Bearer\s+/i, "").trim();
+  const partnerKey    = (req.headers["x-partner-key"]  as string | undefined) || authBearer || "";
+  const merchantKey   = (req.headers["x-merchant-key"] as string | undefined) || authBearer || "";
 
   // ── Determine identity ──────────────────────────────────────────────────────
   const isAdmin   = (adminPassword === ADMIN_PASSWORD) || isValidAdminToken(adminToken);
@@ -97,15 +100,26 @@ router.patch("/locations/:id", async (req, res) => {
     }
   }
 
-  // ── Reject if no valid auth ─────────────────────────────────────────────────
+  // ── Reject if no valid auth — log ALL headers to help diagnose ─────────────
   if (!isAdmin && !isPartner && !isMerchant) {
+    const relevantHeaders = {
+      "x-admin-password" : req.headers["x-admin-password"],
+      "x-admin-token"    : req.headers["x-admin-token"],
+      "x-partner-key"    : req.headers["x-partner-key"],
+      "x-merchant-key"   : req.headers["x-merchant-key"],
+      "authorization"    : req.headers["authorization"],
+      "origin"           : req.headers["origin"],
+    };
     const why =
-      adminPassword ? `wrong admin password (got: "${adminPassword}")` :
-      adminToken    ? "expired/invalid admin token — re-login required" :
-      partnerKey    ? `wrong partner key (got: "${partnerKey}")` :
+      adminPassword ? `wrong admin password` :
+      adminToken    ? "expired/invalid admin token — please re-login" :
+      partnerKey    ? `wrong partner key (got: "${partnerKey.slice(0,8)}...")` :
       merchantKey   ? "merchant key does not match this location" :
       "no auth header provided";
-    console.warn(`[PATCH /locations/${req.params.id}] 401 — ${why}`);
+    console.warn(
+      `[PATCH /locations/${req.params.id}] 401 — ${why}`,
+      "\nHeaders received:", JSON.stringify(relevantHeaders),
+    );
     res.status(401).json({
       error: "Unauthorized",
       hint: why,
