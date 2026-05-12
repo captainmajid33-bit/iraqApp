@@ -2,37 +2,37 @@ import { Router, type IRouter } from "express";
 import { db } from "@workspace/db";
 import { locationsTable, insertLocationSchema } from "@workspace/db";
 import { eq, asc } from "drizzle-orm";
+import { requireAdmin } from "./admin";
 
 const router: IRouter = Router();
 
-// GET all locations (optionally filter by category)
+// GET all locations (public)
 router.get("/locations", async (req, res) => {
   try {
     const { category } = req.query;
-    let query = db.select().from(locationsTable).orderBy(asc(locationsTable.createdAt));
     const items = await (category
       ? db.select().from(locationsTable).where(eq(locationsTable.category, String(category))).orderBy(asc(locationsTable.createdAt))
-      : query);
+      : db.select().from(locationsTable).orderBy(asc(locationsTable.createdAt)));
     res.json(items);
-  } catch (err) {
+  } catch {
     res.status(500).json({ error: "Failed to fetch locations" });
   }
 });
 
-// GET single location
+// GET single location (public)
 router.get("/locations/:id", async (req, res) => {
   try {
     const id = Number(req.params.id);
     const [item] = await db.select().from(locationsTable).where(eq(locationsTable.id, id));
     if (!item) return res.status(404).json({ error: "Not found" });
     res.json(item);
-  } catch (err) {
+  } catch {
     res.status(500).json({ error: "Failed to fetch location" });
   }
 });
 
-// POST create location
-router.post("/locations", async (req, res) => {
+// POST create — admin only
+router.post("/locations", requireAdmin, async (req, res) => {
   try {
     const data = insertLocationSchema.parse(req.body);
     const [item] = await db.insert(locationsTable).values(data).returning();
@@ -42,8 +42,8 @@ router.post("/locations", async (req, res) => {
   }
 });
 
-// PATCH update location
-router.patch("/locations/:id", async (req, res) => {
+// PATCH update — admin only
+router.patch("/locations/:id", requireAdmin, async (req, res) => {
   try {
     const id = Number(req.params.id);
     const data = insertLocationSchema.partial().parse(req.body);
@@ -55,13 +55,13 @@ router.patch("/locations/:id", async (req, res) => {
   }
 });
 
-// DELETE location
-router.delete("/locations/:id", async (req, res) => {
+// DELETE — admin only
+router.delete("/locations/:id", requireAdmin, async (req, res) => {
   try {
     const id = Number(req.params.id);
     await db.delete(locationsTable).where(eq(locationsTable.id, id));
     res.json({ ok: true });
-  } catch (err) {
+  } catch {
     res.status(500).json({ error: "Failed to delete location" });
   }
 });

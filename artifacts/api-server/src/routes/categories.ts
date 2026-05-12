@@ -2,9 +2,11 @@ import { Router, type IRouter } from "express";
 import { db } from "@workspace/db";
 import { categoriesTable, insertCategorySchema } from "@workspace/db";
 import { eq, asc } from "drizzle-orm";
+import { requireAdmin } from "./admin";
 
 const router: IRouter = Router();
 
+// GET all (public)
 router.get("/categories", async (_req, res) => {
   try {
     const cats = await db.select().from(categoriesTable).orderBy(asc(categoriesTable.id));
@@ -14,7 +16,8 @@ router.get("/categories", async (_req, res) => {
   }
 });
 
-router.post("/categories", async (req, res) => {
+// POST — admin only
+router.post("/categories", requireAdmin, async (req, res) => {
   try {
     const data = insertCategorySchema.parse(req.body);
     const [cat] = await db.insert(categoriesTable).values(data).returning();
@@ -24,7 +27,8 @@ router.post("/categories", async (req, res) => {
   }
 });
 
-router.patch("/categories/:id", async (req, res) => {
+// PATCH — admin only
+router.patch("/categories/:id", requireAdmin, async (req, res) => {
   try {
     const id = Number(req.params.id);
     const data = insertCategorySchema.partial().parse(req.body);
@@ -36,7 +40,8 @@ router.patch("/categories/:id", async (req, res) => {
   }
 });
 
-router.delete("/categories/:id", async (req, res) => {
+// DELETE — admin only
+router.delete("/categories/:id", requireAdmin, async (req, res) => {
   try {
     const id = Number(req.params.id);
     await db.delete(categoriesTable).where(eq(categoriesTable.id, id));
