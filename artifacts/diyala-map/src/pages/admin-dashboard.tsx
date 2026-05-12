@@ -429,7 +429,7 @@ export function AdminDashboard() {
   const toast = useToast();
 
   const isAuth = sessionStorage.getItem("admin_auth") === "Admin2026";
-  useEffect(() => { if (!isAuth) navigate("/admin"); }, [isAuth]);
+  useEffect(() => { if (!isAuth) navigate("/"); }, [isAuth]);
 
   const loadCats = useCallback(async () => {
     const data = await api.get("/api/categories");
@@ -492,7 +492,7 @@ export function AdminDashboard() {
   );
 }
 
-// ── Login Page ────────────────────────────────────────────────────────────────
+// ── Login Page (generic-looking, not obviously admin) ─────────────────────────
 export function AdminLogin() {
   const [, navigate] = useLocation();
   const [code, setCode] = useState("");
@@ -510,55 +510,72 @@ export function AdminLogin() {
     } else {
       setError(true); setShake(true);
       setTimeout(() => setShake(false), 600);
-      setTimeout(() => setError(false), 2000);
+      setTimeout(() => setError(false), 2500);
     }
   };
 
   return (
-    <div style={{ minHeight: "100vh", background: C.bg, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "Rajdhani, sans-serif" }}>
+    <div style={{ minHeight: "100vh", background: "#080a0f", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "Rajdhani, sans-serif" }}>
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Rajdhani:wght@400;600;700&display=swap');
-        @keyframes adm-pulse{75%,100%{transform:scale(2.5);opacity:0}}
-        @keyframes adm-shake{0%,100%{transform:translateX(0)}20%,60%{transform:translateX(-8px)}40%,80%{transform:translateX(8px)}}
-        @keyframes adm-glow{0%,100%{box-shadow:0 0 20px #7b2ff744}50%{box-shadow:0 0 40px #7b2ff788,0 0 80px #7b2ff733}}
+        @import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;500;600;700&display=swap');
+        @keyframes adm-shake{0%,100%{transform:translateX(0)}20%,60%{transform:translateX(-6px)}40%,80%{transform:translateX(6px)}}
         * { box-sizing: border-box; }
       `}</style>
 
-      <div style={{ width: "100%", maxWidth: "380px", padding: "20px", animation: shake ? "adm-shake 0.5s" : "none" }}>
-        {/* Logo */}
-        <div style={{ textAlign: "center", marginBottom: "36px" }}>
-          <div style={{ position: "relative", display: "inline-flex", alignItems: "center", justifyContent: "center", width: "72px", height: "72px", marginBottom: "16px" }}>
-            <div style={{ position: "absolute", inset: 0, borderRadius: "50%", background: C.purple, opacity: 0.15, animation: "adm-pulse 2.5s infinite" }} />
-            <div style={{ position: "absolute", inset: 0, borderRadius: "50%", border: `2px solid ${C.purple}`, animation: "adm-glow 3s infinite" }} />
-            <span style={{ fontSize: "28px" }}>🛡️</span>
+      <div style={{ width: "100%", maxWidth: "340px", padding: "20px", animation: shake ? "adm-shake 0.5s" : "none" }}>
+        <div style={{ background: "#0d1117", border: "1px solid rgba(255,255,255,0.07)", borderRadius: "6px", padding: "32px 28px" }}>
+
+          {/* Generic map icon — nothing hinting at "admin" */}
+          <div style={{ textAlign: "center", marginBottom: "28px" }}>
+            <span style={{ fontSize: "32px", display: "block", marginBottom: "12px", opacity: 0.6 }}>🗺️</span>
+            <div style={{ color: "rgba(226,232,240,0.55)", fontSize: "15px", fontWeight: "600", letterSpacing: "0.04em" }}>خريطة ديالى</div>
+            <div style={{ color: "rgba(226,232,240,0.25)", fontSize: "12px", marginTop: "4px" }}>تسجيل الدخول</div>
           </div>
-          <div style={{ fontFamily: "Orbitron, sans-serif", fontSize: "14px", color: C.purple, letterSpacing: "0.2em", textShadow: neon(C.purple) }}>ADMIN CONTROL</div>
-          <div style={{ fontFamily: "Orbitron, sans-serif", fontSize: "10px", color: C.dim, letterSpacing: "0.15em", marginTop: "4px" }}>ديالى بالذكاء الاصطناعي</div>
-        </div>
 
-        {/* Card */}
-        <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: "4px", padding: "28px", boxShadow: `0 0 40px ${C.purple}22` }}>
-          <label style={{ ...FL, fontSize: "12px", marginBottom: "8px" }}>رمز الدخول السري</label>
-          <input
-            type="password" value={code}
-            onChange={e => setCode(e.target.value)}
-            onKeyDown={e => e.key === "Enter" && handleLogin()}
-            placeholder="••••••••••"
-            autoFocus
-            style={{ ...F, fontSize: "18px", letterSpacing: "0.3em", marginBottom: "16px", borderColor: error ? C.red : C.border, boxShadow: error ? neon(C.red, 8) : "none" }}
-            onFocus={e => (e.target.style.borderColor = error ? C.red : C.purple)}
-            onBlur={e => (e.target.style.borderColor = error ? C.red : C.border)}
-          />
-          {error && <div style={{ color: C.red, fontSize: "13px", marginBottom: "12px", fontFamily: "Rajdhani, sans-serif" }}>✗ رمز دخول خاطئ</div>}
-          <button onClick={handleLogin} style={{ width: "100%", padding: "13px", background: `${C.purple}20`, border: `1px solid ${C.purple}`, color: C.purple, fontFamily: "Orbitron, sans-serif", fontSize: "11px", letterSpacing: "0.12em", cursor: "pointer", borderRadius: "2px", boxShadow: neon(C.purple, 10), transition: "all 0.2s" }}
-            onMouseEnter={e => ((e.target as any).style.background = `${C.purple}35`)}
-            onMouseLeave={e => ((e.target as any).style.background = `${C.purple}20`)}>
-            دخول ← ENTER
+          <div style={{ marginBottom: "12px" }}>
+            <label style={{ display: "block", fontSize: "12px", color: "rgba(226,232,240,0.35)", marginBottom: "6px", letterSpacing: "0.04em" }}>كلمة المرور</label>
+            <input
+              type="password"
+              value={code}
+              onChange={e => { setCode(e.target.value); setError(false); }}
+              onKeyDown={e => e.key === "Enter" && handleLogin()}
+              placeholder="••••••••"
+              autoFocus
+              style={{
+                width: "100%", padding: "10px 12px",
+                background: "rgba(255,255,255,0.04)",
+                border: `1px solid ${error ? "rgba(255,80,80,0.5)" : "rgba(255,255,255,0.09)"}`,
+                color: "#e2e8f0", fontSize: "15px", letterSpacing: "0.25em",
+                outline: "none", borderRadius: "4px", fontFamily: "Rajdhani, sans-serif",
+                transition: "border-color 0.2s",
+              }}
+              onFocus={e => { if (!error) e.target.style.borderColor = "rgba(255,255,255,0.2)"; }}
+              onBlur={e => { if (!error) e.target.style.borderColor = "rgba(255,255,255,0.09)"; }}
+            />
+          </div>
+
+          {error && (
+            <div style={{ color: "rgba(255,90,90,0.8)", fontSize: "12px", marginBottom: "10px", display: "flex", alignItems: "center", gap: "5px" }}>
+              <span>⚠</span> كلمة المرور غير صحيحة
+            </div>
+          )}
+
+          <button
+            onClick={handleLogin}
+            style={{
+              width: "100%", padding: "11px",
+              background: "rgba(255,255,255,0.06)",
+              border: "1px solid rgba(255,255,255,0.1)",
+              color: "rgba(226,232,240,0.75)",
+              fontFamily: "Rajdhani, sans-serif", fontSize: "14px", fontWeight: "600",
+              cursor: "pointer", borderRadius: "4px",
+              transition: "all 0.2s", letterSpacing: "0.05em",
+            }}
+            onMouseEnter={e => { (e.currentTarget.style.background = "rgba(255,255,255,0.1)"); (e.currentTarget.style.color = "#e2e8f0"); }}
+            onMouseLeave={e => { (e.currentTarget.style.background = "rgba(255,255,255,0.06)"); (e.currentTarget.style.color = "rgba(226,232,240,0.75)"); }}
+          >
+            دخول
           </button>
-        </div>
-
-        <div style={{ textAlign: "center", marginTop: "20px" }}>
-          <a href="/" style={{ fontFamily: "Orbitron, sans-serif", fontSize: "10px", color: C.dim, letterSpacing: "0.08em", textDecoration: "none" }}>← الخريطة الرئيسية</a>
         </div>
       </div>
     </div>

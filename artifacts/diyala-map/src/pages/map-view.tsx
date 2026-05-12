@@ -13,7 +13,7 @@ export function MapView() {
   const [userLocation, setUserLocation] = useState<{ lat: number; lng: number } | null>(null);
   const [routeTarget, setRouteTarget] = useState<MapItem | null>(null);
 
-  const [adminMode, setAdminMode] = useState(false);
+  const adminMode = false;
   const [adminCoords, setAdminCoords] = useState<{ lat: number; lng: number } | null>(null);
 
   const [items, setItems] = useState<MapItem[]>([]);
@@ -84,25 +84,6 @@ export function MapView() {
           onMapClick={(latlng) => { setAdminCoords(latlng); setSelectedItem(null); }}
           onAdminDelete={handleAdminDelete}
         />
-
-        {/* Admin Mode Toggle */}
-        <button
-          onClick={() => { setAdminMode(a => !a); setAdminCoords(null); }}
-          style={{
-            position: "absolute", bottom: "24px", right: "12px", zIndex: 1000,
-            padding: "9px 16px",
-            background: adminMode ? "rgba(255,45,120,0.15)" : "rgba(5,8,15,0.9)",
-            border: `1px solid ${adminMode ? "#ff2d78" : "rgba(0,245,212,0.3)"}`,
-            color: adminMode ? "#ff2d78" : "rgba(0,245,212,0.5)",
-            fontFamily: "Orbitron, sans-serif", fontSize: "10px", letterSpacing: "0.1em",
-            cursor: "pointer", display: "flex", alignItems: "center", gap: "8px",
-            boxShadow: adminMode ? "0 0 20px rgba(255,45,120,0.3)" : "none",
-            backdropFilter: "blur(10px)", transition: "all 0.25s",
-          }}
-        >
-          <span style={{ width: "8px", height: "8px", borderRadius: "50%", background: adminMode ? "#ff2d78" : "rgba(0,245,212,0.3)", boxShadow: adminMode ? "0 0 8px #ff2d78" : "none", flexShrink: 0, display: "inline-block", animation: adminMode ? "lf-ping 2s infinite" : "none" }} />
-          {adminMode ? "ADMIN · انقر للإضافة أو الحذف" : "ADMIN MODE"}
-        </button>
 
         <Sidebar
           item={selectedItem}
