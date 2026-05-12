@@ -1,52 +1,11 @@
 export const clinics = [
   {
-    id: 1, kind: 'clinic' as const, name: "عيادة الدكتور حسن الزهيري", doctor: "د. حسن عبد الكريم الزهيري",
-    specialty: "طب عام", address: "بعقوبة - شارع الرئيسي، قرب دوار النسور",
-    phone: "07701234567", hours: "9:00 ص - 2:00 م", status: "مفتوح",
+    id: 1, kind: 'clinic' as const, name: "عيادة الدكتور مصطفى غني",
+    doctor: "د. مصطفى غني",
+    specialty: "طب أسنان", address: "بعقوبة - شارع الرئيسي",
+    phone: "07701234567", hours: "9:00 ص - 5:00 م", status: "مفتوح",
     lat: 33.7451, lng: 44.6488
   },
-  {
-    id: 2, kind: 'clinic' as const, name: "عيادة الدكتورة سارة المنصوري", doctor: "د. سارة جاسم المنصوري",
-    specialty: "طب أطفال", address: "بعقوبة - حي الأمانة، شارع الجمهورية",
-    phone: "07712345678", hours: "10:00 ص - 4:00 م", status: "مفتوح",
-    lat: 33.7511, lng: 44.6412
-  },
-  {
-    id: 3, kind: 'clinic' as const, name: "مركز الشفاء للأمراض الباطنية", doctor: "د. عمر خالد البياتي",
-    specialty: "أمراض باطنية", address: "المقدادية - الشارع التجاري",
-    phone: "07723456789", hours: "8:00 ص - 1:00 م", status: "مغلق",
-    lat: 33.9711, lng: 44.9212
-  },
-  {
-    id: 4, kind: 'clinic' as const, name: "عيادة العلاج الطبيعي الحديث", doctor: "د. ليلى فاضل النعيمي",
-    specialty: "علاج طبيعي", address: "بعقوبة - حي العصري",
-    phone: "07734567890", hours: "9:00 ص - 5:00 م", status: "مفتوح",
-    lat: 33.7384, lng: 44.6601
-  },
-  {
-    id: 5, kind: 'clinic' as const, name: "عيادة القلب والأوعية", doctor: "د. محمود عادل الدليمي",
-    specialty: "أمراض قلبية", address: "خانقين - شارع الحرية",
-    phone: "07745678901", hours: "9:00 ص - 3:00 م", status: "مفتوح",
-    lat: 34.3489, lng: 45.3712
-  },
-  {
-    id: 6, kind: 'clinic' as const, name: "مستوصف الأمل التخصصي", doctor: "د. رنا علي الجبوري",
-    specialty: "نساء وولادة", address: "بلدروز - الحي الجنوبي",
-    phone: "07756789012", hours: "10:00 ص - 2:00 م", status: "مغلق",
-    lat: 33.6031, lng: 44.9624
-  },
-  {
-    id: 7, kind: 'clinic' as const, name: "عيادة الدكتور كرار العبيدي", doctor: "د. كرار صلاح العبيدي",
-    specialty: "جراحة عامة", address: "كفري - شارع المدارس",
-    phone: "07767890123", hours: "8:00 ص - 12:00 م", status: "مفتوح",
-    lat: 34.2145, lng: 44.9934
-  },
-  {
-    id: 8, kind: 'clinic' as const, name: "مركز الرؤية لطب العيون", doctor: "د. أحمد سعد التميمي",
-    specialty: "طب عيون", address: "بعقوبة - مجاور المستشفى العام",
-    phone: "07778901234", hours: "9:00 ص - 4:00 م", status: "مفتوح",
-    lat: 33.7602, lng: 44.6355
-  }
 ];
 
 export type Clinic = typeof clinics[0];
