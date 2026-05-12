@@ -5,6 +5,8 @@ import { ClinicMap } from "@/components/ClinicMap";
 import { AdminModal } from "@/components/AdminModal";
 import { MapItem, FilterKind } from "@/data/types";
 
+const POLL_INTERVAL = 15_000; // 15 seconds
+
 export function MapView() {
   const [activeFilter, setActiveFilter] = useState<FilterKind>("clinic");
   const [selectedItem, setSelectedItem] = useState<MapItem | null>(null);
@@ -14,25 +16,28 @@ export function MapView() {
   const [adminMode, setAdminMode] = useState(false);
   const [adminCoords, setAdminCoords] = useState<{ lat: number; lng: number } | null>(null);
 
-  // All locations from DB
   const [items, setItems] = useState<MapItem[]>([]);
   const [loading, setLoading] = useState(true);
 
   const fetchLocations = useCallback(async () => {
     try {
-      setLoading(true);
       const res = await fetch("/api/locations");
-      if (!res.ok) throw new Error("fetch failed");
+      if (!res.ok) return;
       const data = await res.json();
       setItems(data.map((loc: any) => ({ ...loc, kind: loc.category as FilterKind })));
     } catch {
-      // keep empty
+      // silent
     } finally {
       setLoading(false);
     }
   }, []);
 
-  useEffect(() => { fetchLocations(); }, [fetchLocations]);
+  // Initial fetch + polling for real-time sync with admin changes
+  useEffect(() => {
+    fetchLocations();
+    const interval = setInterval(fetchLocations, POLL_INTERVAL);
+    return () => clearInterval(interval);
+  }, [fetchLocations]);
 
   const handleFilterChange = (f: FilterKind) => {
     setActiveFilter(f);
@@ -46,9 +51,7 @@ export function MapView() {
   };
 
   const handleAdminDelete = useCallback(async (item: MapItem) => {
-    try {
-      await fetch(`/api/locations/${item.id}`, { method: "DELETE" });
-    } catch { /* ignore */ }
+    try { await fetch(`/api/locations/${item.id}`, { method: "DELETE" }); } catch { /* ignore */ }
     setItems(prev => prev.filter(i => i.id !== item.id));
     if (selectedItem?.id === item.id) setSelectedItem(null);
     if (routeTarget?.id === item.id) setRouteTarget(null);
@@ -59,11 +62,7 @@ export function MapView() {
       <Header />
       <main className="flex-1 relative flex overflow-hidden">
         {loading && (
-          <div style={{
-            position: "absolute", inset: 0, zIndex: 2000,
-            display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
-            background: "rgba(5,8,15,0.92)", backdropFilter: "blur(8px)",
-          }}>
+          <div style={{ position: "absolute", inset: 0, zIndex: 2000, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", background: "rgba(5,8,15,0.92)", backdropFilter: "blur(8px)" }}>
             <div style={{ width: "48px", height: "48px", border: "2px solid rgba(0,245,212,0.15)", borderTop: "2px solid #00f5d4", borderRadius: "50%", animation: "spin 1s linear infinite" }} />
             <div style={{ marginTop: "16px", fontFamily: "Orbitron, sans-serif", fontSize: "11px", color: "#00f5d4", letterSpacing: "0.15em" }}>LOADING DATABASE...</div>
             <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
@@ -101,13 +100,7 @@ export function MapView() {
             backdropFilter: "blur(10px)", transition: "all 0.25s",
           }}
         >
-          <span style={{
-            width: "8px", height: "8px", borderRadius: "50%",
-            background: adminMode ? "#ff2d78" : "rgba(0,245,212,0.3)",
-            boxShadow: adminMode ? "0 0 8px #ff2d78" : "none",
-            flexShrink: 0, display: "inline-block",
-            animation: adminMode ? "lf-ping 2s infinite" : "none",
-          }} />
+          <span style={{ width: "8px", height: "8px", borderRadius: "50%", background: adminMode ? "#ff2d78" : "rgba(0,245,212,0.3)", boxShadow: adminMode ? "0 0 8px #ff2d78" : "none", flexShrink: 0, display: "inline-block", animation: adminMode ? "lf-ping 2s infinite" : "none" }} />
           {adminMode ? "ADMIN · انقر للإضافة أو الحذف" : "ADMIN MODE"}
         </button>
 

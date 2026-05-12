@@ -4,6 +4,7 @@ import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import NotFound from "@/pages/not-found";
 import { MapView } from "@/pages/map-view";
+import { AdminLogin, AdminDashboard } from "@/pages/admin-dashboard";
 
 const queryClient = new QueryClient();
 
@@ -11,6 +12,8 @@ function Router() {
   return (
     <Switch>
       <Route path="/" component={MapView} />
+      <Route path="/admin" component={AdminLogin} />
+      <Route path="/admin/dashboard" component={AdminDashboard} />
       <Route component={NotFound} />
     </Switch>
   );
