@@ -3,7 +3,7 @@ import { randomBytes } from "crypto";
 
 const router: IRouter = Router();
 
-const ADMIN_PASSWORD = "Admin2026";
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD ?? "Admin2026";
 
 // In-memory token store: token → expiry timestamp
 const sessions = new Map<string, number>();
@@ -37,7 +37,11 @@ router.post("/admin/logout", (req: Request, res: Response) => {
 
 // ── GET /api/admin/verify ─────────────────────────────────────────────────────
 router.get("/admin/verify", (req: Request, res: Response) => {
-  const token = req.headers["x-admin-token"] as string | undefined;
+  const token    = req.headers["x-admin-token"]    as string | undefined;
+  const password = req.headers["x-admin-password"] as string | undefined;
+  if (password === ADMIN_PASSWORD) {
+    return res.json({ ok: true });
+  }
   if (!token || !sessions.has(token) || Date.now() > sessions.get(token)!) {
     if (token) sessions.delete(token);
     return res.status(401).json({ ok: false });
@@ -55,12 +59,16 @@ export function isValidAdminToken(token: string | undefined): boolean {
   return true;
 }
 
-// ── Middleware export (for protecting write routes) ───────────────────────────
+// ── Middleware export (for protecting write routes) ────────────────────────────
+// Accepts EITHER a valid session token OR the raw admin-password header (stateless)
 export function requireAdmin(req: Request, res: Response, next: NextFunction) {
-  if (!isValidAdminToken(req.headers["x-admin-token"] as string | undefined)) {
-    return res.status(401).json({ ok: false, error: "Admin token required" });
+  const token    = req.headers["x-admin-token"]    as string | undefined;
+  const password = req.headers["x-admin-password"] as string | undefined;
+  if (isValidAdminToken(token) || password === ADMIN_PASSWORD) {
+    return next();
   }
-  next();
+  return res.status(401).json({ ok: false, error: "Admin token required" });
 }
 
+export { ADMIN_PASSWORD };
 export default router;
