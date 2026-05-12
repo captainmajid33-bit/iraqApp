@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import { MapItem, Category } from '@/data/types';
@@ -207,12 +207,47 @@ export function ClinicMap({
   const [locateError,setLocateError]   = useState<string|null>(null);
   const [routeLoading,setRouteLoading] = useState(false);
   const [routeInfo,setRouteInfo]       = useState<{distanceKm:number;durationMin:number}|null>(null);
+  const [showMoreModal, setShowMoreModal] = useState(false);
+  const [searchQuery,   setSearchQuery]   = useState('');
+  const pendingJumpRef = useRef<number|null>(null);
 
   const clearRouteVisuals = useCallback(()=>{
     routeGlowRef.current?.remove(); routeGlowRef.current=null;
     routeLineRef.current?.remove(); routeLineRef.current=null;
     setRouteInfo(null);
   },[]);
+
+  // Jump to item from search: close modal → switch filter → flyTo → open popup
+  const jumpToItem = useCallback((item: MapItem)=>{
+    setShowMoreModal(false);
+    setSearchQuery('');
+    pendingJumpRef.current = item.id;
+    onFilterChange(item.kind);
+    mapRef.current?.flyTo([item.lat, item.lng], 16, {animate:true, duration:1.1});
+  },[onFilterChange]);
+
+  // Search across all visible items
+  const searchResults = useMemo(()=>{
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return [] as MapItem[];
+    return items
+      .filter(i => i.status !== 'معطّل')
+      .filter(i =>
+        i.name.toLowerCase().includes(q) ||
+        (i.address ?? '').toLowerCase().includes(q) ||
+        ((i as any).details ?? '').toLowerCase().includes(q) ||
+        (catMapRef.current.get(i.kind)?.labelAr ?? '').toLowerCase().includes(q)
+      )
+      .slice(0, 10);
+  },[searchQuery, items]);
+
+  // Escape key closes the modal
+  useEffect(()=>{
+    if (!showMoreModal) return;
+    const fn = (e: KeyboardEvent) => { if (e.key==='Escape') setShowMoreModal(false); };
+    document.addEventListener('keydown', fn);
+    return ()=> document.removeEventListener('keydown', fn);
+  },[showMoreModal]);
 
   // Update user marker icon (position + heading) without re-mounting
   const refreshUserMarker = useCallback((lat:number, lng:number, heading:number|null, accuracy:number)=>{
@@ -456,6 +491,12 @@ export function ClinicMap({
         marker.on('click',()=>{marker.openPopup();mapRef.current?.flyTo([item.lat,item.lng],15,{duration:0.8});});
         markersRef.current[item.id]=marker;
       });
+    // After markers are built, open popup for any pending search-jump
+    if (pendingJumpRef.current !== null) {
+      const jumpId = pendingJumpRef.current;
+      pendingJumpRef.current = null;
+      setTimeout(()=>{ markersRef.current[jumpId]?.openPopup(); }, 500);
+    }
   },[items,activeFilter,selectedItem,buildPopup]);
 
   // Update selected icon without full re-render
@@ -479,7 +520,7 @@ export function ClinicMap({
     <div className="relative w-full h-full">
       <div ref={mapContainer} className="absolute inset-0" style={{zIndex:0}} />
 
-      {/* ── Filter Tabs — scrollable, unlimited categories ── */}
+      {/* ── Filter Tabs — first 4 + More button ── */}
       <div
         className="filter-tabs-bar"
         style={{
@@ -491,40 +532,254 @@ export function ClinicMap({
         } as React.CSSProperties}
       >
         {categories.length === 0
-          ? /* Skeleton while loading */
-            [1,2,3,4].map(n=>(
+          ? [1,2,3,4].map(n=>(
               <div key={n} style={{width:'100px',height:'72px',background:'rgba(5,8,15,0.92)',borderBottom:'2px solid transparent',flexShrink:0,display:'flex',alignItems:'center',justifyContent:'center'}}>
                 <div style={{width:'60px',height:'10px',background:'rgba(255,255,255,0.06)',borderRadius:'2px'}}/>
               </div>
             ))
-          : categories.map(cat=>{
-              const active = activeFilter===cat.slug;
-              const c = active ? cat.color : 'rgba(255,255,255,0.35)';
-              const count = items.filter(i=>i.kind===cat.slug && i.status!=='معطّل').length;
-              return (
-                <button key={cat.slug} onClick={()=>onFilterChange(cat.slug)}
-                  style={{
-                    padding:'8px 16px',
-                    background:active?`${cat.color}18`:'rgba(5,8,15,0.92)',
-                    border:'none',
-                    borderBottom:active?`2px solid ${cat.color}`:'2px solid transparent',
-                    color:c,
-                    fontFamily:'Orbitron,sans-serif',fontSize:'10px',letterSpacing:'0.1em',
-                    cursor:'pointer',transition:'all 0.2s',
-                    display:'flex',flexDirection:'column',alignItems:'center',gap:'3px',
-                    minWidth:'90px',flexShrink:0,
-                    boxShadow:active?`inset 0 0 20px ${cat.color}18`:'none',
-                  }}>
-                  <span style={{fontSize:'15px'}}>{cat.icon}</span>
-                  <span style={{whiteSpace:'nowrap'}}>{cat.labelEn.toUpperCase()}</span>
-                  <span style={{fontSize:'11px',fontFamily:'Rajdhani,sans-serif',opacity:0.8,whiteSpace:'nowrap'}}>
-                    {cat.labelAr} ({count})
-                  </span>
-                </button>
-              );
-            })
+          : <>
+              {categories.slice(0,4).map(cat=>{
+                const active = activeFilter===cat.slug;
+                const c = active ? cat.color : 'rgba(255,255,255,0.35)';
+                const count = items.filter(i=>i.kind===cat.slug && i.status!=='معطّل').length;
+                return (
+                  <button key={cat.slug} onClick={()=>{onFilterChange(cat.slug);setShowMoreModal(false);}}
+                    style={{
+                      padding:'8px 16px',
+                      background:active?`${cat.color}18`:'rgba(5,8,15,0.92)',
+                      border:'none',
+                      borderBottom:active?`2px solid ${cat.color}`:'2px solid transparent',
+                      color:c,
+                      fontFamily:'Orbitron,sans-serif',fontSize:'10px',letterSpacing:'0.1em',
+                      cursor:'pointer',transition:'all 0.2s',
+                      display:'flex',flexDirection:'column',alignItems:'center',gap:'3px',
+                      minWidth:'90px',flexShrink:0,
+                      boxShadow:active?`inset 0 0 20px ${cat.color}18`:'none',
+                    }}>
+                    <span style={{fontSize:'15px'}}>{cat.icon}</span>
+                    <span style={{whiteSpace:'nowrap'}}>{cat.labelEn.toUpperCase()}</span>
+                    <span style={{fontSize:'11px',fontFamily:'Rajdhani,sans-serif',opacity:0.8,whiteSpace:'nowrap'}}>
+                      {cat.labelAr} ({count})
+                    </span>
+                  </button>
+                );
+              })}
+              {/* More button — always visible (search + extra categories) */}
+              <button onClick={()=>setShowMoreModal(v=>!v)}
+                style={{
+                  padding:'8px 16px',
+                  background: showMoreModal ? 'rgba(123,47,247,0.18)' : 'rgba(5,8,15,0.92)',
+                  border:'none',
+                  borderBottom: showMoreModal ? '2px solid #7b2ff7' : '2px solid transparent',
+                  color: showMoreModal ? '#7b2ff7' : 'rgba(255,255,255,0.35)',
+                  fontFamily:'Orbitron,sans-serif',fontSize:'10px',letterSpacing:'0.1em',
+                  cursor:'pointer',transition:'all 0.2s',
+                  display:'flex',flexDirection:'column',alignItems:'center',gap:'4px',
+                  minWidth:'76px',flexShrink:0,
+                  boxShadow: showMoreModal ? 'inset 0 0 20px rgba(123,47,247,0.18)' : 'none',
+                }}>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+                  <rect x="3" y="3" width="7" height="7" rx="1.2" stroke="currentColor" strokeWidth="1.8"/>
+                  <rect x="14" y="3" width="7" height="7" rx="1.2" stroke="currentColor" strokeWidth="1.8"/>
+                  <rect x="3" y="14" width="7" height="7" rx="1.2" stroke="currentColor" strokeWidth="1.8"/>
+                  <rect x="14" y="14" width="7" height="7" rx="1.2" stroke="currentColor" strokeWidth="1.8"/>
+                </svg>
+                <span>MORE</span>
+                <span style={{fontSize:'11px',fontFamily:'Rajdhani,sans-serif',opacity:0.7}}>
+                  {categories.length > 4 ? `المزيد (${categories.length - 4})` : 'بحث'}
+                </span>
+              </button>
+            </>
         }
       </div>
+
+      {/* ── More Categories + Smart Search Modal ── */}
+      {showMoreModal && (
+        <div
+          style={{
+            position:'absolute',inset:0,zIndex:1500,
+            background:'rgba(0,0,0,0.72)',
+            backdropFilter:'blur(6px)',
+            display:'flex',alignItems:'flex-start',justifyContent:'center',
+            paddingTop:'90px',
+          }}
+          onClick={e=>{ if(e.target===e.currentTarget) setShowMoreModal(false); }}
+        >
+          <div style={{
+            width:'min(520px, calc(100vw - 20px))',
+            maxHeight:'calc(100vh - 115px)',
+            background:'rgba(5,8,15,0.98)',
+            border:'1px solid rgba(123,47,247,0.45)',
+            boxShadow:'0 0 48px rgba(123,47,247,0.18), 0 8px 32px rgba(0,0,0,0.9)',
+            display:'flex',flexDirection:'column',
+            overflow:'hidden',
+          }}>
+            {/* Header */}
+            <div style={{
+              display:'flex',alignItems:'center',justifyContent:'space-between',
+              padding:'10px 16px',borderBottom:'1px solid rgba(255,255,255,0.06)',
+              background:'rgba(123,47,247,0.06)',
+            }}>
+              <div style={{display:'flex',alignItems:'center',gap:'8px'}}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
+                  <circle cx="11" cy="11" r="8" stroke="#7b2ff7" strokeWidth="2"/>
+                  <path d="M21 21l-4.35-4.35" stroke="#7b2ff7" strokeWidth="2.2" strokeLinecap="round"/>
+                </svg>
+                <span style={{fontFamily:'Orbitron,sans-serif',fontSize:'10px',color:'#7b2ff7',letterSpacing:'0.14em'}}>
+                  SEARCH &amp; CATEGORIES
+                </span>
+              </div>
+              <button onClick={()=>setShowMoreModal(false)} style={{
+                background:'none',border:'none',color:'rgba(255,255,255,0.35)',
+                fontSize:'20px',cursor:'pointer',lineHeight:1,padding:'0 4px',
+                transition:'color 0.2s',
+              }}
+              onMouseEnter={e=>(e.currentTarget.style.color='#fff')}
+              onMouseLeave={e=>(e.currentTarget.style.color='rgba(255,255,255,0.35)')}
+              >×</button>
+            </div>
+
+            {/* Search Input */}
+            <div style={{padding:'12px 16px',borderBottom:'1px solid rgba(255,255,255,0.05)'}}>
+              <div style={{position:'relative'}}>
+                <svg style={{position:'absolute',left:'11px',top:'50%',transform:'translateY(-50%)',opacity:0.45,pointerEvents:'none'}}
+                  width="15" height="15" viewBox="0 0 24 24" fill="none">
+                  <circle cx="11" cy="11" r="8" stroke="#7b2ff7" strokeWidth="2"/>
+                  <path d="M21 21l-4.35-4.35" stroke="#7b2ff7" strokeWidth="2" strokeLinecap="round"/>
+                </svg>
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={e=>setSearchQuery(e.target.value)}
+                  placeholder="ابحث عن طبيب، مطعم، صيدلية، محطة وقود..."
+                  autoFocus
+                  style={{
+                    width:'100%',boxSizing:'border-box',
+                    padding:'10px 12px 10px 34px',
+                    background:'rgba(123,47,247,0.07)',
+                    border:'1px solid rgba(123,47,247,0.3)',
+                    color:'#e8f8f5',
+                    fontFamily:'Rajdhani,sans-serif',fontSize:'15px',
+                    outline:'none',direction:'rtl',
+                    transition:'border-color 0.2s',
+                  }}
+                  onFocus={e=>(e.target.style.borderColor='rgba(123,47,247,0.7)')}
+                  onBlur={e=>(e.target.style.borderColor='rgba(123,47,247,0.3)')}
+                />
+                {searchQuery && (
+                  <button onClick={()=>setSearchQuery('')} style={{
+                    position:'absolute',right:'10px',top:'50%',transform:'translateY(-50%)',
+                    background:'none',border:'none',color:'rgba(255,255,255,0.3)',
+                    fontSize:'16px',cursor:'pointer',lineHeight:1,padding:'2px',
+                  }}>×</button>
+                )}
+              </div>
+            </div>
+
+            {/* Content area */}
+            <div style={{overflowY:'auto',flex:1}}>
+              {searchQuery.trim() ? (
+                searchResults.length === 0 ? (
+                  <div style={{padding:'32px 16px',textAlign:'center'}}>
+                    <div style={{fontSize:'28px',marginBottom:'10px',opacity:0.3}}>🔍</div>
+                    <div style={{fontFamily:'Rajdhani,sans-serif',fontSize:'14px',color:'rgba(255,255,255,0.3)'}}>
+                      لا توجد نتائج لـ "{searchQuery}"
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <div style={{padding:'8px 16px 4px',fontFamily:'Orbitron,sans-serif',fontSize:'8px',color:'rgba(255,255,255,0.25)',letterSpacing:'0.14em'}}>
+                      {searchResults.length} نتيجة
+                    </div>
+                    {searchResults.map(item=>{
+                      const cat = catMapRef.current.get(item.kind);
+                      const isOpen = item.status==='مفتوح';
+                      const statusColor = isOpen ? '#00f5d4' : '#ff2d78';
+                      const catColor = cat?.color ?? '#7b2ff7';
+                      return (
+                        <button key={item.id} onClick={()=>jumpToItem(item)}
+                          style={{
+                            width:'100%',display:'flex',alignItems:'center',gap:'12px',
+                            padding:'11px 16px',background:'transparent',border:'none',
+                            borderBottom:'1px solid rgba(255,255,255,0.04)',
+                            cursor:'pointer',textAlign:'right',transition:'background 0.15s',
+                          }}
+                          onMouseEnter={e=>(e.currentTarget.style.background='rgba(123,47,247,0.1)')}
+                          onMouseLeave={e=>(e.currentTarget.style.background='transparent')}
+                        >
+                          <div style={{
+                            width:'38px',height:'38px',borderRadius:'50%',flexShrink:0,
+                            background:`${catColor}12`,
+                            border:`1.5px solid ${catColor}44`,
+                            display:'flex',alignItems:'center',justifyContent:'center',
+                            fontSize:'17px',
+                          }}>{cat?.icon ?? '📍'}</div>
+                          <div style={{flex:1,minWidth:0,textAlign:'right'}}>
+                            <div style={{fontFamily:'Rajdhani,sans-serif',fontSize:'15px',fontWeight:700,color:'#e8f8f5',marginBottom:'2px',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
+                              {item.name}
+                            </div>
+                            <div style={{fontFamily:'Rajdhani,sans-serif',fontSize:'12px',color:'rgba(255,255,255,0.38)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
+                              {cat?.labelAr ?? item.kind}{item.address ? ` · ${item.address}` : ''}
+                            </div>
+                          </div>
+                          <div style={{
+                            width:'8px',height:'8px',borderRadius:'50%',flexShrink:0,
+                            background:statusColor,boxShadow:`0 0 8px ${statusColor}`,
+                          }}/>
+                        </button>
+                      );
+                    })}
+                  </>
+                )
+              ) : (
+                /* Extra categories grid (categories 5+) */
+                <>
+                  {categories.length > 4 && (
+                    <>
+                      <div style={{padding:'10px 16px 6px',fontFamily:'Orbitron,sans-serif',fontSize:'8px',color:'rgba(255,255,255,0.25)',letterSpacing:'0.14em'}}>
+                        CATEGORIES
+                      </div>
+                      <div style={{padding:'4px 16px 14px',display:'flex',flexWrap:'wrap',gap:'8px'}}>
+                        {categories.slice(4).map(cat=>{
+                          const active = activeFilter===cat.slug;
+                          const count = items.filter(i=>i.kind===cat.slug && i.status!=='معطّل').length;
+                          return (
+                            <button key={cat.slug}
+                              onClick={()=>{onFilterChange(cat.slug);setShowMoreModal(false);}}
+                              style={{
+                                display:'flex',alignItems:'center',gap:'7px',
+                                padding:'8px 14px',
+                                background: active ? `${cat.color}15` : 'rgba(255,255,255,0.03)',
+                                border:`1px solid ${active ? cat.color : 'rgba(255,255,255,0.1)'}`,
+                                color: active ? cat.color : 'rgba(255,255,255,0.6)',
+                                fontFamily:'Rajdhani,sans-serif',fontSize:'14px',
+                                cursor:'pointer',transition:'all 0.2s',
+                                boxShadow: active ? `0 0 12px ${cat.color}44` : 'none',
+                              }}
+                              onMouseEnter={e=>{if(!active){(e.currentTarget as HTMLElement).style.borderColor='rgba(255,255,255,0.3)';(e.currentTarget as HTMLElement).style.color='rgba(255,255,255,0.9)';}}}
+                              onMouseLeave={e=>{if(!active){(e.currentTarget as HTMLElement).style.borderColor='rgba(255,255,255,0.1)';(e.currentTarget as HTMLElement).style.color='rgba(255,255,255,0.6)';}}}
+                            >
+                              <span style={{fontSize:'15px'}}>{cat.icon}</span>
+                              <span>{cat.labelAr}</span>
+                              <span style={{fontSize:'12px',opacity:0.5}}>({count})</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </>
+                  )}
+                  {/* Search hint when no query */}
+                  <div style={{padding:'12px 16px 18px',borderTop:'1px solid rgba(255,255,255,0.04)',textAlign:'center'}}>
+                    <div style={{fontFamily:'Rajdhani,sans-serif',fontSize:'13px',color:'rgba(255,255,255,0.2)',letterSpacing:'0.05em'}}>
+                      ابدأ الكتابة للبحث في جميع المواقع
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── Cancel Route ── */}
       {(routeTarget || routeInfo) && (
