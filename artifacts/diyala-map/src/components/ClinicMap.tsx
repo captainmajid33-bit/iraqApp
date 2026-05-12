@@ -190,6 +190,9 @@ export function ClinicMap({
     catMapRef.current = new Map(categories.map(c=>[c.slug,c]));
   },[categories]);
 
+  // Keep setTaxiItemRef in sync so Leaflet DOM callbacks can open the modal
+  useEffect(()=>{ setTaxiItemRef.current = setTaxiItem; },[]);
+
   // Inject per-category popup CSS whenever categories change
   useEffect(()=>{
     if (!catStyleRef.current) {
@@ -210,6 +213,16 @@ export function ClinicMap({
   const [showMoreModal, setShowMoreModal] = useState(false);
   const [searchQuery,   setSearchQuery]   = useState('');
   const [showTraffic,   setShowTraffic]   = useState(false);
+
+  // Taxi order modal state
+  const [taxiItem,    setTaxiItem]    = useState<MapItem|null>(null);
+  const [taxiPhone,   setTaxiPhone]   = useState('');
+  const [taxiDest,    setTaxiDest]    = useState('');
+  const [taxiLoading, setTaxiLoading] = useState(false);
+  const [taxiError,   setTaxiError]   = useState<string|null>(null);
+  const [taxiSuccess, setTaxiSuccess] = useState(false);
+  const setTaxiItemRef = useRef<((item:MapItem)=>void)|null>(null);
+
   const pendingJumpRef   = useRef<number|null>(null);
   const trafficLayersRef = useRef<L.Polyline[]>([]);
   const missionMarkerRef = useRef<L.Marker|null>(null);
@@ -393,6 +406,8 @@ export function ClinicMap({
       .popup-details-btn:hover{color:#fff;}
       .popup-delete-btn{width:100%;padding:8px 0;border:1px solid rgba(255,45,120,0.4);background:transparent;color:#ff2d78;font-family:'Rajdhani',sans-serif;font-size:12px;letter-spacing:0.06em;cursor:pointer;transition:all 0.25s;display:flex;align-items:center;justify-content:center;gap:7px;border-radius:2px;}
       .popup-delete-btn:hover{background:rgba(255,45,120,0.12);border-color:#ff2d78;}
+      .popup-taxi-btn{width:100%;padding:10px 0;margin-top:8px;background:rgba(0,212,255,0.10);border:1px solid #00d4ff;color:#00d4ff;font-family:'Orbitron',sans-serif;font-size:10px;letter-spacing:0.1em;cursor:pointer;transition:all 0.2s;display:flex;align-items:center;justify-content:center;gap:8px;border-radius:2px;}
+      .popup-taxi-btn:hover{background:rgba(0,212,255,0.22);box-shadow:0 0 18px rgba(0,212,255,0.45);}
       .filter-tabs-bar::-webkit-scrollbar{display:none;}
     `;
     document.head.appendChild(style);
@@ -501,6 +516,30 @@ export function ClinicMap({
     el.appendChild(navBtn);
     el.appendChild(detailsBtn);
 
+    // ── Taxi request button (only for taxi/transport category) ────────────────
+    const isTaxi = item.kind==='taxi' || item.kind==='تكسي'
+      || (catMapRef.current.get(item.kind)?.labelEn ?? '').toLowerCase().includes('taxi')
+      || (catMapRef.current.get(item.kind)?.labelAr ?? '').includes('تكسي');
+    if (isTaxi && item.status !== 'معطّل') {
+      const taxiSep = document.createElement('div');
+      taxiSep.style.cssText='height:1px;background:rgba(0,212,255,0.15);margin:8px 0 6px;';
+      el.appendChild(taxiSep);
+      const taxiBtn = document.createElement('button');
+      taxiBtn.className = 'popup-taxi-btn';
+      taxiBtn.innerHTML = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none">
+        <rect x="2" y="7" width="20" height="11" rx="2" fill="#00d4ff" fill-opacity="0.15" stroke="#00d4ff" stroke-width="1.5"/>
+        <path d="M7 7V5a1 1 0 0 1 1-1h8a1 1 0 0 1 1 1v2" stroke="#00d4ff" stroke-width="1.5" stroke-linecap="round"/>
+        <circle cx="7" cy="15" r="2" fill="#00d4ff"/>
+        <circle cx="17" cy="15" r="2" fill="#00d4ff"/>
+        <path d="M3 11h18" stroke="#00d4ff" stroke-width="1.2" stroke-dasharray="3 2"/>
+      </svg>أطلب تكسي`;
+      taxiBtn.addEventListener('click', ()=>{
+        setTaxiItemRef.current?.(item);
+        mapRef.current?.closePopup();
+      });
+      el.appendChild(taxiBtn);
+    }
+
     if (adminModeRef.current) {
       const sep=document.createElement('div');
       sep.style.cssText='height:1px;background:rgba(255,45,120,0.2);margin:8px 0 6px;';
@@ -560,6 +599,53 @@ export function ClinicMap({
       L.polyline(coords,{color,weight,opacity:0.75,lineCap:'round',lineJoin:'round',dashArray:'14 6'}).addTo(mapRef.current!),
     ]);
   },[showTraffic]);
+
+  // ── Taxi order submit ────────────────────────────────────────────────────────
+  const handleTaxiSubmit = useCallback(async ()=>{
+    if (!taxiItem) return;
+    if (!taxiPhone.trim()) { setTaxiError('الرجاء إدخال رقم الهاتف'); return; }
+    if (!taxiDest.trim())  { setTaxiError('الرجاء إدخال الوجهة');     return; }
+    setTaxiLoading(true);
+    setTaxiError(null);
+
+    // Attempt GPS — non-blocking (null if denied)
+    const getGps = (): Promise<{lat:number;lng:number}|null> => {
+      if (!navigator.geolocation) return Promise.resolve(null);
+      return new Promise(resolve=>{
+        navigator.geolocation.getCurrentPosition(
+          p => resolve({lat:p.coords.latitude, lng:p.coords.longitude}),
+          ()  => resolve(null),
+          {timeout:10000, enableHighAccuracy:true},
+        );
+      });
+    };
+    const loc = await getGps();
+
+    try {
+      const res = await fetch('/api/orders', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({
+          locationId:  taxiItem.id,
+          phone:       taxiPhone.trim(),
+          destination: taxiDest.trim(),
+          lat:         loc?.lat ?? null,
+          lng:         loc?.lng ?? null,
+        }),
+      });
+      if (res.ok) {
+        setTaxiSuccess(true);
+        setTimeout(()=>{ setTaxiItem(null); setTaxiPhone(''); setTaxiDest(''); setTaxiSuccess(false); }, 2200);
+      } else {
+        const err = await res.json().catch(()=>({}));
+        setTaxiError((err as any).error ?? 'فشل إرسال الطلب');
+      }
+    } catch {
+      setTaxiError('تعذّر الاتصال بالسيرفر');
+    } finally {
+      setTaxiLoading(false);
+    }
+  },[taxiItem, taxiPhone, taxiDest]);
 
   // Sync markers whenever items / activeFilter / selectedItem changes
   useEffect(()=>{
@@ -1054,6 +1140,107 @@ export function ClinicMap({
         <div style={{position:'absolute',bottom:'20px',left:'50%',transform:'translateX(-50%)',zIndex:1000,background:'rgba(5,8,15,0.96)',border:'1px solid #f5c518',color:'#f5c518',padding:'10px 24px',fontFamily:'Orbitron,sans-serif',fontSize:'11px',letterSpacing:'0.1em',boxShadow:'0 0 24px #f5c51844',display:'flex',gap:'24px',alignItems:'center',backdropFilter:'blur(10px)'}}>
           <span>🛣️ {routeInfo.distanceKm.toFixed(1)} كم</span>
           <span>⏱ {Math.round(routeInfo.durationMin)} دقيقة</span>
+        </div>
+      )}
+
+      {/* ── Taxi Order Modal ── */}
+      {taxiItem && (
+        <div
+          style={{position:'absolute',inset:0,zIndex:3000,display:'flex',alignItems:'center',justifyContent:'center',background:'rgba(2,4,10,0.82)',backdropFilter:'blur(6px)'}}
+          onClick={e=>{ if (e.target===e.currentTarget && !taxiLoading) { setTaxiItem(null); setTaxiPhone(''); setTaxiDest(''); setTaxiError(null); setTaxiSuccess(false); }}}
+        >
+          <div style={{background:'rgba(5,8,15,0.98)',border:'1px solid #00d4ff',boxShadow:'0 0 40px rgba(0,212,255,0.3),0 0 80px rgba(0,212,255,0.1)',width:'min(370px,calc(100vw - 32px))',direction:'rtl',position:'relative',overflow:'hidden'}}>
+            {/* Header */}
+            <div style={{padding:'16px 18px 14px',borderBottom:'1px solid rgba(0,212,255,0.15)',display:'flex',alignItems:'center',justifyContent:'space-between',background:'rgba(0,212,255,0.04)'}}>
+              <div>
+                <div style={{fontFamily:'Orbitron,sans-serif',fontSize:'9px',color:'#00d4ff',letterSpacing:'0.2em',marginBottom:'3px'}}>🚕 TAXI REQUEST</div>
+                <div style={{fontFamily:'Rajdhani,sans-serif',fontSize:'16px',fontWeight:700,color:'#e8f8f5'}}>{taxiItem.name}</div>
+              </div>
+              {!taxiLoading && !taxiSuccess && (
+                <button
+                  onClick={()=>{ setTaxiItem(null); setTaxiPhone(''); setTaxiDest(''); setTaxiError(null); }}
+                  style={{background:'none',border:'none',color:'rgba(255,255,255,0.4)',fontSize:'18px',cursor:'pointer',lineHeight:1,padding:'4px 6px',transition:'color 0.2s'}}
+                  onMouseEnter={e=>(e.currentTarget.style.color='#ff2d78')}
+                  onMouseLeave={e=>(e.currentTarget.style.color='rgba(255,255,255,0.4)')}
+                >✕</button>
+              )}
+            </div>
+
+            {/* Body */}
+            <div style={{padding:'18px'}}>
+              {taxiSuccess ? (
+                <div style={{textAlign:'center',padding:'24px 0'}}>
+                  <div style={{fontSize:'36px',marginBottom:'10px'}}>✅</div>
+                  <div style={{fontFamily:'Orbitron,sans-serif',fontSize:'11px',color:'#00f5d4',letterSpacing:'0.15em',marginBottom:'6px'}}>تم إرسال الطلب!</div>
+                  <div style={{fontFamily:'Rajdhani,sans-serif',fontSize:'14px',color:'rgba(255,255,255,0.55)'}}>سيتواصل معك السائق قريباً</div>
+                </div>
+              ) : (
+                <>
+                  {/* Phone */}
+                  <div style={{marginBottom:'14px'}}>
+                    <label style={{display:'block',fontFamily:'Orbitron,sans-serif',fontSize:'8px',color:'#00d4ff88',letterSpacing:'0.15em',marginBottom:'6px'}}>رقم الهاتف</label>
+                    <input
+                      type="tel"
+                      value={taxiPhone}
+                      onChange={e=>{ setTaxiPhone(e.target.value); setTaxiError(null); }}
+                      placeholder="07XX XXX XXXX"
+                      disabled={taxiLoading}
+                      style={{width:'100%',background:'rgba(0,212,255,0.06)',border:'1px solid rgba(0,212,255,0.3)',color:'#e8f8f5',fontFamily:'Rajdhani,sans-serif',fontSize:'16px',padding:'10px 12px',outline:'none',boxSizing:'border-box',transition:'border-color 0.2s'}}
+                      onFocus={e=>(e.currentTarget.style.borderColor='#00d4ff')}
+                      onBlur={e=>(e.currentTarget.style.borderColor='rgba(0,212,255,0.3)')}
+                    />
+                  </div>
+                  {/* Destination */}
+                  <div style={{marginBottom:'16px'}}>
+                    <label style={{display:'block',fontFamily:'Orbitron,sans-serif',fontSize:'8px',color:'#00d4ff88',letterSpacing:'0.15em',marginBottom:'6px'}}>الوجهة</label>
+                    <input
+                      type="text"
+                      value={taxiDest}
+                      onChange={e=>{ setTaxiDest(e.target.value); setTaxiError(null); }}
+                      placeholder="أدخل وجهتك..."
+                      disabled={taxiLoading}
+                      style={{width:'100%',background:'rgba(0,212,255,0.06)',border:'1px solid rgba(0,212,255,0.3)',color:'#e8f8f5',fontFamily:'Rajdhani,sans-serif',fontSize:'16px',padding:'10px 12px',outline:'none',boxSizing:'border-box',transition:'border-color 0.2s'}}
+                      onFocus={e=>(e.currentTarget.style.borderColor='#00d4ff')}
+                      onBlur={e=>(e.currentTarget.style.borderColor='rgba(0,212,255,0.3)')}
+                    />
+                  </div>
+                  {/* GPS note */}
+                  <div style={{display:'flex',alignItems:'center',gap:'6px',marginBottom:'14px',padding:'7px 10px',background:'rgba(0,245,212,0.04)',border:'1px solid rgba(0,245,212,0.12)'}}>
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none"><path d="M12 2v3M12 19v3M2 12h3M19 12h3" stroke="#00f5d4" strokeWidth="2" strokeLinecap="round"/><circle cx="12" cy="12" r="5" stroke="#00f5d4" strokeWidth="1.5"/></svg>
+                    <span style={{fontFamily:'Rajdhani,sans-serif',fontSize:'12px',color:'rgba(0,245,212,0.6)'}}>سيتم تحديد موقعك تلقائياً عند الإرسال</span>
+                  </div>
+                  {/* Error */}
+                  {taxiError && (
+                    <div style={{marginBottom:'12px',padding:'8px 12px',background:'rgba(255,45,120,0.08)',border:'1px solid rgba(255,45,120,0.3)',color:'#ff2d78',fontFamily:'Rajdhani,sans-serif',fontSize:'13px'}}>
+                      ⚠ {taxiError}
+                    </div>
+                  )}
+                  {/* Submit */}
+                  <button
+                    onClick={handleTaxiSubmit}
+                    disabled={taxiLoading}
+                    style={{
+                      width:'100%',padding:'13px',
+                      background: taxiLoading ? 'rgba(0,212,255,0.06)' : 'rgba(0,212,255,0.14)',
+                      border:'1px solid #00d4ff',color:'#00d4ff',
+                      fontFamily:'Orbitron,sans-serif',fontSize:'11px',letterSpacing:'0.12em',
+                      cursor:taxiLoading?'not-allowed':'pointer',
+                      boxShadow: taxiLoading ? 'none' : '0 0 18px rgba(0,212,255,0.25)',
+                      transition:'all 0.2s',display:'flex',alignItems:'center',justifyContent:'center',gap:'8px',
+                    }}
+                    onMouseEnter={e=>{ if(!taxiLoading)(e.currentTarget as HTMLElement).style.background='rgba(0,212,255,0.24)'; }}
+                    onMouseLeave={e=>{ if(!taxiLoading)(e.currentTarget as HTMLElement).style.background='rgba(0,212,255,0.14)'; }}
+                  >
+                    {taxiLoading ? (
+                      <><svg width="14" height="14" viewBox="0 0 28 28" fill="none" style={{animation:'lf-spin 0.9s linear infinite'}}><circle cx="14" cy="14" r="10" stroke="#00d4ff" strokeWidth="2" strokeDasharray="22 14" strokeLinecap="round"/></svg>جاري الإرسال...</>
+                    ) : (
+                      <><svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M12 2v3M12 19v3M2 12h3M19 12h3" stroke="#00d4ff" strokeWidth="2" strokeLinecap="round"/><circle cx="12" cy="12" r="5" stroke="#00d4ff" strokeWidth="1.5"/><circle cx="12" cy="12" r="2" fill="#00d4ff"/></svg>تأكيد الطلب</>
+                    )}
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
         </div>
       )}
 
