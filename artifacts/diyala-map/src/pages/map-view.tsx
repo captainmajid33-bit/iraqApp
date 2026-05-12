@@ -6,6 +6,7 @@ import { AdminModal } from "@/components/AdminModal";
 import { clinics as staticClinics } from "@/data/clinics";
 import { restaurants } from "@/data/restaurants";
 import { pharmacies } from "@/data/pharmacies";
+import { gasStations } from "@/data/gas_stations";
 import { MapItem, FilterKind } from "@/data/types";
 
 export function MapView() {
@@ -14,32 +15,30 @@ export function MapView() {
   const [userLocation, setUserLocation] = useState<{ lat: number; lng: number } | null>(null);
   const [routeTarget, setRouteTarget] = useState<MapItem | null>(null);
 
-  // Admin Mode
   const [adminMode, setAdminMode] = useState(false);
   const [adminCoords, setAdminCoords] = useState<{ lat: number; lng: number } | null>(null);
 
-  // DB clinics (added via admin)
-  const [dbClinics, setDbClinics] = useState<MapItem[]>([]);
+  const [dbItems, setDbItems] = useState<MapItem[]>([]);
 
-  // Load DB clinics on mount
-  const fetchDbClinics = useCallback(async () => {
+  const fetchDbItems = useCallback(async () => {
     try {
-      const res = await fetch("/api/clinics");
+      const res = await fetch("/api/locations");
       if (!res.ok) return;
       const data = await res.json();
-      setDbClinics(data.map((c: any) => ({ ...c, kind: "clinic" as const })));
+      setDbItems(data.map((c: any) => ({ ...c, kind: (c.category ?? "clinic") as FilterKind })));
     } catch {
-      // API not ready yet, fail silently
+      // API not ready, silent fail
     }
   }, []);
 
-  useEffect(() => { fetchDbClinics(); }, [fetchDbClinics]);
+  useEffect(() => { fetchDbItems(); }, [fetchDbItems]);
 
   const allItems: MapItem[] = [
     ...staticClinics,
-    ...dbClinics,
     ...restaurants,
     ...pharmacies,
+    ...gasStations,
+    ...dbItems,
   ];
 
   const handleFilterChange = (f: FilterKind) => {
@@ -48,8 +47,8 @@ export function MapView() {
     setRouteTarget(null);
   };
 
-  const handleAdminSaved = (clinic: MapItem) => {
-    setDbClinics(prev => [...prev, clinic]);
+  const handleAdminSaved = (item: MapItem) => {
+    setDbItems(prev => [...prev, item]);
     setAdminCoords(null);
   };
 
@@ -87,8 +86,14 @@ export function MapView() {
             backdropFilter: "blur(10px)", transition: "all 0.25s",
           }}
         >
-          <span style={{ width: "8px", height: "8px", borderRadius: "50%", background: adminMode ? "#00f5d4" : "rgba(0,245,212,0.3)", boxShadow: adminMode ? "0 0 8px #00f5d4" : "none", flexShrink: 0, display: "inline-block", animation: adminMode ? "lf-ping 2s infinite" : "none" }} />
-          {adminMode ? "ADMIN MODE · انقر على الخريطة" : "ADMIN MODE"}
+          <span style={{
+            width: "8px", height: "8px", borderRadius: "50%",
+            background: adminMode ? "#00f5d4" : "rgba(0,245,212,0.3)",
+            boxShadow: adminMode ? "0 0 8px #00f5d4" : "none",
+            flexShrink: 0, display: "inline-block",
+            animation: adminMode ? "lf-ping 2s infinite" : "none",
+          }} />
+          {adminMode ? "ADMIN · انقر على الخريطة" : "ADMIN MODE"}
         </button>
 
         <Sidebar

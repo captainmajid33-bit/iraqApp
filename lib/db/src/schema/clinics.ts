@@ -4,9 +4,9 @@ import { z } from "zod/v4";
 
 export const clinicsTable = pgTable("clinics_db", {
   id: serial("id").primaryKey(),
+  category: text("category").notNull().default("clinic"),
   name: text("name").notNull(),
-  doctor: text("doctor").notNull().default(""),
-  specialty: text("specialty").notNull().default(""),
+  details: text("details").notNull().default(""),
   address: text("address").notNull().default(""),
   phone: text("phone").notNull().default(""),
   hours: text("hours").notNull().default(""),

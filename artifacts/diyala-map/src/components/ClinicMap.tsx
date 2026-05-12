@@ -19,9 +19,10 @@ interface ClinicMapProps {
 }
 
 const COLORS: Record<FilterKind, { open: string; closed: string }> = {
-  clinic:     { open: '#00f5d4', closed: '#ff2d78' },
-  restaurant: { open: '#ff9500', closed: '#ff2d78' },
-  pharmacy:   { open: '#c77dff', closed: '#ff2d78' },
+  clinic:      { open: '#00f5d4', closed: '#ff2d78' },
+  restaurant:  { open: '#ff9500', closed: '#ff2d78' },
+  pharmacy:    { open: '#c77dff', closed: '#ff2d78' },
+  gas_station: { open: '#f5c518', closed: '#ff2d78' },
 };
 
 // ── Icons ─────────────────────────────────────────────────────────────────────
@@ -42,11 +43,17 @@ function makeIcon(kind: FilterKind, isOpen: boolean, selected: boolean): L.DivIc
        <path d="M6 3v6.5A3.5 3.5 0 0 0 9.5 13H10v8" stroke="${color}" stroke-width="1.8" stroke-linecap="round"/>
        <path d="M3 3v6.5A3.5 3.5 0 0 0 6.5 13" stroke="${color}" stroke-width="1.8" stroke-linecap="round"/>
        <line x1="3" y1="8" x2="10" y2="8" stroke="${color}" stroke-width="1.5"/>`
+    : kind === 'pharmacy'
     /* capsule */
-    : `<rect x="8" y="3" width="8" height="18" rx="4" fill="${color}" fill-opacity="0.15" stroke="${color}" stroke-width="1.5"/>
+    ? `<rect x="8" y="3" width="8" height="18" rx="4" fill="${color}" fill-opacity="0.15" stroke="${color}" stroke-width="1.5"/>
        <path d="M8 3h8a4 4 0 0 1 0 0v9H8V7a4 4 0 0 1 0-4z" fill="${color}" fill-opacity="0.55"/>
        <rect x="8" y="3" width="8" height="18" rx="4" fill="none" stroke="${color}" stroke-width="1.5"/>
-       <line x1="8" y1="12" x2="16" y2="12" stroke="${color}" stroke-width="1.2"/>`;
+       <line x1="8" y1="12" x2="16" y2="12" stroke="${color}" stroke-width="1.2"/>`
+    /* fuel pump */
+    : `<rect x="3" y="5" width="11" height="16" rx="1.5" fill="${color}" fill-opacity="0.15" stroke="${color}" stroke-width="1.5"/>
+       <rect x="5" y="8" width="7" height="4" rx="1" fill="${color}" fill-opacity="0.5"/>
+       <path d="M14 8h2a2 2 0 0 1 2 2v4a1.5 1.5 0 0 0 3 0V9l-3-3" stroke="${color}" stroke-width="1.5" stroke-linecap="round" fill="none"/>
+       <line x1="3" y1="21" x2="14" y2="21" stroke="${color}" stroke-width="1.5" stroke-linecap="round"/>`;
 
   return L.divIcon({
     className: '',
@@ -196,9 +203,10 @@ export function ClinicMap({
       .leaflet-control-attribution{background:rgba(0,0,0,0.7)!important;color:#00f5d488!important;font-size:10px;}
       .leaflet-control-attribution a{color:#00f5d4!important;}
       .map-popup .leaflet-popup-content-wrapper{background:rgba(5,8,15,0.97)!important;border-radius:2px!important;padding:0!important;min-width:220px;}
-      .map-popup.clinic-pop .leaflet-popup-content-wrapper{border:1px solid #00f5d4!important;box-shadow:0 0 20px #00f5d444!important;}
-      .map-popup.resto-pop  .leaflet-popup-content-wrapper{border:1px solid #ff9500!important;box-shadow:0 0 20px #ff950044!important;}
-      .map-popup.pharma-pop .leaflet-popup-content-wrapper{border:1px solid #c77dff!important;box-shadow:0 0 20px #c77dff44!important;}
+      .map-popup.clinic-pop  .leaflet-popup-content-wrapper{border:1px solid #00f5d4!important;box-shadow:0 0 20px #00f5d444!important;}
+      .map-popup.resto-pop   .leaflet-popup-content-wrapper{border:1px solid #ff9500!important;box-shadow:0 0 20px #ff950044!important;}
+      .map-popup.pharma-pop  .leaflet-popup-content-wrapper{border:1px solid #c77dff!important;box-shadow:0 0 20px #c77dff44!important;}
+      .map-popup.gas-pop     .leaflet-popup-content-wrapper{border:1px solid #f5c518!important;box-shadow:0 0 20px #f5c51844!important;}
       .map-popup .leaflet-popup-content{margin:0!important;width:auto!important;}
       .map-popup .leaflet-popup-tip-container{display:none;}
       .map-popup .leaflet-popup-close-button{color:#aaa!important;font-size:18px!important;top:6px!important;right:8px!important;}
@@ -224,9 +232,14 @@ export function ClinicMap({
   // Build popup DOM
   const buildPopup = useCallback((item: MapItem)=>{
     const color = item.status==='مفتوح' ? COLORS[item.kind].open : COLORS[item.kind].closed;
-    const kindLabel = item.kind==='clinic'?'🏥 MEDICAL':item.kind==='restaurant'?'🍽️ DINING':'💊 PHARMACY';
+    const kindLabel = item.kind==='clinic'?'🏥 MEDICAL'
+      :item.kind==='restaurant'?'🍽️ DINING'
+      :item.kind==='pharmacy'?'💊 PHARMACY'
+      :'⛽ FUEL';
 
-    const sub = item.kind==='clinic' && 'specialty' in item
+    const sub = 'details' in item && (item as any).details
+      ? (item as any).details
+      : item.kind==='clinic' && 'specialty' in item
       ? `${(item as any).specialty}`
       : item.kind==='restaurant' && 'cuisine' in item
       ? `${(item as any).cuisine} · ${(item as any).type}`
@@ -273,7 +286,7 @@ export function ClinicMap({
     items.filter(i=>i.kind===activeFilter).forEach(item=>{
       const isOpen=item.status==='مفتوح';
       const isSelected=selectedItem?.id===item.id;
-      const popupClass=`map-popup ${item.kind==='clinic'?'clinic-pop':item.kind==='restaurant'?'resto-pop':'pharma-pop'}`;
+      const popupClass=`map-popup ${item.kind==='clinic'?'clinic-pop':item.kind==='restaurant'?'resto-pop':item.kind==='pharmacy'?'pharma-pop':'gas-pop'}`;
       const marker=L.marker([item.lat,item.lng],{icon:makeIcon(item.kind,isOpen,isSelected)}).addTo(mapRef.current!);
       marker.bindPopup(L.popup({className:popupClass,offset:[0,-8],closeButton:true,autoClose:true,autoPan:true}).setContent(buildPopup(item)));
       marker.on('click',()=>{marker.openPopup();mapRef.current?.flyTo([item.lat,item.lng],15,{duration:0.8});});
@@ -298,9 +311,10 @@ export function ClinicMap({
   const handleCancelRoute = () => { clearRouteVisuals(); onClearRoute(); };
 
   const tabs = [
-    {kind:'clinic'      as FilterKind, labelEn:'MEDICAL',   label:'الأطباء',   emoji:'🏥'},
-    {kind:'restaurant'  as FilterKind, labelEn:'DINING',    label:'المطاعم',   emoji:'🍽️'},
-    {kind:'pharmacy'    as FilterKind, labelEn:'PHARMACY',  label:'الصيدليات', emoji:'💊'},
+    {kind:'clinic'       as FilterKind, labelEn:'MEDICAL',   label:'الأطباء',    emoji:'🏥'},
+    {kind:'restaurant'   as FilterKind, labelEn:'DINING',    label:'المطاعم',    emoji:'🍽️'},
+    {kind:'pharmacy'     as FilterKind, labelEn:'PHARMACY',  label:'الصيدليات',  emoji:'💊'},
+    {kind:'gas_station'  as FilterKind, labelEn:'FUEL',      label:'محطات الوقود', emoji:'⛽'},
   ];
 
   return (
