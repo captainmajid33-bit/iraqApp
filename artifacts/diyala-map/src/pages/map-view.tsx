@@ -18,7 +18,10 @@ export function MapView() {
   const [adminMode, setAdminMode] = useState(false);
   const [adminCoords, setAdminCoords] = useState<{ lat: number; lng: number } | null>(null);
 
+  // DB items (added via admin)
   const [dbItems, setDbItems] = useState<MapItem[]>([]);
+  // IDs of static items hidden by admin delete
+  const [hiddenStaticIds, setHiddenStaticIds] = useState<Set<number>>(new Set());
 
   const fetchDbItems = useCallback(async () => {
     try {
@@ -33,13 +36,14 @@ export function MapView() {
 
   useEffect(() => { fetchDbItems(); }, [fetchDbItems]);
 
-  const allItems: MapItem[] = [
+  const staticItems: MapItem[] = [
     ...staticClinics,
     ...restaurants,
     ...pharmacies,
     ...gasStations,
-    ...dbItems,
-  ];
+  ].filter(i => !hiddenStaticIds.has(i.id));
+
+  const allItems: MapItem[] = [...staticItems, ...dbItems];
 
   const handleFilterChange = (f: FilterKind) => {
     setActiveFilter(f);
@@ -51,6 +55,25 @@ export function MapView() {
     setDbItems(prev => [...prev, item]);
     setAdminCoords(null);
   };
+
+  const handleAdminDelete = useCallback(async (item: MapItem) => {
+    const isDbItem = 'category' in item;
+
+    if (isDbItem) {
+      try {
+        await fetch(`/api/locations/${item.id}`, { method: "DELETE" });
+        setDbItems(prev => prev.filter(i => i.id !== item.id));
+      } catch {
+        // ignore
+      }
+    } else {
+      // Static item — hide locally
+      setHiddenStaticIds(prev => new Set([...prev, item.id]));
+    }
+
+    if (selectedItem?.id === item.id) setSelectedItem(null);
+    if (routeTarget?.id === item.id) setRouteTarget(null);
+  }, [selectedItem, routeTarget]);
 
   return (
     <div className="flex flex-col h-screen w-full bg-background overflow-hidden dark" dir="rtl">
@@ -69,6 +92,7 @@ export function MapView() {
           onClearRoute={() => setRouteTarget(null)}
           adminMode={adminMode}
           onMapClick={(latlng) => { setAdminCoords(latlng); setSelectedItem(null); }}
+          onAdminDelete={handleAdminDelete}
         />
 
         {/* Admin Mode Toggle */}
@@ -77,23 +101,23 @@ export function MapView() {
           style={{
             position: "absolute", bottom: "24px", right: "12px", zIndex: 1000,
             padding: "9px 16px",
-            background: adminMode ? "rgba(0,245,212,0.18)" : "rgba(5,8,15,0.9)",
-            border: `1px solid ${adminMode ? "#00f5d4" : "rgba(0,245,212,0.3)"}`,
-            color: adminMode ? "#00f5d4" : "rgba(0,245,212,0.5)",
+            background: adminMode ? "rgba(255,45,120,0.15)" : "rgba(5,8,15,0.9)",
+            border: `1px solid ${adminMode ? "#ff2d78" : "rgba(0,245,212,0.3)"}`,
+            color: adminMode ? "#ff2d78" : "rgba(0,245,212,0.5)",
             fontFamily: "Orbitron, sans-serif", fontSize: "10px", letterSpacing: "0.1em",
             cursor: "pointer", display: "flex", alignItems: "center", gap: "8px",
-            boxShadow: adminMode ? "0 0 20px rgba(0,245,212,0.3)" : "none",
+            boxShadow: adminMode ? "0 0 20px rgba(255,45,120,0.3)" : "none",
             backdropFilter: "blur(10px)", transition: "all 0.25s",
           }}
         >
           <span style={{
             width: "8px", height: "8px", borderRadius: "50%",
-            background: adminMode ? "#00f5d4" : "rgba(0,245,212,0.3)",
-            boxShadow: adminMode ? "0 0 8px #00f5d4" : "none",
+            background: adminMode ? "#ff2d78" : "rgba(0,245,212,0.3)",
+            boxShadow: adminMode ? "0 0 8px #ff2d78" : "none",
             flexShrink: 0, display: "inline-block",
             animation: adminMode ? "lf-ping 2s infinite" : "none",
           }} />
-          {adminMode ? "ADMIN · انقر على الخريطة" : "ADMIN MODE"}
+          {adminMode ? "ADMIN · انقر للإضافة أو الحذف" : "ADMIN MODE"}
         </button>
 
         <Sidebar

@@ -16,6 +16,7 @@ interface ClinicMapProps {
   onClearRoute: () => void;
   adminMode?: boolean;
   onMapClick?: (latlng: { lat: number; lng: number }) => void;
+  onAdminDelete?: (item: MapItem) => void;
 }
 
 const COLORS: Record<FilterKind, { open: string; closed: string }> = {
@@ -111,7 +112,7 @@ export function ClinicMap({
   onSelectItem, selectedItem,
   userLocation, onUserLocationChange,
   routeTarget, onNavigate, onClearRoute,
-  adminMode = false, onMapClick,
+  adminMode = false, onMapClick, onAdminDelete,
 }: ClinicMapProps) {
   const mapContainer = useRef<HTMLDivElement>(null);
   const mapRef = useRef<L.Map|null>(null);
@@ -125,6 +126,7 @@ export function ClinicMap({
   const onNavigateRef = useRef(onNavigate);
   const userLocationRef = useRef(userLocation);
   const onMapClickRef = useRef(onMapClick);
+  const onAdminDeleteRef = useRef(onAdminDelete);
   const adminModeRef = useRef(adminMode);
   const locateAndNavigateRef = useRef<((item:MapItem)=>void)|null>(null);
 
@@ -132,6 +134,7 @@ export function ClinicMap({
   useEffect(()=>{onNavigateRef.current=onNavigate;},[onNavigate]);
   useEffect(()=>{userLocationRef.current=userLocation;},[userLocation]);
   useEffect(()=>{onMapClickRef.current=onMapClick;},[onMapClick]);
+  useEffect(()=>{onAdminDeleteRef.current=onAdminDelete;},[onAdminDelete]);
   useEffect(()=>{
     adminModeRef.current=adminMode;
     if (mapRef.current) {
@@ -214,6 +217,8 @@ export function ClinicMap({
       .popup-nav-btn:hover{background:rgba(245,197,24,0.22);box-shadow:0 0 18px rgba(245,197,24,0.45);}
       .popup-details-btn{width:100%;padding:7px 0;border:none;background:transparent;color:#aaa;font-family:'Rajdhani',sans-serif;font-size:12px;letter-spacing:0.06em;cursor:pointer;transition:all 0.2s;border-top:1px solid rgba(255,255,255,0.06);margin-top:4px;}
       .popup-details-btn:hover{color:#fff;}
+      .popup-delete-btn{width:100%;padding:8px 0;border:1px solid rgba(255,45,120,0.4);background:transparent;color:#ff2d78;font-family:'Rajdhani',sans-serif;font-size:12px;letter-spacing:0.06em;cursor:pointer;transition:all 0.25s;display:flex;align-items:center;justify-content:center;gap:7px;border-radius:2px;}
+      .popup-delete-btn:hover{background:rgba(255,45,120,0.12);border-color:#ff2d78;}
     `;
     document.head.appendChild(style);
     mapRef.current=L.map(mapContainer.current,{center:[33.7451,44.6488],zoom:13,zoomControl:true});
@@ -275,6 +280,33 @@ export function ClinicMap({
 
     el.appendChild(navBtn);
     el.appendChild(detailsBtn);
+
+    // Admin delete button
+    if (adminModeRef.current) {
+      const sep=document.createElement('div');
+      sep.style.cssText='height:1px;background:rgba(255,45,120,0.2);margin:8px 0 6px;';
+      el.appendChild(sep);
+
+      const deleteBtn=document.createElement('button');
+      deleteBtn.className='popup-delete-btn';
+      deleteBtn.innerHTML=`<svg width="13" height="13" viewBox="0 0 24 24" fill="none"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6" stroke="#ff2d78" stroke-width="1.8" stroke-linecap="round"/><path d="M10 11v6M14 11v6" stroke="#ff2d78" stroke-width="1.6" stroke-linecap="round"/></svg>حذف هذا الموقع`;
+
+      let confirmed=false;
+      deleteBtn.addEventListener('click',()=>{
+        if (!confirmed) {
+          confirmed=true;
+          deleteBtn.innerHTML=`<svg width="13" height="13" viewBox="0 0 24 24" fill="none"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6" stroke="#ff2d78" stroke-width="1.8" stroke-linecap="round"/></svg>تأكيد الحذف؟`;
+          deleteBtn.style.background='rgba(255,45,120,0.2)';
+          deleteBtn.style.boxShadow='0 0 12px rgba(255,45,120,0.4)';
+          setTimeout(()=>{ confirmed=false; deleteBtn.innerHTML=`<svg width="13" height="13" viewBox="0 0 24 24" fill="none"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6" stroke="#ff2d78" stroke-width="1.8" stroke-linecap="round"/><path d="M10 11v6M14 11v6" stroke="#ff2d78" stroke-width="1.6" stroke-linecap="round"/></svg>حذف هذا الموقع`; deleteBtn.style.background='transparent'; deleteBtn.style.boxShadow='none'; },3000);
+        } else {
+          onAdminDeleteRef.current?.(item);
+          mapRef.current?.closePopup();
+        }
+      });
+      el.appendChild(deleteBtn);
+    }
+
     return el;
   },[]);
 
