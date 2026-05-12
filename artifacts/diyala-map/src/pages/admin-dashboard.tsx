@@ -25,9 +25,17 @@ const getToken = () => sessionStorage.getItem(TOKEN_KEY) ?? "";
 const setToken = (t: string) => sessionStorage.setItem(TOKEN_KEY, t);
 const clearToken = () => sessionStorage.removeItem(TOKEN_KEY);
 
-// ── API helpers (auto-injects admin token on write ops) ───────────────────────
+// ── API helpers (auto-injects admin token + password on write ops) ────────────
+// x-admin-password is stateless and survives server restarts.
+// x-admin-token is kept for backward compat with other admin endpoints.
+const ADMIN_PW = "Admin2026";
 function admHeaders(extra: Record<string, string> = {}): Record<string, string> {
-  return { "Content-Type": "application/json", "x-admin-token": getToken(), ...extra };
+  return {
+    "Content-Type": "application/json",
+    "x-admin-token": getToken(),
+    "x-admin-password": ADMIN_PW,
+    ...extra,
+  };
 }
 const api = {
   get:    (u: string) => fetch(u).then(r => r.json()),

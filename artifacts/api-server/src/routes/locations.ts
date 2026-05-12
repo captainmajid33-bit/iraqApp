@@ -8,12 +8,14 @@ import { broadcastLocationUpdate } from "../lib/sse";
 
 const router: IRouter = Router();
 
-// Global partner key (legacy / partner-app fallback)
-const PARTNER_KEY = process.env.PARTNER_KEY ?? "partner-diyala-2026";
+// ── Auth constants ─────────────────────────────────────────────────────────────
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD ?? "Admin2026";
+const PARTNER_KEY    = process.env.PARTNER_KEY    ?? "partner-diyala-2026";
 
 // ── Helper: strip merchantKey before sending to clients ───────────────────────
-function safe(item: Record<string, unknown>) {
-  const { merchantKey: _mk, merchant_key: _mk2, ...rest } = item as any;
+function safe(row: any): Record<string, unknown> {
+  if (!row) return row;
+  const { merchantKey: _a, merchant_key: _b, ...rest } = row;
   return rest;
 }
 
@@ -21,14 +23,15 @@ function safe(item: Record<string, unknown>) {
 router.get("/locations", async (req, res) => {
   try {
     const { category } = req.query;
-    const items = await (category
-      ? db.select().from(locationsTable)
+    const items = category
+      ? await db.select().from(locationsTable)
           .where(eq(locationsTable.category, String(category)))
           .orderBy(asc(locationsTable.createdAt))
-      : db.select().from(locationsTable)
-          .orderBy(asc(locationsTable.createdAt)));
+      : await db.select().from(locationsTable)
+          .orderBy(asc(locationsTable.createdAt));
     res.json(items.map(safe));
-  } catch {
+  } catch (err) {
+    console.error("[GET /locations] DB error:", err);
     res.status(500).json({ error: "Failed to fetch locations" });
   }
 });
@@ -38,9 +41,10 @@ router.get("/locations/:id", async (req, res) => {
   try {
     const id = Number(req.params.id);
     const [item] = await db.select().from(locationsTable).where(eq(locationsTable.id, id));
-    if (!item) return res.status(404).json({ error: "Not found" });
-    res.json(safe(item as any));
-  } catch {
+    if (!item) { res.status(404).json({ error: "Not found" }); return; }
+    res.json(safe(item));
+  } catch (err) {
+    console.error("[GET /locations/:id] DB error:", err);
     res.status(500).json({ error: "Failed to fetch location" });
   }
 });
@@ -50,26 +54,31 @@ router.post("/locations", requireAdmin, async (req, res) => {
   try {
     const data = insertLocationSchema.parse(req.body);
     const [item] = await db.insert(locationsTable).values(data).returning();
-    broadcastLocationUpdate(safe(item as any));
-    res.status(201).json(safe(item as any));
+    broadcastLocationUpdate(safe(item));
+    res.status(201).json(safe(item));
   } catch (err: any) {
+    console.error("[POST /locations] error:", err);
     res.status(400).json({ error: err?.message ?? "Invalid data" });
   }
 });
 
-// ── PATCH update — three auth paths ───────────────────────────────────────────
-//   1. Admin token  → full field update
-//   2. Global partner key (x-partner-key) → status only (backward compat)
-//   3. Per-merchant key (x-merchant-key)  → status only for that specific location
+// ── PATCH update ───────────────────────────────────────────────────────────────
+// Auth priority (stateless — survives server restarts):
+//   1. x-admin-password == ADMIN_PASSWORD  → full update of any field
+//   2. x-admin-token    (session token)    → full update (backward compat)
+//   3. x-partner-key    (global key)       → status field only
+//   4. x-merchant-key   (per-location key) → status field only for that location
 router.patch("/locations/:id", async (req, res) => {
-  const adminToken  = req.headers["x-admin-token"]  as string | undefined;
-  const partnerKey  = req.headers["x-partner-key"]  as string | undefined;
-  const merchantKey = req.headers["x-merchant-key"] as string | undefined;
+  const adminPassword = (req.headers["x-admin-password"] as string | undefined) ?? "";
+  const adminToken    = (req.headers["x-admin-token"]    as string | undefined) ?? "";
+  const partnerKey    = (req.headers["x-partner-key"]    as string | undefined) ?? "";
+  const merchantKey   = (req.headers["x-merchant-key"]   as string | undefined) ?? "";
 
-  const isAdmin   = isValidAdminToken(adminToken);
+  // ── Determine identity ──────────────────────────────────────────────────────
+  const isAdmin   = (adminPassword === ADMIN_PASSWORD) || isValidAdminToken(adminToken);
   const isPartner = !isAdmin && (partnerKey === PARTNER_KEY);
 
-  // Per-merchant check: x-merchant-key must match the stored key for THIS location
+  // Per-location merchant key check
   let isMerchant = false;
   if (!isAdmin && !isPartner && merchantKey) {
     try {
@@ -83,39 +92,83 @@ router.patch("/locations/:id", async (req, res) => {
           isMerchant = true;
         }
       }
-    } catch { /* DB error → stay unauthorized */ }
-  }
-
-  if (!isAdmin && !isPartner && !isMerchant) {
-    return res.status(401).json({
-      error: "Unauthorized — provide x-admin-token, x-partner-key, or x-merchant-key",
-    });
-  }
-
-  // Non-admins may ONLY change 'status'
-  if (!isAdmin) {
-    const keys = Object.keys(req.body ?? {});
-    if (keys.length === 0 || !keys.every(k => k === "status")) {
-      return res.status(403).json({ error: "يمكن تعديل حقل 'status' فقط" });
+    } catch (err) {
+      console.error("[PATCH] merchant-key DB lookup error:", err);
     }
   }
 
+  // ── Reject if no valid auth ─────────────────────────────────────────────────
+  if (!isAdmin && !isPartner && !isMerchant) {
+    const why =
+      adminPassword ? `wrong admin password (got: "${adminPassword}")` :
+      adminToken    ? "expired/invalid admin token — re-login required" :
+      partnerKey    ? `wrong partner key (got: "${partnerKey}")` :
+      merchantKey   ? "merchant key does not match this location" :
+      "no auth header provided";
+    console.warn(`[PATCH /locations/${req.params.id}] 401 — ${why}`);
+    res.status(401).json({
+      error: "Unauthorized",
+      hint: why,
+    });
+    return;
+  }
+
+  // ── Non-admins: status field only ──────────────────────────────────────────
+  if (!isAdmin) {
+    const keys = Object.keys(req.body ?? {});
+    if (keys.length === 0 || !keys.every(k => k === "status")) {
+      console.warn(`[PATCH /locations/${req.params.id}] 403 — non-admin tried to change: ${keys.join(", ")}`);
+      res.status(403).json({ error: "يمكن تعديل حقل 'status' فقط" });
+      return;
+    }
+  }
+
+  // ── Apply update ────────────────────────────────────────────────────────────
   try {
     const id = Number(req.params.id);
-    const data = isAdmin
-      ? insertLocationSchema.partial().parse(req.body)
-      : { status: String(req.body.status) };
+    if (isNaN(id)) { res.status(400).json({ error: "Invalid location ID" }); return; }
 
-    const [item] = await db
-      .update(locationsTable).set(data)
-      .where(eq(locationsTable.id, id)).returning();
-    if (!item) return res.status(404).json({ error: "Not found" });
+    let data: Record<string, unknown>;
+    if (isAdmin) {
+      // Full update — parse with partial schema (all fields optional)
+      // Use loose schema to accept Arabic status values without strict enum checks
+      const parsed = insertLocationSchema.partial().safeParse(req.body);
+      if (!parsed.success) {
+        const msg = parsed.error?.message ?? "Validation error";
+        console.error(`[PATCH /locations/${id}] Zod validation failed:`, parsed.error);
+        res.status(400).json({ error: msg, details: parsed.error?.issues });
+        return;
+      }
+      data = parsed.data as Record<string, unknown>;
+    } else {
+      // Non-admin: only status — bypass schema, accept any string value
+      const status = String(req.body?.status ?? "").trim();
+      if (!status) { res.status(400).json({ error: "status field is required" }); return; }
+      data = { status };
+    }
 
-    const out = safe(item as any);
+    console.log(`[PATCH /locations/${id}] updating with:`, data, `| auth: ${isAdmin ? "ADMIN" : isPartner ? "PARTNER" : "MERCHANT"}`);
+
+    const [updated] = await db
+      .update(locationsTable)
+      .set(data)
+      .where(eq(locationsTable.id, id))
+      .returning();
+
+    if (!updated) {
+      console.warn(`[PATCH /locations/${id}] location not found in DB`);
+      res.status(404).json({ error: "Location not found" });
+      return;
+    }
+
+    console.log(`[PATCH /locations/${id}] success — new status: ${updated.status}`);
+    const out = safe(updated);
     broadcastLocationUpdate(out);
     res.status(200).json({ success: true, location: out });
+
   } catch (err: any) {
-    res.status(400).json({ error: err?.message ?? "Invalid data" });
+    console.error(`[PATCH /locations/${req.params.id}] DB update error:`, err);
+    res.status(500).json({ error: "Database update failed", detail: err?.message ?? String(err) });
   }
 });
 
@@ -126,51 +179,56 @@ router.delete("/locations/:id", requireAdmin, async (req, res) => {
     await db.delete(locationsTable).where(eq(locationsTable.id, id));
     broadcastLocationUpdate({ id, _deleted: true });
     res.json({ ok: true });
-  } catch {
+  } catch (err) {
+    console.error("[DELETE /locations/:id] error:", err);
     res.status(500).json({ error: "Failed to delete location" });
   }
 });
 
-// ── GET /api/admin/locations/:id/merchant-key — view key (admin only) ─────────
+// ── GET /api/admin/locations/:id/merchant-key ─────────────────────────────────
 router.get("/admin/locations/:id/merchant-key", requireAdmin, async (req, res) => {
   try {
     const id = Number(req.params.id);
     const [loc] = await db
       .select({ id: locationsTable.id, name: locationsTable.name, merchantKey: locationsTable.merchantKey })
       .from(locationsTable).where(eq(locationsTable.id, id));
-    if (!loc) return res.status(404).json({ error: "Not found" });
+    if (!loc) { res.status(404).json({ error: "Not found" }); return; }
     res.json({ id: loc.id, name: loc.name, merchantKey: loc.merchantKey ?? null });
-  } catch {
+  } catch (err) {
+    console.error("[GET merchant-key] error:", err);
     res.status(500).json({ error: "Failed to fetch merchant key" });
   }
 });
 
-// ── POST /api/admin/locations/:id/merchant-key — generate or set key ──────────
+// ── POST /api/admin/locations/:id/merchant-key — generate or set ──────────────
 router.post("/admin/locations/:id/merchant-key", requireAdmin, async (req, res) => {
   try {
-    const id = Number(req.params.id);
-    // Use provided key or generate a secure random one
-    const newKey: string = (req.body?.key && String(req.body.key).trim())
+    const id     = Number(req.params.id);
+    const newKey = (req.body?.key && String(req.body.key).trim())
       ? String(req.body.key).trim()
       : randomBytes(16).toString("hex");
 
     const [item] = await db
-      .update(locationsTable).set({ merchantKey: newKey })
-      .where(eq(locationsTable.id, id)).returning({ id: locationsTable.id, name: locationsTable.name, merchantKey: locationsTable.merchantKey });
-    if (!item) return res.status(404).json({ error: "Not found" });
+      .update(locationsTable)
+      .set({ merchantKey: newKey })
+      .where(eq(locationsTable.id, id))
+      .returning({ id: locationsTable.id, name: locationsTable.name, merchantKey: locationsTable.merchantKey });
+    if (!item) { res.status(404).json({ error: "Not found" }); return; }
     res.json({ ok: true, id: item.id, name: item.name, merchantKey: item.merchantKey });
-  } catch {
+  } catch (err) {
+    console.error("[POST merchant-key] error:", err);
     res.status(500).json({ error: "Failed to set merchant key" });
   }
 });
 
-// ── DELETE /api/admin/locations/:id/merchant-key — revoke key ─────────────────
+// ── DELETE /api/admin/locations/:id/merchant-key — revoke ────────────────────
 router.delete("/admin/locations/:id/merchant-key", requireAdmin, async (req, res) => {
   try {
     const id = Number(req.params.id);
     await db.update(locationsTable).set({ merchantKey: null }).where(eq(locationsTable.id, id));
     res.json({ ok: true, merchantKey: null });
-  } catch {
+  } catch (err) {
+    console.error("[DELETE merchant-key] error:", err);
     res.status(500).json({ error: "Failed to revoke merchant key" });
   }
 });
