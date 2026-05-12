@@ -14,6 +14,8 @@ interface ClinicMapProps {
   routeTarget: MapItem | null;
   onNavigate: (item: MapItem) => void;
   onClearRoute: () => void;
+  adminMode?: boolean;
+  onMapClick?: (latlng: { lat: number; lng: number }) => void;
 }
 
 const COLORS: Record<FilterKind, { open: string; closed: string }> = {
@@ -102,6 +104,7 @@ export function ClinicMap({
   onSelectItem, selectedItem,
   userLocation, onUserLocationChange,
   routeTarget, onNavigate, onClearRoute,
+  adminMode = false, onMapClick,
 }: ClinicMapProps) {
   const mapContainer = useRef<HTMLDivElement>(null);
   const mapRef = useRef<L.Map|null>(null);
@@ -114,11 +117,20 @@ export function ClinicMap({
   const onSelectRef = useRef(onSelectItem);
   const onNavigateRef = useRef(onNavigate);
   const userLocationRef = useRef(userLocation);
+  const onMapClickRef = useRef(onMapClick);
+  const adminModeRef = useRef(adminMode);
   const locateAndNavigateRef = useRef<((item:MapItem)=>void)|null>(null);
 
   useEffect(()=>{onSelectRef.current=onSelectItem;},[onSelectItem]);
   useEffect(()=>{onNavigateRef.current=onNavigate;},[onNavigate]);
   useEffect(()=>{userLocationRef.current=userLocation;},[userLocation]);
+  useEffect(()=>{onMapClickRef.current=onMapClick;},[onMapClick]);
+  useEffect(()=>{
+    adminModeRef.current=adminMode;
+    if (mapRef.current) {
+      mapRef.current.getContainer().style.cursor = adminMode ? 'crosshair' : '';
+    }
+  },[adminMode]);
 
   const [locating,setLocating] = useState(false);
   const [locateError,setLocateError] = useState<string|null>(null);
@@ -201,6 +213,11 @@ export function ClinicMap({
       attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/">CARTO</a>',
       subdomains:'abcd',maxZoom:20,
     }).addTo(mapRef.current);
+    mapRef.current.on('click',(e:L.LeafletMouseEvent)=>{
+      if (adminModeRef.current) {
+        onMapClickRef.current?.({lat:e.latlng.lat,lng:e.latlng.lng});
+      }
+    });
     return ()=>{mapRef.current?.remove();mapRef.current=null;style.remove();};
   },[]);
 
