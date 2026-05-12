@@ -33,7 +33,9 @@ const corsOptions: CorsOptions = {
     "Content-Type",
     "Authorization",
     "x-admin-token",
+    "x-admin-password",
     "x-partner-key",
+    "x-merchant-key",
   ],
   exposedHeaders: ["Content-Type"],
   credentials: false,          // partner uses key header, not cookies

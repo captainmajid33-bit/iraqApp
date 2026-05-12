@@ -209,7 +209,10 @@ export function ClinicMap({
   const [routeInfo,setRouteInfo]       = useState<{distanceKm:number;durationMin:number}|null>(null);
   const [showMoreModal, setShowMoreModal] = useState(false);
   const [searchQuery,   setSearchQuery]   = useState('');
-  const pendingJumpRef = useRef<number|null>(null);
+  const [showTraffic,   setShowTraffic]   = useState(false);
+  const pendingJumpRef   = useRef<number|null>(null);
+  const trafficLayersRef = useRef<L.Polyline[]>([]);
+  const missionMarkerRef = useRef<L.Marker|null>(null);
 
   const clearRouteVisuals = useCallback(()=>{
     routeGlowRef.current?.remove(); routeGlowRef.current=null;
@@ -369,6 +372,8 @@ export function ClinicMap({
     style.textContent=`
       @keyframes lf-ping{75%,100%{transform:scale(2.5);opacity:0;}}
       @keyframes lf-spin{to{transform:rotate(360deg);}}
+      @keyframes mission-pulse{0%,100%{transform:scale(1);opacity:1;}50%{transform:scale(1.15);opacity:0.8;}}
+      @keyframes traffic-flow{0%{stroke-dashoffset:30;}100%{stroke-dashoffset:0;}}
       .leaflet-container{background:#0a0d14!important;font-family:'Rajdhani',sans-serif;}
       .leaflet-tile-pane{filter:brightness(0.9);}
       .leaflet-control-zoom a{background:#0d1117!important;color:#00f5d4!important;border-color:#00f5d4!important;font-family:'Orbitron',sans-serif;}
@@ -379,6 +384,9 @@ export function ClinicMap({
       .map-popup .leaflet-popup-content{margin:0!important;width:auto!important;}
       .map-popup .leaflet-popup-tip-container{display:none;}
       .map-popup .leaflet-popup-close-button{color:#aaa!important;font-size:18px!important;top:6px!important;right:8px!important;}
+      .mission-popup .leaflet-popup-content-wrapper{background:rgba(5,8,15,0.97)!important;border:1px solid #f5c518!important;box-shadow:0 0 32px #f5c51844,0 0 64px #f5c51822!important;border-radius:2px!important;padding:0!important;}
+      .mission-popup .leaflet-popup-tip{background:#f5c518!important;}
+      .mission-popup .leaflet-popup-tip-container{display:block;}
       .popup-nav-btn{width:100%;padding:9px 0;margin-top:10px;background:rgba(245,197,24,0.1);border:1px solid #f5c518;color:#f5c518;font-family:'Orbitron',monospace;font-size:11px;letter-spacing:0.08em;cursor:pointer;transition:all 0.2s;display:flex;align-items:center;justify-content:center;gap:7px;}
       .popup-nav-btn:hover{background:rgba(245,197,24,0.22);box-shadow:0 0 18px rgba(245,197,24,0.45);}
       .popup-details-btn{width:100%;padding:7px 0;border:none;background:transparent;color:#aaa;font-family:'Rajdhani',sans-serif;font-size:12px;letter-spacing:0.06em;cursor:pointer;transition:all 0.2s;border-top:1px solid rgba(255,255,255,0.06);margin-top:4px;}
@@ -396,7 +404,49 @@ export function ClinicMap({
     mapRef.current.on('click',(e:L.LeafletMouseEvent)=>{
       if (adminModeRef.current) onMapClickRef.current?.({lat:e.latlng.lat,lng:e.latlng.lng});
     });
+
+    // ── Mission marker — golden pulsing diamond at city centre ───────────────
+    const missionIcon = L.divIcon({
+      className:'',
+      html:`<div style="width:54px;height:54px;position:relative;display:flex;align-items:center;justify-content:center;cursor:pointer;">
+        <div style="position:absolute;inset:-4px;border-radius:50%;background:#f5c518;opacity:0.10;animation:lf-ping 1.8s cubic-bezier(0,0,0.2,1) infinite;"></div>
+        <div style="position:absolute;inset:-10px;border-radius:50%;background:#f5c518;opacity:0.05;animation:lf-ping 1.8s cubic-bezier(0,0,0.2,1) infinite;animation-delay:0.5s;"></div>
+        <div style="animation:mission-pulse 2s ease-in-out infinite;">
+          <svg width="46" height="46" viewBox="0 0 46 46" fill="none">
+            <polygon points="23,2 43,23 23,44 3,23" fill="#f5c51818" stroke="#f5c518" stroke-width="2"/>
+            <polygon points="23,10 36,23 23,36 10,23" fill="#f5c518" opacity="0.85"/>
+            <text x="23" y="28" text-anchor="middle" font-size="13" fill="#0a0d14" font-weight="900" font-family="Arial">★</text>
+          </svg>
+        </div>
+      </div>`,
+      iconSize:[54,54], iconAnchor:[27,27],
+    });
+    const missionEl = document.createElement('div');
+    missionEl.style.cssText='padding:18px 16px 14px;text-align:center;direction:rtl;min-width:230px;';
+    missionEl.innerHTML=`
+      <div style="font-family:Orbitron,sans-serif;font-size:9px;color:#f5c518;letter-spacing:0.18em;margin-bottom:10px;text-shadow:0 0 12px #f5c518;">⭐ DAILY MISSION ⭐</div>
+      <div style="font-family:Rajdhani,sans-serif;font-size:20px;font-weight:800;color:#fff;margin-bottom:6px;text-shadow:0 0 18px #f5c51877;">استلم جائزتك الآن</div>
+      <div style="font-family:Rajdhani,sans-serif;font-size:13px;color:rgba(255,255,255,0.45);margin-bottom:14px;line-height:1.5;">توجّه إلى نقطة الجائزة واضغط للاستلام<br/>المكافأة: خصم 30% على أقرب مطعم</div>
+      <div style="display:flex;gap:8px;align-items:center;justify-content:center;margin-bottom:2px;">
+        <div style="width:6px;height:6px;border-radius:50%;background:#00f5d4;box-shadow:0 0 8px #00f5d4;animation:lf-ping 2s ease infinite;"></div>
+        <span style="font-family:Orbitron,sans-serif;font-size:9px;color:#00f5d4;letter-spacing:0.1em;">ACTIVE</span>
+      </div>
+    `;
+    const closeBtn=document.createElement('button');
+    closeBtn.textContent='✕  إغلاق المهمة';
+    closeBtn.style.cssText='width:100%;padding:10px;margin-top:10px;background:rgba(245,197,24,0.08);border:1px solid #f5c51855;color:#f5c518;font-family:Orbitron,sans-serif;font-size:9px;letter-spacing:0.12em;cursor:pointer;transition:all 0.2s;';
+    closeBtn.onmouseover=()=>{closeBtn.style.background='rgba(245,197,24,0.18)';closeBtn.style.boxShadow='0 0 14px #f5c51844';};
+    closeBtn.onmouseout=()=>{closeBtn.style.background='rgba(245,197,24,0.08)';closeBtn.style.boxShadow='none';};
+    closeBtn.onclick=()=>{ mapRef.current?.closePopup(); };
+    missionEl.appendChild(closeBtn);
+
+    missionMarkerRef.current = L.marker([33.7451,44.6488],{icon:missionIcon,zIndexOffset:2000})
+      .addTo(mapRef.current)
+      .bindPopup(L.popup({className:'map-popup mission-popup',closeButton:false,autoPan:true,offset:[0,-10]}).setContent(missionEl));
+
     return ()=>{
+      missionMarkerRef.current?.remove(); missionMarkerRef.current=null;
+      trafficLayersRef.current.forEach(l=>l.remove()); trafficLayersRef.current=[];
       mapRef.current?.remove(); mapRef.current=null;
       style.remove();
       catStyleRef.current?.remove(); catStyleRef.current=null;
@@ -474,6 +524,42 @@ export function ClinicMap({
     }
     return el;
   },[]);
+
+  // ── Traffic layer — simulated GTA-style road congestion ─────────────────────
+  useEffect(()=>{
+    if (!mapRef.current) return;
+    // Remove existing layers
+    trafficLayersRef.current.forEach(l=>l.remove());
+    trafficLayersRef.current=[];
+    if (!showTraffic) return;
+    // Main roads of Baqubah (approximate real coordinates)
+    const roads: { coords:[number,number][], color:string, weight:number, dash?:string }[] = [
+      // Baghdad-Kirkuk highway (main N-S artery) — heavy traffic (red)
+      { coords:[[33.763,44.651],[33.756,44.651],[33.750,44.650],[33.742,44.649],[33.736,44.648]], color:'#ff2d78', weight:6 },
+      // Main E-W road — moderate (yellow)
+      { coords:[[33.745,44.632],[33.745,44.640],[33.745,44.649],[33.745,44.658],[33.745,44.666]], color:'#f5c518', weight:5 },
+      // Secondary road west — free (green)
+      { coords:[[33.760,44.640],[33.752,44.639],[33.744,44.639]], color:'#00f5d4', weight:4 },
+      // Secondary road east — moderate
+      { coords:[[33.751,44.659],[33.746,44.661],[33.739,44.662]], color:'#f5c518', weight:3 },
+      // Cross connector A — heavy
+      { coords:[[33.753,44.641],[33.753,44.649],[33.754,44.658]], color:'#ff2d78', weight:4 },
+      // Cross connector B — free
+      { coords:[[33.740,44.642],[33.741,44.650],[33.740,44.660]], color:'#00f5d4', weight:3 },
+      // Ring road north — moderate
+      { coords:[[33.760,44.638],[33.762,44.648],[33.761,44.658],[33.757,44.665]], color:'#f5c518', weight:3 },
+      // Ring road south — free
+      { coords:[[33.734,44.643],[33.735,44.653],[33.736,44.663]], color:'#00f5d4', weight:3 },
+      // Inner city — heavy
+      { coords:[[33.748,44.644],[33.748,44.650],[33.749,44.655]], color:'#ff9500', weight:4 },
+    ];
+    trafficLayersRef.current = roads.flatMap(({coords,color,weight})=>[
+      // Glow layer
+      L.polyline(coords,{color,weight:weight+6,opacity:0.08,lineCap:'round',lineJoin:'round'}).addTo(mapRef.current!),
+      // Main line
+      L.polyline(coords,{color,weight,opacity:0.75,lineCap:'round',lineJoin:'round',dashArray:'14 6'}).addTo(mapRef.current!),
+    ]);
+  },[showTraffic]);
 
   // Sync markers whenever items / activeFilter / selectedItem changes
   useEffect(()=>{
@@ -892,6 +978,65 @@ export function ClinicMap({
             textAlign:'center',
           }}>
             {Math.round(userHeading)}°
+          </div>
+        )}
+      </div>
+
+      {/* ── Traffic Toggle Button ── */}
+      <div style={{
+        position:'absolute',bottom:'20px',right:'20px',
+        zIndex:1000,display:'flex',flexDirection:'column',alignItems:'center',gap:'4px',
+      }}>
+        <button
+          onClick={()=>setShowTraffic(v=>!v)}
+          title={showTraffic?'إخفاء حركة المرور':'عرض حركة المرور'}
+          style={{
+            width:'52px',height:'52px',borderRadius:'50%',
+            background: showTraffic ? 'rgba(255,149,0,0.18)' : 'rgba(5,8,15,0.92)',
+            border: `2px solid ${showTraffic ? '#ff9500' : 'rgba(0,212,255,0.35)'}`,
+            color: showTraffic ? '#ff9500' : '#00d4ff',
+            cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',
+            boxShadow: showTraffic
+              ? '0 0 18px rgba(255,149,0,0.55), 0 0 36px rgba(255,149,0,0.2), inset 0 0 10px rgba(255,149,0,0.08)'
+              : '0 0 12px rgba(0,212,255,0.35), 0 0 24px rgba(0,212,255,0.1)',
+            backdropFilter:'blur(12px)',transition:'all 0.25s',position:'relative',
+          }}
+          onMouseEnter={e=>{(e.currentTarget as HTMLElement).style.boxShadow = showTraffic?'0 0 24px rgba(255,149,0,0.7), 0 0 48px rgba(255,149,0,0.25)':'0 0 20px rgba(0,212,255,0.6), 0 0 40px rgba(0,212,255,0.2)';}}
+          onMouseLeave={e=>{(e.currentTarget as HTMLElement).style.boxShadow = showTraffic?'0 0 18px rgba(255,149,0,0.55), 0 0 36px rgba(255,149,0,0.2), inset 0 0 10px rgba(255,149,0,0.08)':'0 0 12px rgba(0,212,255,0.35), 0 0 24px rgba(0,212,255,0.1)';}}
+        >
+          {/* Traffic / road icon */}
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+            <path d="M12 2v20" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeDasharray="3 3"/>
+            <rect x="3" y="4" width="18" height="3" rx="1.5" fill="currentColor" opacity="0.25"/>
+            <rect x="3" y="10.5" width="18" height="3" rx="1.5" fill="currentColor" opacity="0.55"/>
+            <rect x="3" y="17" width="18" height="3" rx="1.5" fill="currentColor" opacity="0.25"/>
+            {showTraffic && <>
+              <circle cx="6" cy="5.5" r="1.5" fill="#ff2d78"/>
+              <circle cx="12" cy="12" r="1.5" fill="#f5c518"/>
+              <circle cx="18" cy="18.5" r="1.5" fill="#00f5d4"/>
+            </>}
+          </svg>
+          {showTraffic && (
+            <div style={{position:'absolute',inset:0,borderRadius:'50%',background:'rgba(255,149,0,0.06)',animation:'lf-ping 2.5s ease-in-out infinite'}}/>
+          )}
+        </button>
+        <div style={{fontFamily:'Orbitron,sans-serif',fontSize:'7px',color:showTraffic?'#ff9500':'rgba(0,212,255,0.5)',letterSpacing:'0.1em',textAlign:'center'}}>
+          {showTraffic?'TRAFFIC':'TRAFFIC'}
+        </div>
+        {/* Traffic legend when active */}
+        {showTraffic && (
+          <div style={{
+            marginTop:'4px',background:'rgba(5,8,15,0.94)',
+            border:'1px solid rgba(255,149,0,0.3)',
+            padding:'7px 10px',backdropFilter:'blur(10px)',
+            display:'flex',flexDirection:'column',gap:'4px',
+          }}>
+            {[['#ff2d78','ازدحام شديد'],['#f5c518','معتدل'],['#00f5d4','سيّال']].map(([c,l])=>(
+              <div key={l} style={{display:'flex',alignItems:'center',gap:'6px'}}>
+                <div style={{width:'20px',height:'3px',background:c,borderRadius:'2px',boxShadow:`0 0 6px ${c}`}}/>
+                <span style={{fontFamily:'Rajdhani,sans-serif',fontSize:'10px',color:'rgba(255,255,255,0.6)'}}>{l}</span>
+              </div>
+            ))}
           </div>
         )}
       </div>
