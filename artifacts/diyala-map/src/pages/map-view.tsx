@@ -5,7 +5,7 @@ import { ClinicMap } from "@/components/ClinicMap";
 import { AdminModal } from "@/components/AdminModal";
 import { MapItem, Category } from "@/data/types";
 
-const POLL_MS = 15_000;
+const POLL_MS = 30_000; // 30 s fallback poll (SSE handles real-time)
 
 export function MapView() {
   const [items, setItems] = useState<MapItem[]>([]);
@@ -20,6 +20,7 @@ export function MapView() {
 
   const firstCatRef = useRef("");
 
+  // ── Full fetch (initial + fallback polling) ───────────────────────────────
   const fetchAll = useCallback(async () => {
     try {
       const [locRes, catRes] = await Promise.all([
@@ -33,10 +34,8 @@ export function MapView() {
       if (catRes.ok) {
         const cats: Category[] = await catRes.json();
         if (Array.isArray(cats) && cats.length > 0) {
-          // Sort alphabetically by labelEn
           const sorted = [...cats].sort((a, b) => a.labelEn.localeCompare(b.labelEn));
           setCategories(sorted);
-          // Set initial filter to first category once
           if (!firstCatRef.current) {
             firstCatRef.current = sorted[0].slug;
             setActiveFilter(sorted[0].slug);
@@ -56,6 +55,61 @@ export function MapView() {
     return () => clearInterval(iv);
   }, [fetchAll]);
 
+  // ── SSE — instant real-time updates from partner app or admin ─────────────
+  useEffect(() => {
+    let es: EventSource | null = null;
+    let retryTimeout: ReturnType<typeof setTimeout>;
+
+    function connect() {
+      es = new EventSource("/api/events");
+
+      es.addEventListener("location_update", (e: MessageEvent) => {
+        try {
+          const { location } = JSON.parse(e.data) as { location: any };
+          if (!location?.id) return;
+
+          if (location._deleted) {
+            // Location was deleted
+            setItems(prev => prev.filter(i => i.id !== location.id));
+            setSelectedItem(prev => prev?.id === location.id ? null : prev);
+            setRouteTarget(prev => prev?.id === location.id ? null : prev);
+          } else {
+            // Upsert: update existing or add new
+            setItems(prev => {
+              const idx = prev.findIndex(i => i.id === location.id);
+              const mapped = { ...location, kind: location.category };
+              if (idx >= 0) {
+                const next = [...prev];
+                next[idx] = { ...prev[idx], ...mapped };
+                return next;
+              }
+              return [...prev, mapped];
+            });
+            // If this item is currently selected, update the sidebar too
+            setSelectedItem(prev =>
+              prev?.id === location.id ? { ...prev, ...location, kind: location.category } : prev
+            );
+          }
+        } catch {
+          // malformed event — ignore
+        }
+      });
+
+      es.onerror = () => {
+        es?.close();
+        // Retry after 5 s
+        retryTimeout = setTimeout(connect, 5_000);
+      };
+    }
+
+    connect();
+    return () => {
+      clearTimeout(retryTimeout);
+      es?.close();
+    };
+  }, []);
+
+  // ── Handlers ──────────────────────────────────────────────────────────────
   const handleFilterChange = (f: string) => {
     setActiveFilter(f);
     setSelectedItem(null);

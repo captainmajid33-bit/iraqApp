@@ -45,11 +45,19 @@ router.get("/admin/verify", (req: Request, res: Response) => {
   res.json({ ok: true });
 });
 
+// ── Shared token validator (used by other routes) ─────────────────────────────
+export function isValidAdminToken(token: string | undefined): boolean {
+  if (!token) return false;
+  if (!sessions.has(token) || Date.now() > sessions.get(token)!) {
+    if (token) sessions.delete(token);
+    return false;
+  }
+  return true;
+}
+
 // ── Middleware export (for protecting write routes) ───────────────────────────
 export function requireAdmin(req: Request, res: Response, next: NextFunction) {
-  const token = req.headers["x-admin-token"] as string | undefined;
-  if (!token || !sessions.has(token) || Date.now() > sessions.get(token)!) {
-    if (token) sessions.delete(token);
+  if (!isValidAdminToken(req.headers["x-admin-token"] as string | undefined)) {
     return res.status(401).json({ ok: false, error: "Admin token required" });
   }
   next();

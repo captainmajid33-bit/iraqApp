@@ -58,13 +58,16 @@ function getSvgBody(kind: string, color: string): string | null {
 }
 
 // ── Icon factory ──────────────────────────────────────────────────────────────
+// Open → neon green  |  Closed → neon red  (no category color on markers)
+const OPEN_COLOR   = '#00f5d4';
+const CLOSED_COLOR = '#ff2d78';
+
 function makeIcon(kind: string, catMap: Map<string, Category>, isOpen: boolean, selected: boolean): L.DivIcon {
-  const baseColor = getCatColor(kind, catMap);
-  const color     = isOpen ? baseColor : '#ff2d78';
-  const emoji     = catMap.get(kind)?.icon ?? '📍';
-  const size      = selected ? 44 : 36;
-  const pulse     = isOpen && !selected;
-  const svgBody   = getSvgBody(kind, color);
+  const color   = isOpen ? OPEN_COLOR : CLOSED_COLOR;
+  const emoji   = catMap.get(kind)?.icon ?? '📍';
+  const size    = selected ? 44 : 36;
+  const pulse   = isOpen && !selected;
+  const svgBody = getSvgBody(kind, color);
 
   return L.divIcon({
     className: '',
@@ -272,25 +275,31 @@ export function ClinicMap({
     const emoji = cat?.icon ?? '📍';
     const labelEn = cat?.labelEn?.toUpperCase() ?? item.kind.toUpperCase().replace(/_/g,' ');
 
+    const isOpen = item.status === 'مفتوح';
+    const statusLabel = isOpen ? 'مفتوح الآن' : 'مغلق حالياً';
+    const statusIcon  = isOpen ? '✓' : '✕';
+
     const sub = (item as any).details
-      ?? (item.kind==='clinic' ? [(item as any).doctor,(item as any).specialty].filter(Boolean).join(' — ') : '')
-      ?? (item.kind==='restaurant' ? [(item as any).cuisine,(item as any).type].filter(Boolean).join(' · ') : '')
-      ?? '';
+      || (item.kind==='clinic'
+          ? [(item as any).doctor,(item as any).specialty].filter(Boolean).join(' — ')
+          : item.kind==='restaurant'
+          ? [(item as any).cuisine,(item as any).type].filter(Boolean).join(' · ')
+          : '');
 
     const stars = typeof (item as any).rating === 'number' && (item as any).rating > 0
-      ? `<div style="color:#f5c518;font-size:12px;margin-bottom:2px;">${'★'.repeat((item as any).rating)}${'☆'.repeat(5-(item as any).rating)}</div>` : '';
+      ? `<div style="color:#f5c518;font-size:13px;margin-bottom:4px;letter-spacing:1px">${'★'.repeat((item as any).rating)}${'☆'.repeat(5-(item as any).rating)}</div>` : '';
 
     const el=document.createElement('div');
     el.style.cssText='padding:14px 16px 12px;direction:rtl;min-width:215px;';
     el.innerHTML=`
-      <div style="font-family:Orbitron,sans-serif;font-size:9px;color:${color}88;letter-spacing:0.12em;margin-bottom:4px;">${emoji} ${labelEn} · ID:${item.id.toString().padStart(4,'0')}</div>
-      <div style="font-family:Rajdhani,sans-serif;font-size:16px;font-weight:700;color:#e8f8f5;line-height:1.2;margin-bottom:5px;">${item.name}</div>
+      <div style="font-family:Orbitron,sans-serif;font-size:9px;color:${color}88;letter-spacing:0.12em;margin-bottom:5px;">${emoji} ${labelEn} · ID:${item.id.toString().padStart(4,'0')}</div>
+      <div style="font-family:Rajdhani,sans-serif;font-size:17px;font-weight:700;color:#e8f8f5;line-height:1.2;margin-bottom:7px;">${item.name}</div>
       ${stars}
-      <div style="display:flex;align-items:center;gap:6px;margin-bottom:2px;">
-        <div style="width:7px;height:7px;border-radius:50%;background:${color};box-shadow:0 0 6px ${color};flex-shrink:0;"></div>
-        <span style="font-family:Rajdhani,sans-serif;font-size:12px;color:${color};">${item.status}</span>
+      <div style="display:inline-flex;align-items:center;gap:7px;padding:5px 11px;border-radius:3px;border:1px solid ${color}55;background:${color}12;margin-bottom:6px;">
+        <div style="width:8px;height:8px;border-radius:50%;background:${color};box-shadow:0 0 8px ${color};flex-shrink:0;${isOpen?'animation:lf-ping 2s cubic-bezier(0,0,0.2,1) infinite':''}"></div>
+        <span style="font-family:Rajdhani,sans-serif;font-size:14px;font-weight:700;color:${color};letter-spacing:0.04em;">${statusIcon} ${statusLabel}</span>
       </div>
-      <div style="font-family:Rajdhani,sans-serif;font-size:11px;color:#ffffff55;">${sub}</div>
+      ${sub ? `<div style="font-family:Rajdhani,sans-serif;font-size:12px;color:#ffffff55;margin-bottom:2px;">${sub}</div>` : ''}
     `;
 
     const navBtn=document.createElement('button');
