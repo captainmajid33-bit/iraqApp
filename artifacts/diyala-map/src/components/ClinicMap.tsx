@@ -220,6 +220,7 @@ export function ClinicMap({
         setTaxiUserName(saved?.name  ?? '');
         setTaxiUserPhone(saved?.phone ?? '');
       } catch { setTaxiUserName(''); setTaxiUserPhone(''); }
+      setShowTaxiPrompt(false);
       setTaxiDriverItem(item); setTaxiStep('pick-from');
       setTaxiFromPt(null); setTaxiToPt(null);
       setTaxiDistKm(null); setTaxiEstPrice(null);
@@ -317,9 +318,23 @@ export function ClinicMap({
   const [locateError,setLocateError]   = useState<string|null>(null);
   const [routeLoading,setRouteLoading] = useState(false);
   const [routeInfo,setRouteInfo]       = useState<{distanceKm:number;durationMin:number}|null>(null);
-  const [showMoreModal, setShowMoreModal] = useState(false);
-  const [searchQuery,   setSearchQuery]   = useState('');
-  const [showTraffic,   setShowTraffic]   = useState(false);
+  const [showMoreModal,  setShowMoreModal]  = useState(false);
+  const [searchQuery,    setSearchQuery]    = useState('');
+  const [showTraffic,    setShowTraffic]    = useState(false);
+  const [showTaxiPrompt, setShowTaxiPrompt] = useState(false);
+
+  // ── Bottom-bar helpers: detect taxi / gas categories dynamically ───────────
+  const isTaxiCat = (slug: string, labelEn: string) =>
+    slug === 'taxi' || slug === 'تكسي' || labelEn.toLowerCase().includes('taxi');
+  const isGasCat  = (slug: string, labelEn: string) =>
+    slug === 'gas_station' || slug === 'gas' || slug === 'غاز' || labelEn.toLowerCase().includes('gas');
+
+  const taxiCategory    = useMemo(()=> categories.find(c => isTaxiCat(c.slug, c.labelEn)), [categories]);
+  const gasCategory     = useMemo(()=> categories.find(c => isGasCat(c.slug,  c.labelEn)), [categories]);
+  const displayCategories = useMemo(
+    ()=> categories.filter(c => !isTaxiCat(c.slug, c.labelEn) && !isGasCat(c.slug, c.labelEn)),
+    [categories]
+  );
 
   // ── Taxi routing state (multi-step: pick-from → pick-to → confirm) ──────────
   type TaxiStep = 'idle' | 'pick-from' | 'pick-to' | 'confirm';
@@ -1065,7 +1080,7 @@ export function ClinicMap({
               </div>
             ))
           : <>
-              {categories.slice(0,4).map(cat=>{
+              {displayCategories.slice(0,4).map(cat=>{
                 const active = activeFilter===cat.slug;
                 const c = active ? cat.color : 'rgba(255,255,255,0.35)';
                 const count = items.filter(i=>i.kind===cat.slug && i.status!=='معطّل').length;
@@ -1113,7 +1128,7 @@ export function ClinicMap({
                 </svg>
                 <span>MORE</span>
                 <span style={{fontSize:'11px',fontFamily:'Rajdhani,sans-serif',opacity:0.7}}>
-                  {categories.length > 4 ? `المزيد (${categories.length - 4})` : 'بحث'}
+                  {displayCategories.length > 4 ? `المزيد (${displayCategories.length - 4})` : 'بحث'}
                 </span>
               </button>
             </>
@@ -1320,7 +1335,7 @@ export function ClinicMap({
       )}
 
       {/* ── GTA V GPS Button ── */}
-      <div style={{position:'absolute',bottom:'24px',left:'20px',zIndex:1001,display:'flex',flexDirection:'column',alignItems:'center',gap:'8px'}}>
+      <div style={{position:'absolute',bottom:'100px',left:'20px',zIndex:1001,display:'flex',flexDirection:'column',alignItems:'center',gap:'8px'}}>
         {/* Error toast */}
         {locateError && (
           <div style={{background:'rgba(5,8,15,0.97)',border:'1px solid #ff2d78',color:'#ff2d78',fontSize:'11px',padding:'8px 12px',fontFamily:'Rajdhani,sans-serif',maxWidth:'180px',marginBottom:'4px',boxShadow:'0 0 18px rgba(255,45,120,0.3)',backdropFilter:'blur(12px)'}}>
@@ -1425,7 +1440,7 @@ export function ClinicMap({
 
       {/* ── Traffic Toggle Button ── */}
       <div style={{
-        position:'absolute',bottom:'20px',right:'20px',
+        position:'absolute',bottom:'96px',right:'20px',
         zIndex:1000,display:'flex',flexDirection:'column',alignItems:'center',gap:'4px',
       }}>
         <button
@@ -1492,9 +1507,49 @@ export function ClinicMap({
 
       {/* ── Route Info Banner ── */}
       {routeInfo && !routeLoading && (
-        <div style={{position:'absolute',bottom:'20px',left:'50%',transform:'translateX(-50%)',zIndex:1000,background:'rgba(5,8,15,0.96)',border:'1px solid #f5c518',color:'#f5c518',padding:'10px 24px',fontFamily:'Orbitron,sans-serif',fontSize:'11px',letterSpacing:'0.1em',boxShadow:'0 0 24px #f5c51844',display:'flex',gap:'24px',alignItems:'center',backdropFilter:'blur(10px)'}}>
+        <div style={{position:'absolute',bottom:'96px',left:'50%',transform:'translateX(-50%)',zIndex:1000,background:'rgba(5,8,15,0.96)',border:'1px solid #f5c518',color:'#f5c518',padding:'10px 24px',fontFamily:'Orbitron,sans-serif',fontSize:'11px',letterSpacing:'0.1em',boxShadow:'0 0 24px #f5c51844',display:'flex',gap:'24px',alignItems:'center',backdropFilter:'blur(10px)'}}>
           <span>🛣️ {routeInfo.distanceKm.toFixed(1)} كم</span>
           <span>⏱ {Math.round(routeInfo.durationMin)} دقيقة</span>
+        </div>
+      )}
+
+      {/* ── Taxi Prompt Banner (shown after bottom taxi button pressed) ── */}
+      {showTaxiPrompt && taxiStep === 'idle' && (
+        <div style={{
+          position:'absolute',top:'14px',left:'50%',transform:'translateX(-50%)',
+          zIndex:3000,display:'flex',justifyContent:'center',
+          pointerEvents:'none',width:'100%',padding:'0 16px',boxSizing:'border-box',
+        }}>
+          <div style={{
+            pointerEvents:'auto',
+            background:'rgba(5,8,15,0.97)',
+            border:'2px solid #f5c518',
+            boxShadow:'0 0 30px rgba(245,197,24,0.35)',
+            padding:'12px 18px',direction:'rtl',
+            display:'flex',alignItems:'center',gap:'14px',
+            maxWidth:'480px',width:'100%',backdropFilter:'blur(12px)',
+          }}>
+            <span style={{fontSize:'26px',flexShrink:0}}>🚕</span>
+            <div style={{flex:1}}>
+              <div style={{fontFamily:'Orbitron,sans-serif',fontSize:'8px',color:'rgba(245,197,24,0.7)',letterSpacing:'0.16em',marginBottom:'3px'}}>
+                TAXI — اختر سائقاً
+              </div>
+              <div style={{fontFamily:'Rajdhani,sans-serif',fontSize:'16px',fontWeight:700,color:'#f5f0d0'}}>
+                انقر على أيقونة سائق تكسي في الخريطة لبدء الطلب
+              </div>
+            </div>
+            <button
+              onClick={()=>setShowTaxiPrompt(false)}
+              style={{
+                background:'none',border:'1px solid rgba(245,197,24,0.35)',
+                color:'rgba(245,197,24,0.7)',fontFamily:'Orbitron,sans-serif',
+                fontSize:'9px',letterSpacing:'0.1em',padding:'6px 10px',
+                cursor:'pointer',flexShrink:0,transition:'all 0.2s',
+              }}
+              onMouseEnter={e=>{(e.currentTarget as HTMLElement).style.background='rgba(245,197,24,0.12)';(e.currentTarget as HTMLElement).style.color='#f5c518';}}
+              onMouseLeave={e=>{(e.currentTarget as HTMLElement).style.background='none';(e.currentTarget as HTMLElement).style.color='rgba(245,197,24,0.7)';}}
+            >إلغاء</button>
+          </div>
         </div>
       )}
 
@@ -1783,7 +1838,7 @@ export function ClinicMap({
 
       {/* ── Legend ── */}
       {categories.length > 0 && (
-        <div style={{position:'absolute',bottom:'20px',left:'92px',zIndex:1000,background:'rgba(5,8,15,0.88)',border:'1px solid rgba(255,255,255,0.07)',padding:'10px 14px',backdropFilter:'blur(10px)',minWidth:'150px'}}>
+        <div style={{position:'absolute',bottom:'96px',left:'92px',zIndex:1000,background:'rgba(5,8,15,0.88)',border:'1px solid rgba(255,255,255,0.07)',padding:'10px 14px',backdropFilter:'blur(10px)',minWidth:'150px'}}>
           <div style={{fontFamily:'Orbitron,sans-serif',fontSize:'9px',color:'rgba(255,255,255,0.3)',letterSpacing:'0.15em',marginBottom:'8px'}}>LEGEND</div>
           {categories.map(cat=>(
             <div key={cat.slug} style={{display:'flex',alignItems:'center',gap:'8px',marginBottom:'5px',cursor:'pointer'}} onClick={()=>onFilterChange(cat.slug)}>
@@ -1799,6 +1854,111 @@ export function ClinicMap({
           </div>
         </div>
       )}
+
+      {/* ══════════════════════════════════════════════════════════════════════
+          ── Bottom Action Bar: Taxi (yellow) + Gas (red) ──────────────────
+          ══════════════════════════════════════════════════════════════════ */}
+      <div style={{
+        position:'absolute', bottom:0, left:0, right:0,
+        height:'80px', zIndex:1002,
+        display:'flex',
+        background:'rgba(5,8,15,0.97)',
+        borderTop:'1px solid rgba(255,255,255,0.09)',
+        backdropFilter:'blur(16px)',
+        boxShadow:'0 -4px 32px rgba(0,0,0,0.7)',
+      }}>
+
+        {/* ── TAXI button ── */}
+        <button
+          onClick={()=>{
+            if (taxiCategory) {
+              onFilterChange(taxiCategory.slug);
+              setShowMoreModal(false);
+              setShowTaxiPrompt(true);
+            }
+          }}
+          style={{
+            flex:1,
+            display:'flex', flexDirection:'column',
+            alignItems:'center', justifyContent:'center', gap:'4px',
+            background: (activeFilter === (taxiCategory?.slug ?? '__none__') || showTaxiPrompt)
+              ? 'rgba(245,197,24,0.18)'
+              : 'transparent',
+            border:'none',
+            borderTop: (activeFilter === (taxiCategory?.slug ?? '__none__') || showTaxiPrompt)
+              ? '3px solid #f5c518'
+              : '3px solid transparent',
+            borderRight:'1px solid rgba(255,255,255,0.07)',
+            color:'#f5c518',
+            cursor: taxiCategory ? 'pointer' : 'not-allowed',
+            opacity: taxiCategory ? 1 : 0.35,
+            transition:'all 0.2s',
+            padding:0,
+          }}
+          onMouseEnter={e=>{ if(taxiCategory)(e.currentTarget as HTMLElement).style.background='rgba(245,197,24,0.14)'; }}
+          onMouseLeave={e=>{ (e.currentTarget as HTMLElement).style.background=(activeFilter===(taxiCategory?.slug??'__none__')||showTaxiPrompt)?'rgba(245,197,24,0.18)':'transparent'; }}
+        >
+          {/* Taxi icon SVG */}
+          <svg width="28" height="28" viewBox="0 0 48 48" fill="none">
+            <rect x="6" y="18" width="36" height="20" rx="5" fill="#f5c518" opacity="0.18"/>
+            <rect x="6" y="18" width="36" height="20" rx="5" stroke="#f5c518" strokeWidth="2"/>
+            <path d="M14 18V14a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v4" stroke="#f5c518" strokeWidth="2"/>
+            <rect x="14" y="22" width="8" height="5" rx="1.5" fill="#f5c518" opacity="0.55"/>
+            <rect x="26" y="22" width="8" height="5" rx="1.5" fill="#f5c518" opacity="0.55"/>
+            <circle cx="14" cy="38" r="4" fill="#f5c518"/>
+            <circle cx="34" cy="38" r="4" fill="#f5c518"/>
+            <rect x="20" y="10" width="8" height="4" rx="2" fill="#f5c518" opacity="0.8"/>
+          </svg>
+          <span style={{
+            fontFamily:'Orbitron,sans-serif', fontSize:'11px',
+            fontWeight:700, letterSpacing:'0.12em',
+          }}>تكسي</span>
+        </button>
+
+        {/* ── GAS button ── */}
+        <button
+          onClick={()=>{
+            if (gasCategory) {
+              onFilterChange(gasCategory.slug);
+              setShowMoreModal(false);
+              setShowTaxiPrompt(false);
+            }
+          }}
+          style={{
+            flex:1,
+            display:'flex', flexDirection:'column',
+            alignItems:'center', justifyContent:'center', gap:'4px',
+            background: activeFilter === (gasCategory?.slug ?? '__none__')
+              ? 'rgba(255,45,120,0.18)'
+              : 'transparent',
+            border:'none',
+            borderTop: activeFilter === (gasCategory?.slug ?? '__none__')
+              ? '3px solid #ff2d78'
+              : '3px solid transparent',
+            color:'#ff2d78',
+            cursor: gasCategory ? 'pointer' : 'not-allowed',
+            opacity: gasCategory ? 1 : 0.35,
+            transition:'all 0.2s',
+            padding:0,
+          }}
+          onMouseEnter={e=>{ if(gasCategory)(e.currentTarget as HTMLElement).style.background='rgba(255,45,120,0.14)'; }}
+          onMouseLeave={e=>{ (e.currentTarget as HTMLElement).style.background=activeFilter===(gasCategory?.slug??'__none__')?'rgba(255,45,120,0.18)':'transparent'; }}
+        >
+          {/* Gas pump SVG icon */}
+          <svg width="26" height="28" viewBox="0 0 40 48" fill="none">
+            <rect x="6" y="10" width="20" height="30" rx="3" stroke="#ff2d78" strokeWidth="2" fill="rgba(255,45,120,0.1)"/>
+            <rect x="10" y="15" width="12" height="8" rx="2" fill="#ff2d78" opacity="0.45"/>
+            <path d="M26 18 L34 14 L34 36 Q36 36 36 34 L36 22" stroke="#ff2d78" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+            <circle cx="34" cy="20" r="3" fill="#ff2d78" opacity="0.7"/>
+            <path d="M6 36 h20" stroke="#ff2d78" strokeWidth="1.5" opacity="0.5"/>
+          </svg>
+          <span style={{
+            fontFamily:'Orbitron,sans-serif', fontSize:'11px',
+            fontWeight:700, letterSpacing:'0.12em',
+          }}>غاز</span>
+        </button>
+
+      </div>
     </div>
   );
 }
