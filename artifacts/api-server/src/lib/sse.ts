@@ -36,6 +36,11 @@ export function broadcastDriverUpdate(driver: Record<string, unknown>) {
   broadcast("driver_update", { driver });
 }
 
+/** Fired when a global setting (e.g. top_banner imageUrl) is changed */
+export function broadcastSettingUpdate(key: string, value: string) {
+  broadcast("setting_update", { key, value });
+}
+
 export function sseClientCount() {
   return clients.size;
 }

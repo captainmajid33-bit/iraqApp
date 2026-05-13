@@ -5,3 +5,4 @@ export * from "./categories";
 export * from "./orders";
 export * from "./messages";
 export * from "./drivers_online";
+export * from "./settings";

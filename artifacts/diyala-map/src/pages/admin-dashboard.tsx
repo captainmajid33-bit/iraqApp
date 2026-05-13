@@ -418,10 +418,140 @@ function CategoriesTab({ cats, onRefresh, toast }: { cats: Cat[]; onRefresh: () 
   );
 }
 
+// ── Settings Tab (banner + future global settings) ───────────────────────────
+function SettingsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
+  const [bannerUrl,  setBannerUrl]  = useState("");
+  const [previewUrl, setPreviewUrl] = useState("");
+  const [imgErr,     setImgErr]     = useState(false);
+  const [saving,     setSaving]     = useState(false);
+
+  // Load current value on mount
+  useEffect(() => {
+    api.get("/api/settings/top_banner").then(d => {
+      if (d?.value) { setBannerUrl(d.value); setPreviewUrl(d.value); setImgErr(false); }
+    });
+  }, []);
+
+  const handleSave = async () => {
+    setSaving(true);
+    const r = await api.patch("/api/settings/top_banner", { value: bannerUrl.trim() });
+    setSaving(false);
+    if (r.ok) {
+      setPreviewUrl(bannerUrl.trim());
+      setImgErr(false);
+      toast.show("تم تحديث بنر الهيدر بنجاح — يتحدث فوراً لجميع المستخدمين");
+    } else {
+      toast.show(r.error ?? "فشل الحفظ", false);
+    }
+  };
+
+  const handleClear = async () => {
+    setBannerUrl("");
+    setSaving(true);
+    const r = await api.patch("/api/settings/top_banner", { value: "" });
+    setSaving(false);
+    if (r.ok) { setPreviewUrl(""); toast.show("تم مسح البنر — سيظهر الهيدر الافتراضي"); }
+  };
+
+  return (
+    <div style={{ maxWidth: "720px" }}>
+      {/* Section title */}
+      <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "20px" }}>
+        <div style={{ width: "3px", height: "26px", background: C.purple, boxShadow: neon(C.purple) }} />
+        <div>
+          <div style={{ fontFamily: "Orbitron, sans-serif", fontSize: "12px", color: C.purple, letterSpacing: "0.14em" }}>TOP BANNER · بنر الهيدر العلوي</div>
+          <div style={{ fontFamily: "Rajdhani, sans-serif", fontSize: "12px", color: C.dim, marginTop: "2px" }}>
+            أدخل رابط صورة URL — ستظهر في هيدر الخريطة وتتحدث فوراً لدى جميع المستخدمين عبر SSE
+          </div>
+        </div>
+      </div>
+
+      {/* URL input + buttons */}
+      <div style={{ background: C.surf2, border: `1px solid ${C.border}`, borderRadius: "4px", padding: "18px", marginBottom: "16px" }}>
+        <label style={LBL}>رابط الصورة (imageUrl)</label>
+        <input
+          style={{ ...FLD, marginBottom: "12px" }}
+          value={bannerUrl}
+          onChange={e => setBannerUrl(e.target.value)}
+          placeholder="https://example.com/banner.jpg"
+          onFocus={ff} onBlur={fb}
+          onKeyDown={e => e.key === "Enter" && handleSave()}
+        />
+        <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
+          <button
+            onClick={handleSave}
+            disabled={saving}
+            style={{ padding: "9px 22px", background: saving ? `${C.purple}0a` : `${C.purple}18`, border: `1px solid ${C.purple}`, color: C.purple, fontFamily: "Orbitron, sans-serif", fontSize: "10px", letterSpacing: "0.1em", cursor: saving ? "wait" : "pointer", borderRadius: "3px", boxShadow: saving ? "none" : neon(C.purple, 8), transition: "all 0.2s" }}
+          >
+            {saving ? "⟳ جاري الحفظ..." : "✓ حفظ وإرسال للمستخدمين"}
+          </button>
+          <button
+            onClick={() => { setPreviewUrl(bannerUrl); setImgErr(false); }}
+            style={{ padding: "9px 18px", background: `${C.blue}10`, border: `1px solid ${C.blue}55`, color: C.blue, fontFamily: "Orbitron, sans-serif", fontSize: "10px", letterSpacing: "0.1em", cursor: "pointer", borderRadius: "3px" }}
+          >
+            👁 معاينة
+          </button>
+          <button
+            onClick={handleClear}
+            style={{ padding: "9px 18px", background: `${C.red}10`, border: `1px solid ${C.red}55`, color: C.red, fontFamily: "Orbitron, sans-serif", fontSize: "10px", letterSpacing: "0.1em", cursor: "pointer", borderRadius: "3px" }}
+          >
+            ✕ مسح البنر
+          </button>
+        </div>
+      </div>
+
+      {/* Live preview */}
+      <div style={{ background: C.surf2, border: `1px solid ${C.border}`, borderRadius: "4px", overflow: "hidden" }}>
+        <div style={{ padding: "10px 14px", borderBottom: `1px solid ${C.border}`, fontFamily: "Orbitron, sans-serif", fontSize: "9px", color: C.dim, letterSpacing: "0.12em" }}>
+          PREVIEW — معاينة الهيدر
+        </div>
+        {/* Simulated header */}
+        <div style={{ height: "64px", position: "relative", background: "rgba(5,8,15,0.92)", display: "flex", alignItems: "center", justifyContent: "space-between", overflow: "hidden" }}>
+          {/* Top glow line */}
+          <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: "2px", background: `linear-gradient(90deg, transparent, ${C.purple}, ${C.blue}, transparent)`, opacity: 0.7 }} />
+          {/* Banner image */}
+          {previewUrl && !imgErr && (
+            <div style={{ position: "absolute", inset: 0 }}>
+              <img
+                src={previewUrl} alt="" onError={() => setImgErr(true)}
+                style={{ width: "100%", height: "100%", objectFit: "cover", objectPosition: "center" }}
+              />
+              <div style={{ position: "absolute", inset: 0, background: "linear-gradient(90deg, rgba(5,8,15,0.82) 0%, rgba(5,8,15,0.4) 50%, rgba(5,8,15,0.72) 100%)" }} />
+            </div>
+          )}
+          {/* Left icon */}
+          <div style={{ position: "relative", zIndex: 1, display: "flex", alignItems: "center", gap: "10px", padding: "0 16px" }}>
+            <div style={{ width: "32px", height: "32px", border: `1px solid ${C.purple}99`, display: "flex", alignItems: "center", justifyContent: "center", background: `${C.purple}18` }}>
+              <span style={{ color: C.purple, fontSize: "15px" }}>📍</span>
+            </div>
+            {!previewUrl && (
+              <div>
+                <div style={{ fontFamily: "Orbitron, sans-serif", fontSize: "14px", color: C.purple, letterSpacing: "0.06em" }}>ديالى GTA MAP</div>
+                <div style={{ fontFamily: "Rajdhani, sans-serif", fontSize: "9px", color: `${C.blue}bb`, letterSpacing: "0.14em" }}>DIYALA · SYSTEM ONLINE</div>
+              </div>
+            )}
+          </div>
+          {/* Right clock */}
+          <div style={{ position: "relative", zIndex: 1, padding: "0 16px", fontFamily: "Orbitron, sans-serif", fontSize: "14px", color: C.purple, letterSpacing: "0.06em" }}>
+            {new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" })}
+          </div>
+          {/* Bottom edge */}
+          <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, height: "1px", background: `linear-gradient(90deg, transparent, ${C.purple}99, ${C.blue}99, transparent)` }} />
+        </div>
+        {imgErr && (
+          <div style={{ padding: "10px 14px", background: `${C.red}0a`, color: C.red, fontFamily: "Rajdhani, sans-serif", fontSize: "12px" }}>
+            ⚠ تعذّر تحميل الصورة — تأكد من صحة الرابط وأنه يدعم CORS
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ── Admin Dashboard ───────────────────────────────────────────────────────────
 export function AdminDashboard() {
   const [, navigate] = useLocation();
-  const [tab, setTab] = useState<"merchants" | "map" | "categories">("merchants");
+  const [tab, setTab] = useState<"merchants" | "map" | "categories" | "settings">("merchants");
   const [cats, setCats] = useState<Cat[]>([]);
   const [authChecked, setAuthChecked] = useState(false);
   const toast = useToast();
@@ -460,6 +590,7 @@ export function AdminDashboard() {
     { key: "merchants"  as const, en: "MERCHANTS",  ar: "التجار" },
     { key: "map"        as const, en: "MAP EDITOR",  ar: "الخريطة" },
     { key: "categories" as const, en: "CATEGORIES",  ar: "الفئات" },
+    { key: "settings"   as const, en: "SETTINGS",    ar: "الإعدادات" },
   ];
 
   return (
@@ -506,6 +637,7 @@ export function AdminDashboard() {
         {tab === "merchants"  && <MerchantsTab cats={cats} toast={toast} />}
         {tab === "map"        && <MapEditorTab cats={cats} toast={toast} />}
         {tab === "categories" && <CategoriesTab cats={cats} onRefresh={loadCats} toast={toast} />}
+        {tab === "settings"   && <SettingsTab toast={toast} />}
       </main>
 
       <Toast toast={toast.toast} />
