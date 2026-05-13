@@ -339,6 +339,7 @@ export function ClinicMap({
   // ── Active order tracking (after submit) ─────────────────────────────────
   const [activeOrderId,     setActiveOrderId]     = useState<number|null>(null);
   const [activeOrderStatus, setActiveOrderStatus] = useState<string>('pending');
+  const [activeDriverPhone, setActiveDriverPhone] = useState<string>('');
   const [driverLat,         setDriverLat]         = useState<number|null>(null);
   const [driverLng,         setDriverLng]         = useState<number|null>(null);
   const [driverDistKm,      setDriverDistKm]      = useState<number|null>(null);
@@ -346,6 +347,10 @@ export function ClinicMap({
   const [showChat,          setShowChat]          = useState(false);
   const activeOrderIdRef    = useRef<number|null>(null);
   const prevDriverPosRef    = useRef<{lat:number;lng:number}|null>(null);
+
+  // ── Online drivers (all open taxis visible on map) ────────────────────────
+  type OnlineDriver = { id:number; locationId:number; driverName:string; phone:string; lat:number; lng:number; isOnline:boolean };
+  const onlineDriverMarkersRef = useRef<Map<number, L.Marker>>(new Map());
 
   // Leaflet object refs for taxi routing visuals
   const taxiRouteLineRef  = useRef<L.Polyline|null>(null);
@@ -779,8 +784,6 @@ export function ClinicMap({
   const updateDriverMarker = useCallback((lat: number, lng: number)=>{
     if (!mapRef.current) return;
     if (driverMarkerRef.current) {
-      // Leaflet handles interpolation when we setLatLng; for extra smoothness
-      // we rely on browser rendering between frames
       driverMarkerRef.current.setLatLng([lat, lng]);
     } else {
       driverMarkerRef.current = L.marker([lat, lng],{
@@ -788,7 +791,106 @@ export function ClinicMap({
         zIndexOffset: 900,
       }).addTo(mapRef.current);
     }
+    // Enable CSS smooth transition on the marker DOM element
+    const el = driverMarkerRef.current.getElement();
+    if (el) el.style.transition = 'transform 0.9s linear';
     prevDriverPosRef.current = { lat, lng };
+  },[]);
+
+  // ── Online-driver icon (smaller cyan taxi, distinct from active-order marker)
+  function makeOnlineDriverIcon(name: string): L.DivIcon {
+    const label = name ? name.slice(0,6) : '🚕';
+    return L.divIcon({
+      className: '',
+      html: `<div style="position:relative;display:flex;flex-direction:column;align-items:center;gap:2px;">
+        <div style="width:38px;height:38px;position:relative;display:flex;align-items:center;justify-content:center;">
+          <div style="position:absolute;inset:0;border-radius:50%;background:#00d4ff;opacity:0.12;animation:lf-ping 2.2s cubic-bezier(0,0,0.2,1) infinite;"></div>
+          <div style="position:absolute;inset:3px;border-radius:50%;border:1.5px solid #00d4ff;box-shadow:0 0 14px #00d4ff88;"></div>
+          <span style="position:relative;z-index:1;font-size:17px;line-height:1;user-select:none;">🚕</span>
+        </div>
+        <div style="background:rgba(0,212,255,0.18);border:1px solid rgba(0,212,255,0.5);color:#00d4ff;font-family:Rajdhani,sans-serif;font-size:9px;padding:1px 5px;white-space:nowrap;max-width:64px;overflow:hidden;text-overflow:ellipsis;backdrop-filter:blur(4px);">${label}</div>
+      </div>`,
+      iconSize: [38, 58], iconAnchor: [19, 58],
+    });
+  }
+
+  // ── Update / create an online-driver marker with smooth animation ─────────
+  const upsertOnlineDriverMarker = useCallback((driver: {
+    locationId:number; driverName:string; phone:string; lat:number; lng:number; isOnline:boolean;
+  })=>{
+    if (!mapRef.current) return;
+    const existing = onlineDriverMarkersRef.current.get(driver.locationId);
+    if (!driver.isOnline) {
+      existing?.remove();
+      onlineDriverMarkersRef.current.delete(driver.locationId);
+      return;
+    }
+    if (existing) {
+      existing.setLatLng([driver.lat, driver.lng]);
+      const el = existing.getElement();
+      if (el) el.style.transition = 'transform 1.0s linear';
+    } else {
+      const m = L.marker([driver.lat, driver.lng],{
+        icon: makeOnlineDriverIcon(driver.driverName),
+        zIndexOffset: 800,
+      }).addTo(mapRef.current);
+      // Tooltip with driver name + phone
+      m.bindTooltip(
+        `<div style="font-family:Rajdhani,sans-serif;font-size:12px;color:#00d4ff;background:rgba(5,8,15,0.93);border:1px solid rgba(0,212,255,0.3);padding:4px 8px;">
+          <b>${driver.driverName || 'سائق متصل'}</b>${driver.phone ? `<br/><span style="color:rgba(0,212,255,0.7)">${driver.phone}</span>` : ''}
+        </div>`,
+        { permanent: false, direction: 'top', offset: [0, -62], className: 'online-driver-tooltip', opacity: 1 }
+      );
+      // Enable smooth transitions
+      const el = m.getElement();
+      if (el) el.style.transition = 'transform 1.0s linear';
+      onlineDriverMarkersRef.current.set(driver.locationId, m);
+    }
+  }, []);
+
+  // ── Fetch all online drivers and render their markers ─────────────────────
+  const refreshOnlineDrivers = useCallback(async ()=>{
+    if (!mapRef.current) return;
+    try {
+      const res = await fetch('/api/drivers-online');
+      if (!res.ok) return;
+      const drivers: {
+        id:number; locationId:number; driverName:string;
+        phone:string; lat:number; lng:number; isOnline:boolean;
+      }[] = await res.json();
+      // Determine which locationIds are currently present in the new list
+      const incomingIds = new Set(drivers.map(d=>d.locationId));
+      // Remove markers for drivers no longer online
+      for (const [locId, m] of onlineDriverMarkersRef.current.entries()) {
+        if (!incomingIds.has(locId)) { m.remove(); onlineDriverMarkersRef.current.delete(locId); }
+      }
+      // Upsert all incoming drivers
+      drivers.forEach(d => upsertOnlineDriverMarker(d));
+    } catch { /* silent */ }
+  }, [upsertOnlineDriverMarker]);
+
+  // ── Poll online drivers every 8 s ─────────────────────────────────────────
+  useEffect(()=>{
+    refreshOnlineDrivers();
+    const iv = setInterval(refreshOnlineDrivers, 8000);
+    return ()=> clearInterval(iv);
+  },[refreshOnlineDrivers]);
+
+  // ── SSE listener for instant driver_update events ─────────────────────────
+  useEffect(()=>{
+    const es = new EventSource('/api/events');
+    es.addEventListener('driver_update', (e: MessageEvent)=>{
+      try {
+        const { driver } = JSON.parse(e.data) as { driver: {
+          id:number; locationId:number; driverName:string;
+          phone:string; lat:number; lng:number; isOnline:boolean;
+        }};
+        if (driver) upsertOnlineDriverMarker(driver);
+      } catch { /* */ }
+    });
+    es.onerror = ()=> es.close();
+    return ()=> es.close();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   },[]);
 
   // ── Apply order snapshot (status + driver position) ───────────────────────
@@ -885,6 +987,8 @@ export function ClinicMap({
           setActiveOrderId(orderId);
           setActiveOrderStatus('pending');
           activeOrderIdRef.current = orderId;
+          // Capture driver phone for call button in chat
+          setActiveDriverPhone(taxiDriverItem.phone ?? '');
         }
         setTimeout(()=>{ closeTaxiRouting(); }, 2600);
       } else {
@@ -1672,6 +1776,7 @@ export function ClinicMap({
       {showChat && activeOrderId && (
         <ChatOverlay
           orderId={activeOrderId}
+          driverPhone={activeDriverPhone}
           onClose={()=>setShowChat(false)}
         />
       )}

@@ -6,6 +6,7 @@ import categoriesRouter from "./categories";
 import adminRouter from "./admin";
 import ordersRouter from "./orders";
 import messagesRouter from "./messages";
+import driversOnlineRouter from "./drivers-online";
 
 const router: IRouter = Router();
 
@@ -16,5 +17,6 @@ router.use(usersRouter);
 router.use(categoriesRouter);
 router.use(ordersRouter);
 router.use(messagesRouter);
+router.use(driversOnlineRouter);
 
 export default router;

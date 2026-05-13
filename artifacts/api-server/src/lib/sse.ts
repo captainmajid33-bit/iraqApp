@@ -31,6 +31,11 @@ export function broadcastNewMessage(message: Record<string, unknown>) {
   broadcast("new_message", { message });
 }
 
+/** Fired when an online driver updates their location or goes offline */
+export function broadcastDriverUpdate(driver: Record<string, unknown>) {
+  broadcast("driver_update", { driver });
+}
+
 export function sseClientCount() {
   return clients.size;
 }
