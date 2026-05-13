@@ -420,10 +420,13 @@ function CategoriesTab({ cats, onRefresh, toast }: { cats: Cat[]; onRefresh: () 
 
 // ── Settings Tab (banner + future global settings) ───────────────────────────
 function SettingsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
-  const [bannerUrl,  setBannerUrl]  = useState("");
-  const [previewUrl, setPreviewUrl] = useState("");
-  const [imgErr,     setImgErr]     = useState(false);
-  const [saving,     setSaving]     = useState(false);
+  const [bannerUrl,       setBannerUrl]       = useState("");
+  const [previewUrl,      setPreviewUrl]      = useState("");
+  const [imgErr,          setImgErr]          = useState(false);
+  const [saving,          setSaving]          = useState(false);
+  const [uploading,       setUploading]       = useState(false);
+  const [uploadProgress,  setUploadProgress]  = useState(0);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Load current value on mount
   useEffect(() => {
@@ -431,6 +434,69 @@ function SettingsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
       if (d?.value) { setBannerUrl(d.value); setPreviewUrl(d.value); setImgErr(false); }
     });
   }, []);
+
+  // ── Two-step presigned upload ──────────────────────────────────────────────
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    // reset input so same file can be re-selected
+    e.target.value = "";
+
+    // Validate type
+    if (!file.type.startsWith("image/")) {
+      toast.show("يُسمح فقط بملفات الصور (jpg, png, webp, gif)", false);
+      return;
+    }
+
+    setUploading(true);
+    setUploadProgress(10);
+
+    try {
+      // Step 1 — request presigned URL from our API
+      const metaRes = await fetch("/api/storage/uploads/request-url", {
+        method: "POST",
+        headers: admHeaders(),
+        body: JSON.stringify({ name: file.name, size: file.size, contentType: file.type }),
+      });
+      if (!metaRes.ok) throw new Error("فشل الحصول على رابط الرفع");
+      const { uploadURL, objectPath } = await metaRes.json();
+      setUploadProgress(30);
+
+      // Step 2 — upload file directly to GCS presigned URL
+      const xhr = new XMLHttpRequest();
+      xhr.upload.addEventListener("progress", ev => {
+        if (ev.lengthComputable) setUploadProgress(30 + Math.round((ev.loaded / ev.total) * 60));
+      });
+      await new Promise<void>((resolve, reject) => {
+        xhr.open("PUT", uploadURL);
+        xhr.setRequestHeader("Content-Type", file.type);
+        xhr.onload = () => (xhr.status >= 200 && xhr.status < 300 ? resolve() : reject(new Error(`GCS ${xhr.status}`)));
+        xhr.onerror = () => reject(new Error("فشل الاتصال بالتخزين"));
+        xhr.send(file);
+      });
+      setUploadProgress(95);
+
+      // Step 3 — build serving URL and auto-save to settings
+      const servingUrl = `/api/storage${objectPath}`;
+      setBannerUrl(servingUrl);
+
+      // Save the new URL immediately
+      const r = await api.patch("/api/settings/top_banner", { value: servingUrl });
+      if (r.ok) {
+        setPreviewUrl(servingUrl);
+        setImgErr(false);
+        setUploadProgress(100);
+        toast.show("✓ تم رفع الصورة وتطبيق البنر — يتحدث فوراً لجميع المستخدمين");
+      } else {
+        toast.show(r.error ?? "رُفعت الصورة لكن فشل حفظ الرابط", false);
+      }
+    } catch (err: any) {
+      toast.show(err?.message ?? "فشل رفع الصورة", false);
+    } finally {
+      setUploading(false);
+      setTimeout(() => setUploadProgress(0), 1200);
+    }
+  };
 
   const handleSave = async () => {
     setSaving(true);
@@ -453,6 +519,8 @@ function SettingsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
     if (r.ok) { setPreviewUrl(""); toast.show("تم مسح البنر — سيظهر الهيدر الافتراضي"); }
   };
 
+  const busy = saving || uploading;
+
   return (
     <div style={{ maxWidth: "720px" }}>
       {/* Section title */}
@@ -461,14 +529,62 @@ function SettingsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
         <div>
           <div style={{ fontFamily: "Orbitron, sans-serif", fontSize: "12px", color: C.purple, letterSpacing: "0.14em" }}>TOP BANNER · بنر الهيدر العلوي</div>
           <div style={{ fontFamily: "Rajdhani, sans-serif", fontSize: "12px", color: C.dim, marginTop: "2px" }}>
-            أدخل رابط صورة URL — ستظهر في هيدر الخريطة وتتحدث فوراً لدى جميع المستخدمين عبر SSE
+            ارفع صورة من جهازك أو أدخل رابط URL — تتحدث فوراً لجميع المستخدمين عبر SSE
           </div>
         </div>
       </div>
 
-      {/* URL input + buttons */}
+      {/* Upload zone */}
       <div style={{ background: C.surf2, border: `1px solid ${C.border}`, borderRadius: "4px", padding: "18px", marginBottom: "16px" }}>
-        <label style={LBL}>رابط الصورة (imageUrl)</label>
+
+        {/* Upload button */}
+        <div style={{ marginBottom: "16px" }}>
+          <label style={LBL}>رفع صورة من الجهاز</label>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            style={{ display: "none" }}
+            onChange={handleFileChange}
+          />
+          <button
+            onClick={() => !busy && fileInputRef.current?.click()}
+            disabled={busy}
+            style={{
+              display: "flex", alignItems: "center", gap: "10px",
+              padding: "11px 20px",
+              background: uploading ? `${C.green}0a` : `${C.green}12`,
+              border: `1px solid ${uploading ? C.green : `${C.green}66`}`,
+              color: uploading ? C.green : `${C.green}cc`,
+              fontFamily: "Orbitron, sans-serif", fontSize: "10px", letterSpacing: "0.1em",
+              cursor: busy ? "wait" : "pointer", borderRadius: "3px",
+              boxShadow: uploading ? neon(C.green, 10) : "none",
+              transition: "all 0.2s", width: "100%", justifyContent: "center",
+            }}
+          >
+            {uploading
+              ? <><span style={{ display: "inline-block", animation: "spin 1s linear infinite" }}>⟳</span> جاري رفع الصورة...</>
+              : <><span style={{ fontSize: "14px" }}>📁</span> تحميل صورة البنر من جهازك</>
+            }
+          </button>
+
+          {/* Progress bar */}
+          {uploadProgress > 0 && (
+            <div style={{ marginTop: "8px", height: "3px", background: `${C.green}18`, borderRadius: "2px", overflow: "hidden" }}>
+              <div style={{ height: "100%", width: `${uploadProgress}%`, background: C.green, boxShadow: neon(C.green, 6), transition: "width 0.3s ease", borderRadius: "2px" }} />
+            </div>
+          )}
+        </div>
+
+        {/* Divider */}
+        <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "14px" }}>
+          <div style={{ flex: 1, height: "1px", background: C.border }} />
+          <span style={{ fontFamily: "Rajdhani, sans-serif", fontSize: "11px", color: C.dim }}>أو أدخل رابطاً مباشراً</span>
+          <div style={{ flex: 1, height: "1px", background: C.border }} />
+        </div>
+
+        {/* URL input */}
+        <label style={LBL}>رابط الصورة (URL)</label>
         <input
           style={{ ...FLD, marginBottom: "12px" }}
           value={bannerUrl}
@@ -476,24 +592,29 @@ function SettingsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
           placeholder="https://example.com/banner.jpg"
           onFocus={ff} onBlur={fb}
           onKeyDown={e => e.key === "Enter" && handleSave()}
+          disabled={busy}
         />
+
+        {/* Action buttons */}
         <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
           <button
             onClick={handleSave}
-            disabled={saving}
-            style={{ padding: "9px 22px", background: saving ? `${C.purple}0a` : `${C.purple}18`, border: `1px solid ${C.purple}`, color: C.purple, fontFamily: "Orbitron, sans-serif", fontSize: "10px", letterSpacing: "0.1em", cursor: saving ? "wait" : "pointer", borderRadius: "3px", boxShadow: saving ? "none" : neon(C.purple, 8), transition: "all 0.2s" }}
+            disabled={busy}
+            style={{ padding: "9px 22px", background: saving ? `${C.purple}0a` : `${C.purple}18`, border: `1px solid ${C.purple}`, color: C.purple, fontFamily: "Orbitron, sans-serif", fontSize: "10px", letterSpacing: "0.1em", cursor: busy ? "wait" : "pointer", borderRadius: "3px", boxShadow: saving ? "none" : neon(C.purple, 8), transition: "all 0.2s" }}
           >
-            {saving ? "⟳ جاري الحفظ..." : "✓ حفظ وإرسال للمستخدمين"}
+            {saving ? "⟳ جاري الحفظ..." : "✓ حفظ الرابط"}
           </button>
           <button
             onClick={() => { setPreviewUrl(bannerUrl); setImgErr(false); }}
-            style={{ padding: "9px 18px", background: `${C.blue}10`, border: `1px solid ${C.blue}55`, color: C.blue, fontFamily: "Orbitron, sans-serif", fontSize: "10px", letterSpacing: "0.1em", cursor: "pointer", borderRadius: "3px" }}
+            disabled={busy}
+            style={{ padding: "9px 18px", background: `${C.blue}10`, border: `1px solid ${C.blue}55`, color: C.blue, fontFamily: "Orbitron, sans-serif", fontSize: "10px", letterSpacing: "0.1em", cursor: busy ? "default" : "pointer", borderRadius: "3px" }}
           >
             👁 معاينة
           </button>
           <button
             onClick={handleClear}
-            style={{ padding: "9px 18px", background: `${C.red}10`, border: `1px solid ${C.red}55`, color: C.red, fontFamily: "Orbitron, sans-serif", fontSize: "10px", letterSpacing: "0.1em", cursor: "pointer", borderRadius: "3px" }}
+            disabled={busy}
+            style={{ padding: "9px 18px", background: `${C.red}10`, border: `1px solid ${C.red}55`, color: C.red, fontFamily: "Orbitron, sans-serif", fontSize: "10px", letterSpacing: "0.1em", cursor: busy ? "default" : "pointer", borderRadius: "3px" }}
           >
             ✕ مسح البنر
           </button>
@@ -502,14 +623,15 @@ function SettingsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
 
       {/* Live preview */}
       <div style={{ background: C.surf2, border: `1px solid ${C.border}`, borderRadius: "4px", overflow: "hidden" }}>
-        <div style={{ padding: "10px 14px", borderBottom: `1px solid ${C.border}`, fontFamily: "Orbitron, sans-serif", fontSize: "9px", color: C.dim, letterSpacing: "0.12em" }}>
-          PREVIEW — معاينة الهيدر
+        <div style={{ padding: "10px 14px", borderBottom: `1px solid ${C.border}`, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <span style={{ fontFamily: "Orbitron, sans-serif", fontSize: "9px", color: C.dim, letterSpacing: "0.12em" }}>PREVIEW — معاينة الهيدر الحالي</span>
+          {previewUrl && !imgErr && (
+            <span style={{ fontFamily: "Rajdhani, sans-serif", fontSize: "10px", color: C.green }}>● مُطبَّق الآن</span>
+          )}
         </div>
         {/* Simulated header */}
-        <div style={{ height: "64px", position: "relative", background: "rgba(5,8,15,0.92)", display: "flex", alignItems: "center", justifyContent: "space-between", overflow: "hidden" }}>
-          {/* Top glow line */}
+        <div style={{ height: "72px", position: "relative", background: "rgba(5,8,15,0.92)", display: "flex", alignItems: "center", justifyContent: "space-between", overflow: "hidden" }}>
           <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: "2px", background: `linear-gradient(90deg, transparent, ${C.purple}, ${C.blue}, transparent)`, opacity: 0.7 }} />
-          {/* Banner image */}
           {previewUrl && !imgErr && (
             <div style={{ position: "absolute", inset: 0 }}>
               <img
@@ -519,28 +641,32 @@ function SettingsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
               <div style={{ position: "absolute", inset: 0, background: "linear-gradient(90deg, rgba(5,8,15,0.82) 0%, rgba(5,8,15,0.4) 50%, rgba(5,8,15,0.72) 100%)" }} />
             </div>
           )}
-          {/* Left icon */}
           <div style={{ position: "relative", zIndex: 1, display: "flex", alignItems: "center", gap: "10px", padding: "0 16px" }}>
             <div style={{ width: "32px", height: "32px", border: `1px solid ${C.purple}99`, display: "flex", alignItems: "center", justifyContent: "center", background: `${C.purple}18` }}>
               <span style={{ color: C.purple, fontSize: "15px" }}>📍</span>
             </div>
             {!previewUrl && (
               <div>
-                <div style={{ fontFamily: "Orbitron, sans-serif", fontSize: "14px", color: C.purple, letterSpacing: "0.06em" }}>ديالى GTA MAP</div>
+                <div style={{ fontFamily: "Orbitron, sans-serif", fontSize: "13px", color: C.purple }}>ديالى GTA MAP</div>
                 <div style={{ fontFamily: "Rajdhani, sans-serif", fontSize: "9px", color: `${C.blue}bb`, letterSpacing: "0.14em" }}>DIYALA · SYSTEM ONLINE</div>
               </div>
             )}
           </div>
-          {/* Right clock */}
-          <div style={{ position: "relative", zIndex: 1, padding: "0 16px", fontFamily: "Orbitron, sans-serif", fontSize: "14px", color: C.purple, letterSpacing: "0.06em" }}>
+          <div style={{ position: "relative", zIndex: 1, padding: "0 16px", fontFamily: "Orbitron, sans-serif", fontSize: "14px", color: C.purple }}>
             {new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" })}
           </div>
-          {/* Bottom edge */}
           <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, height: "1px", background: `linear-gradient(90deg, transparent, ${C.purple}99, ${C.blue}99, transparent)` }} />
         </div>
+
+        {/* Current URL display */}
+        {previewUrl && !imgErr && (
+          <div style={{ padding: "8px 14px", borderTop: `1px solid ${C.border}`, fontFamily: "Rajdhani, sans-serif", fontSize: "11px", color: C.dim, wordBreak: "break-all" }}>
+            🔗 {previewUrl}
+          </div>
+        )}
         {imgErr && (
           <div style={{ padding: "10px 14px", background: `${C.red}0a`, color: C.red, fontFamily: "Rajdhani, sans-serif", fontSize: "12px" }}>
-            ⚠ تعذّر تحميل الصورة — تأكد من صحة الرابط وأنه يدعم CORS
+            ⚠ تعذّر تحميل الصورة — تأكد من صحة الرابط
           </div>
         )}
       </div>

@@ -8,6 +8,7 @@ import ordersRouter from "./orders";
 import messagesRouter from "./messages";
 import driversOnlineRouter from "./drivers-online";
 import settingsRouter from "./settings";
+import storageRouter from "./storage";
 
 const router: IRouter = Router();
 
@@ -20,5 +21,6 @@ router.use(ordersRouter);
 router.use(messagesRouter);
 router.use(driversOnlineRouter);
 router.use(settingsRouter);
+router.use(storageRouter);
 
 export default router;
