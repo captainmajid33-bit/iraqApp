@@ -248,6 +248,7 @@ export function ClinicMap({
         setTaxiStep('pick-to');
         taxiStepRef.current='pick-to';
       } else if (step === 'pick-to' && fromPt) {
+        // Place B marker immediately so user gets instant feedback
         taxiToMarkerRef.current?.remove();
         taxiToMarkerRef.current = L.marker([lat,lng],{
           icon: L.divIcon({className:'',html:taxiPinHtml('#ff2d78','B'),iconSize:[34,42],iconAnchor:[17,42]}),
@@ -255,18 +256,46 @@ export function ClinicMap({
         }).addTo(mapRef.current!);
         taxiGlowLineRef.current?.remove();
         taxiRouteLineRef.current?.remove();
-        taxiGlowLineRef.current  = L.polyline([[fromPt.lat,fromPt.lng],[lat,lng]],{color:'#7b2ff7',weight:14,opacity:0.15,lineCap:'round',lineJoin:'round'}).addTo(mapRef.current!);
-        taxiRouteLineRef.current = L.polyline([[fromPt.lat,fromPt.lng],[lat,lng]],{color:'#7b2ff7',weight:3.5,opacity:1,lineCap:'round',lineJoin:'round',dashArray:'10 6'}).addTo(mapRef.current!);
-        const distKm = haversineKm(fromPt.lat,fromPt.lng,lat,lng);
+
         setTaxiToPt({lat,lng});
-        setTaxiDistKm(distKm);
-        setTaxiEstPrice(Math.round(distKm*500));
+        setTaxiDistKm(null);
+        setTaxiEstPrice(null);
         setTaxiStep('confirm');
         taxiStepRef.current='confirm';
-        if (mapRef.current) {
-          mapRef.current.getContainer().style.cursor='';
-          mapRef.current.fitBounds([[fromPt.lat,fromPt.lng],[lat,lng]],{padding:[70,70]});
-        }
+        if (mapRef.current) mapRef.current.getContainer().style.cursor='';
+        setTaxiRouteLoading(true);
+
+        // ── Fetch real road route from OSRM ──────────────────────────────────
+        const osrmUrl = `https://router.project-osrm.org/route/v1/driving/${fromPt.lng},${fromPt.lat};${lng},${lat}?overview=full&geometries=geojson`;
+        fetch(osrmUrl)
+          .then(r=>r.json())
+          .then(data=>{
+            const route = data.routes?.[0];
+            if (!route || !mapRef.current) return;
+            // Flip [lng,lat] → [lat,lng] for Leaflet
+            const coords:[number,number][] = route.geometry.coordinates.map(
+              ([lo,la]:[number,number]) => [la,lo]
+            );
+            taxiGlowLineRef.current?.remove();
+            taxiRouteLineRef.current?.remove();
+            taxiGlowLineRef.current  = L.polyline(coords,{color:'#7b2ff7',weight:14,opacity:0.18,lineCap:'round',lineJoin:'round'}).addTo(mapRef.current);
+            taxiRouteLineRef.current = L.polyline(coords,{color:'#7b2ff7',weight:3.5,opacity:1,lineCap:'round',lineJoin:'round',dashArray:'10 6'}).addTo(mapRef.current);
+            const distKm = route.distance / 1000; // metres → km (real road distance)
+            setTaxiDistKm(distKm);
+            setTaxiEstPrice(Math.round(distKm * 750)); // 750 IQD per km
+            mapRef.current.fitBounds(L.latLngBounds(coords),{padding:[70,70]});
+          })
+          .catch(()=>{
+            // Fallback: draw straight line + haversine estimate on OSRM failure
+            if (!mapRef.current) return;
+            taxiGlowLineRef.current  = L.polyline([[fromPt.lat,fromPt.lng],[lat,lng]],{color:'#7b2ff7',weight:14,opacity:0.15,lineCap:'round',lineJoin:'round'}).addTo(mapRef.current);
+            taxiRouteLineRef.current = L.polyline([[fromPt.lat,fromPt.lng],[lat,lng]],{color:'#7b2ff7',weight:3.5,opacity:1,lineCap:'round',lineJoin:'round',dashArray:'10 6'}).addTo(mapRef.current);
+            const distKm = haversineKm(fromPt.lat,fromPt.lng,lat,lng);
+            setTaxiDistKm(distKm);
+            setTaxiEstPrice(Math.round(distKm * 750));
+            mapRef.current.fitBounds([[fromPt.lat,fromPt.lng],[lat,lng]],{padding:[70,70]});
+          })
+          .finally(()=>setTaxiRouteLoading(false));
       }
     };
   });
@@ -302,9 +331,10 @@ export function ClinicMap({
   const [taxiEstPrice,   setTaxiEstPrice]   = useState<number|null>(null);
   const [taxiUserName,   setTaxiUserName]   = useState('');
   const [taxiUserPhone,  setTaxiUserPhone]  = useState('');
-  const [taxiLoading,    setTaxiLoading]    = useState(false);
-  const [taxiError,      setTaxiError]      = useState<string|null>(null);
-  const [taxiSuccess,    setTaxiSuccess]    = useState(false);
+  const [taxiLoading,      setTaxiLoading]      = useState(false);
+  const [taxiRouteLoading, setTaxiRouteLoading] = useState(false); // OSRM fetch in progress
+  const [taxiError,        setTaxiError]        = useState<string|null>(null);
+  const [taxiSuccess,      setTaxiSuccess]      = useState(false);
 
   // ── Active order tracking (after submit) ─────────────────────────────────
   const [activeOrderId,     setActiveOrderId]     = useState<number|null>(null);
@@ -1438,17 +1468,30 @@ export function ClinicMap({
                         <span style={{width:'18px',height:'18px',borderRadius:'50%',background:'rgba(255,45,120,0.15)',border:'1.5px solid #ff2d78',display:'inline-flex',alignItems:'center',justifyContent:'center',fontSize:'9px',fontWeight:900,color:'#ff2d78',fontFamily:'Orbitron,sans-serif'}}>B</span>
                       </div>
                       <span style={{fontFamily:'Rajdhani,sans-serif',fontSize:'14px',color:'rgba(255,255,255,0.5)'}}>
-                        {taxiDistKm !== null ? `${taxiDistKm.toFixed(2)} كم` : ''}
+                        {taxiRouteLoading
+                          ? <span style={{color:'rgba(245,197,24,0.5)',fontSize:'12px'}}>جاري الحساب...</span>
+                          : taxiDistKm !== null ? `${taxiDistKm.toFixed(2)} كم` : ''}
                       </span>
                     </div>
                   </div>
                   {/* Price badge */}
-                  <div style={{textAlign:'center',background:'rgba(245,197,24,0.1)',border:'1px solid rgba(245,197,24,0.4)',padding:'6px 12px'}}>
+                  <div style={{textAlign:'center',background:'rgba(245,197,24,0.1)',border:`1px solid ${taxiRouteLoading?'rgba(245,197,24,0.2)':'rgba(245,197,24,0.4)'}`,padding:'6px 12px',minWidth:'100px',transition:'border-color 0.3s'}}>
                     <div style={{fontFamily:'Orbitron,sans-serif',fontSize:'7px',color:'rgba(245,197,24,0.7)',letterSpacing:'0.12em',marginBottom:'2px'}}>التكلفة التقديرية</div>
-                    <div style={{fontFamily:'Orbitron,sans-serif',fontSize:'16px',color:'#f5c518',fontWeight:900}}>
-                      {taxiEstPrice !== null ? taxiEstPrice.toLocaleString() : '0'}
+                    {taxiRouteLoading ? (
+                      <div style={{display:'flex',alignItems:'center',justifyContent:'center',gap:'6px',padding:'2px 0'}}>
+                        <svg width="14" height="14" viewBox="0 0 28 28" fill="none" style={{animation:'lf-spin 0.9s linear infinite'}}><circle cx="14" cy="14" r="10" stroke="#f5c518" strokeWidth="2" strokeDasharray="22 14" strokeLinecap="round"/></svg>
+                        <span style={{fontFamily:'Orbitron,sans-serif',fontSize:'8px',color:'rgba(245,197,24,0.5)',letterSpacing:'0.08em'}}>جاري الحساب...</span>
+                      </div>
+                    ) : (
+                      <div style={{fontFamily:'Orbitron,sans-serif',fontSize:'16px',color:'#f5c518',fontWeight:900}}>
+                        {taxiEstPrice !== null ? taxiEstPrice.toLocaleString() : '—'}
+                      </div>
+                    )}
+                    <div style={{fontFamily:'Rajdhani,sans-serif',fontSize:'10px',color:'rgba(245,197,24,0.55)'}}>
+                      {taxiDistKm !== null && !taxiRouteLoading
+                        ? `${taxiDistKm.toFixed(2)} كم × 750 = د.ع`
+                        : 'دينار عراقي'}
                     </div>
-                    <div style={{fontFamily:'Rajdhani,sans-serif',fontSize:'10px',color:'rgba(245,197,24,0.55)'}}>دينار عراقي</div>
                   </div>
                 </div>
 
@@ -1501,22 +1544,24 @@ export function ClinicMap({
                     >إلغاء</button>
                     <button
                       onClick={submitTaxiOrder}
-                      disabled={taxiLoading}
+                      disabled={taxiLoading || taxiRouteLoading}
                       style={{
                         flex:1,padding:'13px',
-                        background:taxiLoading?'rgba(123,47,247,0.06)':'rgba(123,47,247,0.18)',
+                        background:(taxiLoading||taxiRouteLoading)?'rgba(123,47,247,0.06)':'rgba(123,47,247,0.18)',
                         border:'1px solid #7b2ff7',color:'#c77dff',
                         fontFamily:'Orbitron,sans-serif',fontSize:'10px',letterSpacing:'0.12em',
-                        cursor:taxiLoading?'not-allowed':'pointer',
-                        boxShadow:taxiLoading?'none':'0 0 22px rgba(123,47,247,0.3)',
+                        cursor:(taxiLoading||taxiRouteLoading)?'not-allowed':'pointer',
+                        boxShadow:(taxiLoading||taxiRouteLoading)?'none':'0 0 22px rgba(123,47,247,0.3)',
                         transition:'all 0.2s',display:'flex',alignItems:'center',justifyContent:'center',gap:'8px',
                       }}
-                      onMouseEnter={e=>{if(!taxiLoading)(e.currentTarget as HTMLElement).style.background='rgba(123,47,247,0.3)';}}
-                      onMouseLeave={e=>{if(!taxiLoading)(e.currentTarget as HTMLElement).style.background='rgba(123,47,247,0.18)';}}
+                      onMouseEnter={e=>{if(!taxiLoading&&!taxiRouteLoading)(e.currentTarget as HTMLElement).style.background='rgba(123,47,247,0.3)';}}
+                      onMouseLeave={e=>{if(!taxiLoading&&!taxiRouteLoading)(e.currentTarget as HTMLElement).style.background='rgba(123,47,247,0.18)';}}
                     >
                       {taxiLoading
                         ? <><svg width="14" height="14" viewBox="0 0 28 28" fill="none" style={{animation:'lf-spin 0.9s linear infinite'}}><circle cx="14" cy="14" r="10" stroke="#c77dff" strokeWidth="2" strokeDasharray="22 14" strokeLinecap="round"/></svg>جاري الإرسال...</>
-                        : <>✓ تأكيد وإرسال الطلب</>
+                        : taxiRouteLoading
+                          ? <><svg width="14" height="14" viewBox="0 0 28 28" fill="none" style={{animation:'lf-spin 0.9s linear infinite'}}><circle cx="14" cy="14" r="10" stroke="#f5c518" strokeWidth="2" strokeDasharray="22 14" strokeLinecap="round"/></svg>جاري رسم المسار...</>
+                          : <>✓ تأكيد وإرسال الطلب</>
                       }
                     </button>
                   </div>
