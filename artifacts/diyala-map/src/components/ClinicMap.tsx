@@ -153,6 +153,17 @@ function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): nu
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
 }
 
+// ── Neon place-pin (Nominatim / POI selection) ────────────────────────────────
+function placePinHtml(label: string): string {
+  const short = label.length > 26 ? label.slice(0,26)+'…' : label;
+  return `<div style="display:flex;flex-direction:column;align-items:center;filter:drop-shadow(0 0 10px rgba(0,212,255,0.8));">
+    <div style="background:rgba(0,10,22,0.97);border:2px solid #00d4ff;color:#00d4ff;font-family:'Rajdhani',sans-serif;font-size:11px;font-weight:700;padding:3px 9px;white-space:nowrap;letter-spacing:0.04em;box-shadow:0 0 14px rgba(0,212,255,0.4);max-width:200px;overflow:hidden;text-overflow:ellipsis;">${short}</div>
+    <div style="width:2px;height:9px;background:#00d4ff;"></div>
+    <div style="width:14px;height:14px;background:#00d4ff;border-radius:50%;box-shadow:0 0 18px #00d4ff,0 0 8px #fff;"></div>
+    <div style="width:2px;height:8px;background:linear-gradient(to bottom,#00d4ff88,transparent);"></div>
+  </div>`;
+}
+
 function taxiPinHtml(color: string, label: string): string {
   return `<div style="position:relative;width:34px;height:42px;filter:drop-shadow(0 0 8px ${color}99);">
     <div style="width:30px;height:30px;background:${color}22;border:2.5px solid ${color};border-radius:50% 50% 50% 0;transform:rotate(-45deg);position:absolute;top:0;left:2px;"></div>
@@ -323,6 +334,17 @@ export function ClinicMap({
   const [showTraffic,    setShowTraffic]    = useState(false);
   const [showTaxiPrompt, setShowTaxiPrompt] = useState(false);
 
+  // ── Place search (Nominatim OSM) ─────────────────────────────────────────────
+  type NominatimResult = { place_id: number; display_name: string; lat: string; lon: string };
+  const [placeResults,       setPlaceResults]       = useState<NominatimResult[]>([]);
+  const [placeSearchLoading, setPlaceSearchLoading] = useState(false);
+  const [selectedPlace,      setSelectedPlace]      = useState<{name:string;lat:number;lng:number;addr?:string}|null>(null);
+  const [placeRouteInfo,     setPlaceRouteInfo]     = useState<{distanceKm:number;durationMin:number}|null>(null);
+  const [placeRouteLoading,  setPlaceRouteLoading]  = useState(false);
+  const placeGlowRef = useRef<L.Polyline|null>(null);
+  const placeLineRef = useRef<L.Polyline|null>(null);
+  const placePinRef  = useRef<L.Marker|null>(null);
+
   // ── Bottom-bar helpers: detect taxi / gas categories dynamically ───────────
   const isTaxiCat = (slug: string, labelEn: string) =>
     slug === 'taxi' || slug === 'تكسي' || labelEn.toLowerCase().includes('taxi');
@@ -412,6 +434,76 @@ export function ClinicMap({
       )
       .slice(0, 10);
   },[searchQuery, items]);
+
+  // ── Nominatim debounced search ─────────────────────────────────────────────
+  useEffect(()=>{
+    const q = searchQuery.trim();
+    if (q.length < 2) { setPlaceResults([]); return; }
+    setPlaceSearchLoading(true);
+    const t = setTimeout(async ()=>{
+      try {
+        const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(q+' ديالى')}&countrycodes=iq&format=json&limit=6&addressdetails=0`;
+        const r = await fetch(url, { headers:{'Accept-Language':'ar,en'} });
+        const data = await r.json();
+        setPlaceResults(Array.isArray(data) ? data : []);
+      } catch { setPlaceResults([]); }
+      finally  { setPlaceSearchLoading(false); }
+    }, 650);
+    return ()=>{ clearTimeout(t); };
+  },[searchQuery]);
+
+  // ── Select a Nominatim place: fly + neon pin + reset route ─────────────────
+  const selectPlace = useCallback((name: string, lat: number, lng: number, addr?: string)=>{
+    setShowMoreModal(false);
+    setSearchQuery('');
+    setPlaceResults([]);
+    setSelectedPlace({ name, lat, lng, addr });
+    setPlaceRouteInfo(null);
+    placeGlowRef.current?.remove(); placeGlowRef.current = null;
+    placeLineRef.current?.remove(); placeLineRef.current = null;
+    placePinRef.current?.remove();
+    if (mapRef.current) {
+      placePinRef.current = L.marker([lat, lng],{
+        icon: L.divIcon({ className:'', html: placePinHtml(name), iconSize:[36,56], iconAnchor:[18,56] }),
+        zIndexOffset: 600,
+      }).addTo(mapRef.current);
+      mapRef.current.flyTo([lat, lng], 15, { animate:true, duration:1.3 });
+    }
+  },[]);
+
+  // ── Clear selected place & visuals ──────────────────────────────────────────
+  const clearSelectedPlace = useCallback(()=>{
+    setSelectedPlace(null);
+    setPlaceRouteInfo(null);
+    placeGlowRef.current?.remove(); placeGlowRef.current = null;
+    placeLineRef.current?.remove(); placeLineRef.current = null;
+    placePinRef.current?.remove();  placePinRef.current  = null;
+  },[]);
+
+  // ── Draw OSRM route to selected place ──────────────────────────────────────
+  const goToPlace = useCallback(()=>{
+    if (!selectedPlace || !mapRef.current) return;
+    if (!userLocation) return; // GPS button must be active first
+    const { lat, lng } = selectedPlace;
+    const map = mapRef.current;
+    setPlaceRouteLoading(true);
+    placeGlowRef.current?.remove(); placeGlowRef.current = null;
+    placeLineRef.current?.remove(); placeLineRef.current = null;
+    setPlaceRouteInfo(null);
+    fetch(`https://router.project-osrm.org/route/v1/driving/${userLocation.lng},${userLocation.lat};${lng},${lat}?overview=full&geometries=geojson`)
+      .then(r=>r.json())
+      .then(data=>{
+        const route = data.routes?.[0];
+        if (!route) return;
+        const coords:[number,number][] = route.geometry.coordinates.map(([ln,la]:[number,number])=>[la,ln]);
+        placeGlowRef.current = L.polyline(coords,{color:'#00d4ff',weight:14,opacity:0.12,lineCap:'round',lineJoin:'round'}).addTo(map);
+        placeLineRef.current = L.polyline(coords,{color:'#00d4ff',weight:3.5,opacity:1,lineCap:'round',lineJoin:'round',dashArray:'10 6'}).addTo(map);
+        setPlaceRouteInfo({ distanceKm:route.distance/1000, durationMin:route.duration/60 });
+        map.flyToBounds(L.latLngBounds(coords),{padding:[70,100],duration:1.5});
+      })
+      .catch(()=>{})
+      .finally(()=>setPlaceRouteLoading(false));
+  },[selectedPlace, userLocation]);
 
   // Escape key closes the modal
   useEffect(()=>{
@@ -1221,68 +1313,125 @@ export function ClinicMap({
             {/* Content area */}
             <div style={{overflowY:'auto',flex:1}}>
               {searchQuery.trim() ? (
-                searchResults.length === 0 ? (
-                  <div style={{padding:'32px 16px',textAlign:'center'}}>
-                    <div style={{fontSize:'28px',marginBottom:'10px',opacity:0.3}}>🔍</div>
-                    <div style={{fontFamily:'Rajdhani,sans-serif',fontSize:'14px',color:'rgba(255,255,255,0.3)'}}>
-                      لا توجد نتائج لـ "{searchQuery}"
-                    </div>
-                  </div>
-                ) : (
-                  <>
-                    <div style={{padding:'8px 16px 4px',fontFamily:'Orbitron,sans-serif',fontSize:'8px',color:'rgba(255,255,255,0.25)',letterSpacing:'0.14em'}}>
-                      {searchResults.length} نتيجة
-                    </div>
-                    {searchResults.map(item=>{
-                      const cat = catMapRef.current.get(item.kind);
-                      const isOpen = item.status==='مفتوح';
-                      const statusColor = isOpen ? '#00f5d4' : '#ff2d78';
-                      const catColor = cat?.color ?? '#7b2ff7';
-                      return (
-                        <button key={item.id} onClick={()=>jumpToItem(item)}
-                          style={{
-                            width:'100%',display:'flex',alignItems:'center',gap:'12px',
-                            padding:'11px 16px',background:'transparent',border:'none',
-                            borderBottom:'1px solid rgba(255,255,255,0.04)',
-                            cursor:'pointer',textAlign:'right',transition:'background 0.15s',
-                          }}
-                          onMouseEnter={e=>(e.currentTarget.style.background='rgba(123,47,247,0.1)')}
-                          onMouseLeave={e=>(e.currentTarget.style.background='transparent')}
-                        >
-                          <div style={{
-                            width:'38px',height:'38px',borderRadius:'50%',flexShrink:0,
-                            background:`${catColor}12`,
-                            border:`1.5px solid ${catColor}44`,
-                            display:'flex',alignItems:'center',justifyContent:'center',
-                            fontSize:'17px',
-                          }}>{cat?.icon ?? '📍'}</div>
-                          <div style={{flex:1,minWidth:0,textAlign:'right'}}>
-                            <div style={{fontFamily:'Rajdhani,sans-serif',fontSize:'15px',fontWeight:700,color:'#e8f8f5',marginBottom:'2px',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
-                              {item.name}
+                <>
+                  {/* ── Local DB results ── */}
+                  {searchResults.length > 0 && (
+                    <>
+                      <div style={{padding:'8px 16px 4px',fontFamily:'Orbitron,sans-serif',fontSize:'8px',color:'rgba(123,47,247,0.7)',letterSpacing:'0.14em'}}>
+                        📍 مواقع مسجّلة ({searchResults.length})
+                      </div>
+                      {searchResults.map(item=>{
+                        const cat = catMapRef.current.get(item.kind);
+                        const isOpen = item.status==='مفتوح';
+                        const statusColor = isOpen ? '#00f5d4' : '#ff2d78';
+                        const catColor = cat?.color ?? '#7b2ff7';
+                        return (
+                          <button key={item.id} onClick={()=>jumpToItem(item)}
+                            style={{
+                              width:'100%',display:'flex',alignItems:'center',gap:'12px',
+                              padding:'11px 16px',background:'transparent',border:'none',
+                              borderBottom:'1px solid rgba(255,255,255,0.04)',
+                              cursor:'pointer',textAlign:'right',transition:'background 0.15s',
+                            }}
+                            onMouseEnter={e=>(e.currentTarget.style.background='rgba(123,47,247,0.1)')}
+                            onMouseLeave={e=>(e.currentTarget.style.background='transparent')}
+                          >
+                            <div style={{
+                              width:'38px',height:'38px',borderRadius:'50%',flexShrink:0,
+                              background:`${catColor}12`,border:`1.5px solid ${catColor}44`,
+                              display:'flex',alignItems:'center',justifyContent:'center',fontSize:'17px',
+                            }}>{cat?.icon ?? '📍'}</div>
+                            <div style={{flex:1,minWidth:0,textAlign:'right'}}>
+                              <div style={{fontFamily:'Rajdhani,sans-serif',fontSize:'15px',fontWeight:700,color:'#e8f8f5',marginBottom:'2px',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
+                                {item.name}
+                              </div>
+                              <div style={{fontFamily:'Rajdhani,sans-serif',fontSize:'12px',color:'rgba(255,255,255,0.38)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
+                                {cat?.labelAr ?? item.kind}{item.address ? ` · ${item.address}` : ''}
+                              </div>
                             </div>
-                            <div style={{fontFamily:'Rajdhani,sans-serif',fontSize:'12px',color:'rgba(255,255,255,0.38)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
-                              {cat?.labelAr ?? item.kind}{item.address ? ` · ${item.address}` : ''}
+                            <div style={{width:'8px',height:'8px',borderRadius:'50%',flexShrink:0,background:statusColor,boxShadow:`0 0 8px ${statusColor}`}}/>
+                          </button>
+                        );
+                      })}
+                    </>
+                  )}
+
+                  {/* ── Divider ── */}
+                  {searchResults.length > 0 && (placeSearchLoading || placeResults.length > 0) && (
+                    <div style={{margin:'4px 16px',borderTop:'1px solid rgba(0,212,255,0.15)'}}/>
+                  )}
+
+                  {/* ── Nominatim / OSM Places ── */}
+                  {placeSearchLoading ? (
+                    <div style={{padding:'16px',display:'flex',alignItems:'center',gap:'10px',direction:'rtl'}}>
+                      <svg width="16" height="16" viewBox="0 0 28 28" fill="none" style={{animation:'lf-spin 0.9s linear infinite',flexShrink:0}}>
+                        <circle cx="14" cy="14" r="10" stroke="#00d4ff" strokeWidth="2.5" strokeDasharray="22 14" strokeLinecap="round"/>
+                      </svg>
+                      <span style={{fontFamily:'Rajdhani,sans-serif',fontSize:'13px',color:'rgba(0,212,255,0.6)'}}>
+                        جاري البحث عن الأماكن في ديالى...
+                      </span>
+                    </div>
+                  ) : placeResults.length > 0 ? (
+                    <>
+                      <div style={{padding:'8px 16px 4px',fontFamily:'Orbitron,sans-serif',fontSize:'8px',color:'rgba(0,212,255,0.7)',letterSpacing:'0.14em'}}>
+                        🌐 أماكن على الخريطة ({placeResults.length})
+                      </div>
+                      {placeResults.map(place=>{
+                        const shortName = place.display_name.split(',')[0].trim();
+                        const addrParts = place.display_name.split(',').slice(1,3).join(',').trim();
+                        return (
+                          <button key={place.place_id}
+                            onClick={()=>selectPlace(shortName, parseFloat(place.lat), parseFloat(place.lon), addrParts || undefined)}
+                            style={{
+                              width:'100%',display:'flex',alignItems:'center',gap:'12px',
+                              padding:'11px 16px',background:'transparent',border:'none',
+                              borderBottom:'1px solid rgba(0,212,255,0.07)',
+                              cursor:'pointer',textAlign:'right',transition:'background 0.15s',
+                            }}
+                            onMouseEnter={e=>(e.currentTarget.style.background='rgba(0,212,255,0.07)')}
+                            onMouseLeave={e=>(e.currentTarget.style.background='transparent')}
+                          >
+                            <div style={{
+                              width:'38px',height:'38px',borderRadius:'50%',flexShrink:0,
+                              background:'rgba(0,212,255,0.08)',border:'1.5px solid rgba(0,212,255,0.35)',
+                              display:'flex',alignItems:'center',justifyContent:'center',fontSize:'17px',
+                            }}>🌐</div>
+                            <div style={{flex:1,minWidth:0,textAlign:'right'}}>
+                              <div style={{fontFamily:'Rajdhani,sans-serif',fontSize:'15px',fontWeight:700,color:'#00d4ff',marginBottom:'2px',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
+                                {shortName}
+                              </div>
+                              {addrParts && (
+                                <div style={{fontFamily:'Rajdhani,sans-serif',fontSize:'12px',color:'rgba(0,212,255,0.45)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
+                                  {addrParts}
+                                </div>
+                              )}
                             </div>
-                          </div>
-                          <div style={{
-                            width:'8px',height:'8px',borderRadius:'50%',flexShrink:0,
-                            background:statusColor,boxShadow:`0 0 8px ${statusColor}`,
-                          }}/>
-                        </button>
-                      );
-                    })}
-                  </>
-                )
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" style={{flexShrink:0,opacity:0.5}}>
+                              <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5S10.62 6.5 12 6.5s2.5 1.12 2.5 2.5S13.38 11.5 12 11.5z" fill="#00d4ff"/>
+                            </svg>
+                          </button>
+                        );
+                      })}
+                    </>
+                  ) : searchResults.length === 0 ? (
+                    <div style={{padding:'32px 16px',textAlign:'center'}}>
+                      <div style={{fontSize:'28px',marginBottom:'10px',opacity:0.3}}>🔍</div>
+                      <div style={{fontFamily:'Rajdhani,sans-serif',fontSize:'14px',color:'rgba(255,255,255,0.3)'}}>
+                        لا توجد نتائج لـ "{searchQuery}"
+                      </div>
+                    </div>
+                  ) : null}
+                </>
               ) : (
                 /* Extra categories grid (categories 5+) */
                 <>
-                  {categories.length > 4 && (
+                  {displayCategories.length > 4 && (
                     <>
                       <div style={{padding:'10px 16px 6px',fontFamily:'Orbitron,sans-serif',fontSize:'8px',color:'rgba(255,255,255,0.25)',letterSpacing:'0.14em'}}>
                         CATEGORIES
                       </div>
                       <div style={{padding:'4px 16px 14px',display:'flex',flexWrap:'wrap',gap:'8px'}}>
-                        {categories.slice(4).map(cat=>{
+                        {displayCategories.slice(4).map(cat=>{
                           const active = activeFilter===cat.slug;
                           const count = items.filter(i=>i.kind===cat.slug && i.status!=='معطّل').length;
                           return (
@@ -1851,6 +2000,145 @@ export function ClinicMap({
           <div style={{display:'flex',alignItems:'center',gap:'8px',marginTop:'6px',paddingTop:'6px',borderTop:'1px solid rgba(255,255,255,0.07)'}}>
             <div style={{width:'8px',height:'8px',borderRadius:'50%',background:'#f5c518',boxShadow:'0 0 6px #f5c518',flexShrink:0}}/>
             <span style={{fontFamily:'Rajdhani,sans-serif',fontSize:'12px',color:'rgba(255,255,255,0.45)'}}>موقعك / المسار</span>
+          </div>
+        </div>
+      )}
+
+      {/* ══════════════════════════════════════════════════════════════════════
+          ── Selected Place Panel (slides up above bottom bar) ─────────────
+          ══════════════════════════════════════════════════════════════════ */}
+      {selectedPlace && (
+        <div style={{
+          position:'absolute', bottom:'80px', left:0, right:0, zIndex:1010,
+          background:'rgba(5,8,15,0.98)',
+          borderTop:'2px solid #00d4ff',
+          boxShadow:'0 -6px 40px rgba(0,212,255,0.25)',
+          backdropFilter:'blur(16px)',
+          direction:'rtl',
+        }}>
+          {/* Title row */}
+          <div style={{
+            display:'flex',alignItems:'center',gap:'12px',
+            padding:'12px 16px 8px',
+            borderBottom:'1px solid rgba(0,212,255,0.12)',
+          }}>
+            <div style={{
+              width:'40px',height:'40px',borderRadius:'50%',flexShrink:0,
+              background:'rgba(0,212,255,0.1)',border:'2px solid #00d4ff44',
+              display:'flex',alignItems:'center',justifyContent:'center',fontSize:'20px',
+            }}>🌐</div>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontFamily:'Orbitron,sans-serif',fontSize:'7px',color:'rgba(0,212,255,0.55)',letterSpacing:'0.18em',marginBottom:'3px'}}>
+                DESTINATION
+              </div>
+              <div style={{fontFamily:'Rajdhani,sans-serif',fontSize:'16px',fontWeight:700,color:'#00d4ff',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
+                {selectedPlace.name}
+              </div>
+              {selectedPlace.addr && (
+                <div style={{fontFamily:'Rajdhani,sans-serif',fontSize:'11px',color:'rgba(0,212,255,0.45)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
+                  {selectedPlace.addr}
+                </div>
+              )}
+            </div>
+            <button onClick={clearSelectedPlace} style={{
+              background:'none',border:'1px solid rgba(255,45,120,0.3)',
+              color:'rgba(255,45,120,0.6)',fontFamily:'Orbitron,sans-serif',
+              fontSize:'10px',padding:'6px 10px',cursor:'pointer',flexShrink:0,
+              transition:'all 0.2s',
+            }}
+            onMouseEnter={e=>{(e.currentTarget as HTMLElement).style.background='rgba(255,45,120,0.1)';(e.currentTarget as HTMLElement).style.color='#ff2d78';}}
+            onMouseLeave={e=>{(e.currentTarget as HTMLElement).style.background='none';(e.currentTarget as HTMLElement).style.color='rgba(255,45,120,0.6)';}}
+            >✕</button>
+          </div>
+
+          {/* Route info row (shown after goToPlace) */}
+          {placeRouteInfo && (
+            <div style={{
+              display:'flex',alignItems:'center',gap:'0',
+              borderBottom:'1px solid rgba(0,212,255,0.1)',
+            }}>
+              <div style={{flex:1,textAlign:'center',padding:'8px 12px',borderRight:'1px solid rgba(0,212,255,0.1)'}}>
+                <div style={{fontFamily:'Orbitron,sans-serif',fontSize:'7px',color:'rgba(0,212,255,0.5)',letterSpacing:'0.12em',marginBottom:'2px'}}>المسافة</div>
+                <div style={{fontFamily:'Orbitron,sans-serif',fontSize:'15px',color:'#00d4ff',fontWeight:900}}>
+                  {placeRouteInfo.distanceKm.toFixed(1)} <span style={{fontSize:'9px',opacity:0.7}}>كم</span>
+                </div>
+              </div>
+              <div style={{flex:1,textAlign:'center',padding:'8px 12px',borderRight:'1px solid rgba(0,212,255,0.1)'}}>
+                <div style={{fontFamily:'Orbitron,sans-serif',fontSize:'7px',color:'rgba(0,212,255,0.5)',letterSpacing:'0.12em',marginBottom:'2px'}}>الوقت</div>
+                <div style={{fontFamily:'Orbitron,sans-serif',fontSize:'15px',color:'#00f5d4',fontWeight:900}}>
+                  {Math.round(placeRouteInfo.durationMin)} <span style={{fontSize:'9px',opacity:0.7}}>دقيقة</span>
+                </div>
+              </div>
+              <div style={{flex:1,textAlign:'center',padding:'8px 12px'}}>
+                <div style={{fontFamily:'Orbitron,sans-serif',fontSize:'7px',color:'rgba(245,197,24,0.6)',letterSpacing:'0.12em',marginBottom:'2px'}}>التكلفة التقديرية</div>
+                <div style={{fontFamily:'Orbitron,sans-serif',fontSize:'15px',color:'#f5c518',fontWeight:900}}>
+                  {Math.round(placeRouteInfo.distanceKm * 750).toLocaleString()} <span style={{fontSize:'9px',opacity:0.7}}>د.ع</span>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Action buttons */}
+          <div style={{display:'flex',gap:'0'}}>
+            {/* Go / Route button */}
+            <button
+              onClick={goToPlace}
+              disabled={!userLocation || placeRouteLoading}
+              style={{
+                flex:1,padding:'12px 8px',
+                background: placeRouteInfo
+                  ? 'rgba(0,212,255,0.08)'
+                  : (!userLocation || placeRouteLoading)
+                    ? 'rgba(0,212,255,0.04)'
+                    : 'rgba(0,212,255,0.16)',
+                border:'none',
+                borderRight:'1px solid rgba(255,255,255,0.07)',
+                color: (!userLocation || placeRouteLoading) ? 'rgba(0,212,255,0.35)' : '#00d4ff',
+                fontFamily:'Orbitron,sans-serif',fontSize:'10px',
+                letterSpacing:'0.1em',cursor:(!userLocation||placeRouteLoading)?'not-allowed':'pointer',
+                transition:'all 0.2s',
+                display:'flex',alignItems:'center',justifyContent:'center',gap:'6px',
+              }}
+              onMouseEnter={e=>{if(userLocation&&!placeRouteLoading)(e.currentTarget as HTMLElement).style.background='rgba(0,212,255,0.22)';}}
+              onMouseLeave={e=>{(e.currentTarget as HTMLElement).style.background=placeRouteInfo?'rgba(0,212,255,0.08)':(!userLocation||placeRouteLoading)?'rgba(0,212,255,0.04)':'rgba(0,212,255,0.16)';}}
+            >
+              {placeRouteLoading ? (
+                <><svg width="13" height="13" viewBox="0 0 28 28" fill="none" style={{animation:'lf-spin 0.9s linear infinite'}}><circle cx="14" cy="14" r="10" stroke="#00d4ff" strokeWidth="2.5" strokeDasharray="22 14" strokeLinecap="round"/></svg>جاري الحساب</>
+              ) : placeRouteInfo ? (
+                <><svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M1 12h22M15 5l7 7-7 7" stroke="#00d4ff" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"/></svg>إعادة الحساب</>
+              ) : !userLocation ? (
+                <>📍 فعّل موقعك أولاً</>
+              ) : (
+                <><svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M1 12h22M15 5l7 7-7 7" stroke="#00d4ff" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"/></svg>انطلق</>
+              )}
+            </button>
+
+            {/* Book Taxi button */}
+            <button
+              onClick={()=>{
+                if (taxiCategory) {
+                  onFilterChange(taxiCategory.slug);
+                  setShowMoreModal(false);
+                  setShowTaxiPrompt(true);
+                }
+              }}
+              disabled={!taxiCategory}
+              style={{
+                flex:1,padding:'12px 8px',
+                background:'rgba(245,197,24,0.12)',
+                border:'none',
+                color: taxiCategory ? '#f5c518' : 'rgba(245,197,24,0.3)',
+                fontFamily:'Orbitron,sans-serif',fontSize:'10px',
+                letterSpacing:'0.1em',
+                cursor: taxiCategory ? 'pointer' : 'not-allowed',
+                transition:'all 0.2s',
+                display:'flex',alignItems:'center',justifyContent:'center',gap:'6px',
+              }}
+              onMouseEnter={e=>{if(taxiCategory)(e.currentTarget as HTMLElement).style.background='rgba(245,197,24,0.22)';}}
+              onMouseLeave={e=>{(e.currentTarget as HTMLElement).style.background='rgba(245,197,24,0.12)';}}
+            >
+              🚕 احجز تكسي
+            </button>
           </div>
         </div>
       )}
