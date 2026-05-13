@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import { MapItem, Category } from '@/data/types';
+import { ChatOverlay } from './ChatOverlay';
 
 interface ClinicMapProps {
   items: MapItem[];
@@ -305,11 +306,23 @@ export function ClinicMap({
   const [taxiError,      setTaxiError]      = useState<string|null>(null);
   const [taxiSuccess,    setTaxiSuccess]    = useState(false);
 
+  // ── Active order tracking (after submit) ─────────────────────────────────
+  const [activeOrderId,     setActiveOrderId]     = useState<number|null>(null);
+  const [activeOrderStatus, setActiveOrderStatus] = useState<string>('pending');
+  const [driverLat,         setDriverLat]         = useState<number|null>(null);
+  const [driverLng,         setDriverLng]         = useState<number|null>(null);
+  const [driverDistKm,      setDriverDistKm]      = useState<number|null>(null);
+  const [driverEtaMin,      setDriverEtaMin]      = useState<number|null>(null);
+  const [showChat,          setShowChat]          = useState(false);
+  const activeOrderIdRef    = useRef<number|null>(null);
+  const prevDriverPosRef    = useRef<{lat:number;lng:number}|null>(null);
+
   // Leaflet object refs for taxi routing visuals
   const taxiRouteLineRef  = useRef<L.Polyline|null>(null);
   const taxiGlowLineRef   = useRef<L.Polyline|null>(null);
   const taxiFromMarkerRef = useRef<L.Marker|null>(null);
   const taxiToMarkerRef   = useRef<L.Marker|null>(null);
+  const driverMarkerRef   = useRef<L.Marker|null>(null);
   // Bridge refs — stable handles for Leaflet DOM callbacks & map click
   const setTaxiItemRef    = useRef<((item:MapItem)=>void)|null>(null);
   const taxiPickPointRef  = useRef<((lat:number,lng:number)=>void)|null>(null);
@@ -709,6 +722,105 @@ export function ClinicMap({
     if (mapRef.current) mapRef.current.getContainer().style.cursor = adminModeRef.current ? 'crosshair' : '';
   },[]);
 
+  // ── Stop active order tracking (driver arrived / cancelled) ───────────────
+  const stopOrderTracking = useCallback(()=>{
+    driverMarkerRef.current?.remove(); driverMarkerRef.current = null;
+    setActiveOrderId(null);    setActiveOrderStatus('pending');
+    setDriverLat(null);        setDriverLng(null);
+    setDriverDistKm(null);     setDriverEtaMin(null);
+    setShowChat(false);        prevDriverPosRef.current = null;
+    activeOrderIdRef.current = null;
+  },[]);
+
+  // ── Driver marker icon factory ────────────────────────────────────────────
+  function makeDriverIcon(): L.DivIcon {
+    return L.divIcon({
+      className: '',
+      html: `<div style="width:46px;height:46px;position:relative;display:flex;align-items:center;justify-content:center;">
+        <div style="position:absolute;inset:0;border-radius:50%;background:#f5c518;opacity:0.14;animation:lf-ping 1.8s cubic-bezier(0,0,0.2,1) infinite;"></div>
+        <div style="position:absolute;inset:4px;border-radius:50%;border:2px solid #f5c518;box-shadow:0 0 20px #f5c518,0 0 40px #f5c51866;"></div>
+        <span style="position:relative;z-index:1;font-size:20px;line-height:1;user-select:none;">🚕</span>
+      </div>`,
+      iconSize: [46,46], iconAnchor: [23,23],
+    });
+  }
+
+  // ── Smooth driver marker update (CSS transition via setLatLng) ────────────
+  const updateDriverMarker = useCallback((lat: number, lng: number)=>{
+    if (!mapRef.current) return;
+    if (driverMarkerRef.current) {
+      // Leaflet handles interpolation when we setLatLng; for extra smoothness
+      // we rely on browser rendering between frames
+      driverMarkerRef.current.setLatLng([lat, lng]);
+    } else {
+      driverMarkerRef.current = L.marker([lat, lng],{
+        icon: makeDriverIcon(),
+        zIndexOffset: 900,
+      }).addTo(mapRef.current);
+    }
+    prevDriverPosRef.current = { lat, lng };
+  },[]);
+
+  // ── Apply order snapshot (status + driver position) ───────────────────────
+  const applyOrderSnapshot = useCallback((data: {
+    id: number; status: string;
+    driverLat?: number|null; driverLng?: number|null;
+    fromLat?: number|null; fromLng?: number|null;
+  })=>{
+    setActiveOrderStatus(data.status);
+    if (data.status === 'accepted' || data.status === 'driving') {
+      setShowChat(true); // auto-open chat when driver accepts
+    }
+    if (data.status === 'done' || data.status === 'cancelled') {
+      setTimeout(()=>{ stopOrderTracking(); }, 3000);
+      return;
+    }
+    if (typeof data.driverLat === 'number' && typeof data.driverLng === 'number') {
+      setDriverLat(data.driverLat);
+      setDriverLng(data.driverLng);
+      updateDriverMarker(data.driverLat, data.driverLng);
+      // Compute distance & ETA from driver → pickup point
+      const refLat = data.fromLat ?? null;
+      const refLng = data.fromLng ?? null;
+      if (typeof refLat === 'number' && typeof refLng === 'number') {
+        const distKm = haversineKm(data.driverLat, data.driverLng, refLat, refLng);
+        setDriverDistKm(distKm);
+        setDriverEtaMin(Math.round(distKm * 2.5)); // ~24 km/h avg urban speed
+      }
+    }
+  },[updateDriverMarker, stopOrderTracking]);
+
+  // ── Poll order status every 3 s ───────────────────────────────────────────
+  useEffect(()=>{
+    if (!activeOrderId) return;
+    const poll = async ()=>{
+      try {
+        const res = await fetch(`/api/orders/${activeOrderId}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        applyOrderSnapshot(data);
+      } catch { /* silent */ }
+    };
+    poll(); // immediate first fetch
+    const iv = setInterval(poll, 3000);
+    return ()=> clearInterval(iv);
+  },[activeOrderId, applyOrderSnapshot]);
+
+  // ── SSE listener for real-time order updates ──────────────────────────────
+  useEffect(()=>{
+    const es = new EventSource('/api/events');
+    es.addEventListener('order_update', (e: MessageEvent)=>{
+      try {
+        const { order } = JSON.parse(e.data) as { order: any };
+        if (order?.id !== activeOrderIdRef.current) return;
+        applyOrderSnapshot(order);
+      } catch { /* */ }
+    });
+    es.onerror = ()=> es.close();
+    return ()=> es.close();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[]);
+
   // ── Submit confirmed taxi order ───────────────────────────────────────────────
   const submitTaxiOrder = useCallback(async ()=>{
     if (!taxiDriverItem || !taxiFromPt || !taxiToPt) return;
@@ -736,7 +848,14 @@ export function ClinicMap({
       });
       if (res.ok) {
         localStorage.setItem('diyala_user', JSON.stringify({name:taxiUserName.trim(),phone:taxiUserPhone.trim()}));
+        const { orderId } = await res.json();
         setTaxiSuccess(true);
+        // Activate live tracking for this order
+        if (orderId) {
+          setActiveOrderId(orderId);
+          setActiveOrderStatus('pending');
+          activeOrderIdRef.current = orderId;
+        }
         setTimeout(()=>{ closeTaxiRouting(); }, 2600);
       } else {
         const err = await res.json().catch(()=>({}));
@@ -1406,6 +1525,110 @@ export function ClinicMap({
             )}
           </div>
         </div>
+      )}
+
+      {/* ── Active Order: Driver Status Bar ── */}
+      {activeOrderId && (
+        <div style={{
+          position:'absolute',top:0,left:0,right:0,zIndex:3500,
+          display:'flex',justifyContent:'center',padding:'10px 16px 0',
+          pointerEvents:'none',
+        }}>
+          <div style={{
+            pointerEvents:'auto',
+            background:'rgba(5,8,15,0.97)',
+            border:`1px solid ${
+              activeOrderStatus==='pending'   ? 'rgba(245,197,24,0.6)'  :
+              activeOrderStatus==='accepted'  ? '#00f5d4'               :
+              activeOrderStatus==='driving'   ? '#00f5d4'               :
+              activeOrderStatus==='done'      ? '#00f5d4'               :
+              'rgba(255,45,120,0.5)'
+            }`,
+            boxShadow:`0 0 28px ${
+              activeOrderStatus==='pending' ? 'rgba(245,197,24,0.2)' :
+              activeOrderStatus==='done'    ? 'rgba(0,245,212,0.15)' :
+              'rgba(0,212,255,0.2)'
+            }`,
+            padding:'10px 18px',direction:'rtl',
+            display:'flex',alignItems:'center',gap:'14px',
+            maxWidth:'520px',width:'100%',backdropFilter:'blur(12px)',
+          }}>
+            {/* Status dot pulse */}
+            <div style={{
+              width:'10px',height:'10px',borderRadius:'50%',flexShrink:0,
+              background: activeOrderStatus==='pending' ? '#f5c518' : activeOrderStatus==='done' ? '#00f5d4' : '#00f5d4',
+              boxShadow: `0 0 10px ${activeOrderStatus==='pending'?'#f5c518':'#00f5d4'}`,
+              animation: activeOrderStatus==='done' ? 'none' : 'lf-ping 1.8s cubic-bezier(0,0,0.2,1) infinite',
+            }}/>
+
+            {/* Text */}
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontFamily:'Orbitron,sans-serif',fontSize:'8px',color:'rgba(255,255,255,0.3)',letterSpacing:'0.15em',marginBottom:'2px'}}>
+                ORDER #{activeOrderId}
+              </div>
+              <div style={{fontFamily:'Rajdhani,sans-serif',fontSize:'15px',fontWeight:700,color:'#e8f8f5',lineHeight:1.2}}>
+                {activeOrderStatus==='pending'    && 'في انتظار قبول السائق...'}
+                {activeOrderStatus==='accepted'   && '🚕 السائق في الطريق إليك'}
+                {activeOrderStatus==='driving'    && '🚕 السائق في الطريق إليك'}
+                {activeOrderStatus==='done'       && '✅ وصل السائق — شكراً!'}
+                {activeOrderStatus==='cancelled'  && '❌ تم إلغاء الطلب'}
+              </div>
+              {/* Distance + ETA row */}
+              {(activeOrderStatus==='accepted'||activeOrderStatus==='driving') && driverDistKm !== null && (
+                <div style={{display:'flex',gap:'14px',marginTop:'4px'}}>
+                  <span style={{fontFamily:'Rajdhani,sans-serif',fontSize:'12px',color:'#00d4ff'}}>
+                    📍 {driverDistKm.toFixed(2)} كم
+                  </span>
+                  {driverEtaMin !== null && (
+                    <span style={{fontFamily:'Rajdhani,sans-serif',fontSize:'12px',color:'#00f5d4'}}>
+                      ⏱ ~{driverEtaMin} دقيقة
+                    </span>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Chat toggle button */}
+            {activeOrderId && activeOrderStatus !== 'done' && activeOrderStatus !== 'cancelled' && (
+              <button
+                onClick={()=>setShowChat(v=>!v)}
+                style={{
+                  background: showChat ? 'rgba(123,47,247,0.25)' : 'rgba(123,47,247,0.1)',
+                  border:'1px solid rgba(123,47,247,0.5)',
+                  color:'#c77dff',fontFamily:'Orbitron,sans-serif',fontSize:'8px',
+                  letterSpacing:'0.1em',padding:'6px 10px',cursor:'pointer',
+                  flexShrink:0,transition:'all 0.2s',
+                  boxShadow: showChat ? '0 0 14px rgba(123,47,247,0.3)' : 'none',
+                }}
+                onMouseEnter={e=>{(e.currentTarget as HTMLElement).style.background='rgba(123,47,247,0.3)';}}
+                onMouseLeave={e=>{(e.currentTarget as HTMLElement).style.background=showChat?'rgba(123,47,247,0.25)':'rgba(123,47,247,0.1)';}}
+              >
+                💬 دردشة
+              </button>
+            )}
+
+            {/* Cancel / close tracking */}
+            <button
+              onClick={stopOrderTracking}
+              style={{
+                background:'none',border:'1px solid rgba(255,45,120,0.3)',
+                color:'rgba(255,45,120,0.6)',fontFamily:'Orbitron,sans-serif',
+                fontSize:'8px',letterSpacing:'0.1em',padding:'6px 10px',
+                cursor:'pointer',flexShrink:0,transition:'all 0.2s',
+              }}
+              onMouseEnter={e=>{(e.currentTarget as HTMLElement).style.background='rgba(255,45,120,0.1)';(e.currentTarget as HTMLElement).style.color='#ff2d78';}}
+              onMouseLeave={e=>{(e.currentTarget as HTMLElement).style.background='none';(e.currentTarget as HTMLElement).style.color='rgba(255,45,120,0.6)';}}
+            >✕</button>
+          </div>
+        </div>
+      )}
+
+      {/* ── Chat Overlay ── */}
+      {showChat && activeOrderId && (
+        <ChatOverlay
+          orderId={activeOrderId}
+          onClose={()=>setShowChat(false)}
+        />
       )}
 
       {/* ── Legend ── */}

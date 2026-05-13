@@ -10,15 +10,25 @@ export function removeSseClient(res: Response) {
   clients.delete(res);
 }
 
-export function broadcastLocationUpdate(location: Record<string, unknown>) {
-  const payload = `event: location_update\ndata: ${JSON.stringify({ location })}\n\n`;
+function broadcast(eventName: string, payload: Record<string, unknown>) {
+  const raw = `event: ${eventName}\ndata: ${JSON.stringify(payload)}\n\n`;
   for (const res of clients) {
-    try {
-      res.write(payload);
-    } catch {
-      clients.delete(res);
-    }
+    try { res.write(raw); } catch { clients.delete(res); }
   }
+}
+
+export function broadcastLocationUpdate(location: Record<string, unknown>) {
+  broadcast("location_update", { location });
+}
+
+/** Fired when order status changes OR driver position updates */
+export function broadcastOrderUpdate(order: Record<string, unknown>) {
+  broadcast("order_update", { order });
+}
+
+/** Fired when a new chat message is saved */
+export function broadcastNewMessage(message: Record<string, unknown>) {
+  broadcast("new_message", { message });
 }
 
 export function sseClientCount() {

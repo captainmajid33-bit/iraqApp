@@ -16,6 +16,8 @@ export const ordersTable = pgTable("orders", {
   estimatedPrice: integer("estimated_price"),
   lat:            real("lat"),
   lng:            real("lng"),
+  driverLat:      real("driver_lat"),
+  driverLng:      real("driver_lng"),
   status:         text("status").notNull().default("pending"),
   createdAt:      timestamp("created_at").defaultNow(),
 });
@@ -24,6 +26,8 @@ export const insertOrderSchema = createInsertSchema(ordersTable).omit({
   id:        true,
   createdAt: true,
   status:    true,
+  driverLat: true,
+  driverLng: true,
 });
 
 export type InsertOrder = z.infer<typeof insertOrderSchema>;
