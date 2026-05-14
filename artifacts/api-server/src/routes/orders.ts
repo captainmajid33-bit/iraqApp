@@ -266,7 +266,7 @@ router.patch("/orders/:id", requireAdmin, async (req, res) => {
 
     // ── Auto-update driver busy state based on new order status ───────────────
     const BUSY_STATUSES = new Set(["accepted", "driving"]);
-    const FREE_STATUSES = new Set(["done", "finished", "cancelled", "rejected"]);
+    const FREE_STATUSES = new Set(["done", "finished", "completed", "cancelled", "rejected"]);
 
     if (BUSY_STATUSES.has(updated.status)) {
       await setDriverBusy(updated.locationId, true);

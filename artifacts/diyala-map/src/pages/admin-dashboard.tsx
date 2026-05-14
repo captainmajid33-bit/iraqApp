@@ -817,6 +817,119 @@ function SettingsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
   );
 }
 
+// ── Drivers Tab ───────────────────────────────────────────────────────────────
+interface OnlineDriver { id: number; locationId: number; driverName: string; phone: string; lat: number; lng: number; isOnline: boolean; isBusy: boolean; updatedAt: string; }
+
+function DriversTab({ toast }: { toast: ReturnType<typeof useToast> }) {
+  const [drivers, setDrivers] = useState<OnlineDriver[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [busying, setBusying] = useState<number | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const d = await fetch("/api/drivers-online/all", { headers: { "x-admin-password": ADMIN_PW } }).then(r => r.json());
+      setDrivers(Array.isArray(d) ? d : []);
+    } catch { toast.show("فشل تحميل السائقين", false); }
+    finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => { load(); const iv = setInterval(load, 8000); return () => clearInterval(iv); }, [load]);
+
+  const forceFree = async (locationId: number, name: string) => {
+    setBusying(locationId);
+    try {
+      const r = await fetch(`/api/drivers-online/${locationId}/busy`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", "x-admin-password": ADMIN_PW },
+        body: JSON.stringify({ busy: false }),
+      }).then(r => r.json());
+      if (r.ok) { toast.show(`✓ تم تحرير السائق ${name}`); load(); }
+      else toast.show(r.error ?? "فشل تحرير السائق", false);
+    } catch { toast.show("خطأ في الاتصال", false); }
+    finally { setBusying(null); }
+  };
+
+  const fmtTime = (iso: string) => {
+    const d = new Date(iso);
+    return `${d.toLocaleDateString("ar-IQ")} ${d.toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" })}`;
+  };
+
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "20px" }}>
+        <div style={{ width: "3px", height: "26px", background: C.blue, boxShadow: neon(C.blue) }} />
+        <div>
+          <div style={{ fontFamily: "Orbitron, sans-serif", fontSize: "12px", color: C.blue, letterSpacing: "0.14em" }}>DRIVERS · السائقون المتصلون</div>
+          <div style={{ fontSize: "11px", color: C.dim, marginTop: "2px" }}>مراقبة حالة السائقين وتحرير الانشغال العالق</div>
+        </div>
+        <div style={{ marginRight: "auto" }}>
+          <Btn label="تحديث" color={C.blue} onClick={load} />
+        </div>
+      </div>
+
+      {loading ? (
+        <div style={{ textAlign: "center", padding: "40px", color: C.dim }}>جاري التحميل...</div>
+      ) : drivers.length === 0 ? (
+        <div style={{ textAlign: "center", padding: "40px", color: C.dim, fontFamily: "Rajdhani, sans-serif" }}>
+          لا يوجد سائقون مسجلون حالياً — سيظهرون هنا عند تشغيل تطبيق الوكيل
+        </div>
+      ) : (
+        <div style={{ display: "grid", gap: "10px" }}>
+          {drivers.map(dr => (
+            <div key={dr.locationId} style={{
+              background: C.surf2, border: `1px solid ${dr.isBusy ? C.red + "66" : dr.isOnline ? C.green + "44" : C.border}`,
+              borderRadius: "4px", padding: "14px 16px", display: "flex", alignItems: "center", gap: "14px",
+              boxShadow: dr.isBusy ? `0 0 12px ${C.red}22` : "none",
+            }}>
+              {/* Status dot */}
+              <div style={{
+                width: "10px", height: "10px", borderRadius: "50%", flexShrink: 0,
+                background: dr.isBusy ? C.red : dr.isOnline ? C.green : "#555",
+                boxShadow: dr.isBusy ? neon(C.red, 6) : dr.isOnline ? neon(C.green, 6) : "none",
+              }} />
+              {/* Info */}
+              <div style={{ flex: 1 }}>
+                <div style={{ fontFamily: "Rajdhani, sans-serif", fontWeight: 700, fontSize: "15px", color: C.text }}>{dr.driverName || `#${dr.locationId}`}</div>
+                <div style={{ fontSize: "11px", color: C.dim, marginTop: "2px", display: "flex", gap: "14px", flexWrap: "wrap" }}>
+                  <span>📍 locationId: {dr.locationId}</span>
+                  {dr.phone && <span>📞 {dr.phone}</span>}
+                  <span>🕐 {fmtTime(dr.updatedAt)}</span>
+                </div>
+              </div>
+              {/* Status badge */}
+              <div style={{
+                padding: "4px 10px", borderRadius: "2px", fontSize: "11px", fontFamily: "Orbitron, sans-serif",
+                letterSpacing: "0.08em",
+                background: dr.isBusy ? `${C.red}15` : dr.isOnline ? `${C.green}15` : "rgba(255,255,255,0.05)",
+                color: dr.isBusy ? C.red : dr.isOnline ? C.green : C.dim,
+                border: `1px solid ${dr.isBusy ? C.red + "55" : dr.isOnline ? C.green + "44" : "#33333399"}`,
+              }}>
+                {dr.isBusy ? "🔴 في رحلة" : dr.isOnline ? "🟢 متاح" : "⚫ غير متصل"}
+              </div>
+              {/* Force-free button — only when busy */}
+              {dr.isBusy && (
+                <button
+                  disabled={busying === dr.locationId}
+                  onClick={() => forceFree(dr.locationId, dr.driverName)}
+                  style={{
+                    padding: "7px 14px", background: `${C.yellow}15`, border: `1px solid ${C.yellow}55`,
+                    color: C.yellow, fontFamily: "Orbitron, sans-serif", fontSize: "9px",
+                    letterSpacing: "0.08em", cursor: "pointer", borderRadius: "2px",
+                    opacity: busying === dr.locationId ? 0.5 : 1,
+                  }}
+                >
+                  {busying === dr.locationId ? "..." : "⚡ فك الانشغال"}
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Taxi Ratings Tab ──────────────────────────────────────────────────────────
 interface Rating { id: number; orderId: number; driverId: number; customerName: string | null; ratingStars: number; notes: string | null; createdAt: string; }
 
@@ -1021,7 +1134,7 @@ function TaxiTab({ toast }: { toast: ReturnType<typeof useToast> }) {
 // ── Admin Dashboard ───────────────────────────────────────────────────────────
 export function AdminDashboard() {
   const [, navigate] = useLocation();
-  const [tab, setTab] = useState<"merchants" | "map" | "categories" | "settings" | "taxi">("merchants");
+  const [tab, setTab] = useState<"merchants" | "map" | "categories" | "settings" | "taxi" | "drivers">("merchants");
   const [cats, setCats] = useState<Cat[]>([]);
   const [authChecked, setAuthChecked] = useState(false);
   const toast = useToast();
@@ -1060,6 +1173,7 @@ export function AdminDashboard() {
     { key: "merchants"  as const, en: "MERCHANTS",  ar: "التجار" },
     { key: "map"        as const, en: "MAP EDITOR",  ar: "الخريطة" },
     { key: "categories" as const, en: "CATEGORIES",  ar: "الفئات" },
+    { key: "drivers"    as const, en: "DRIVERS",     ar: "🚗 السائقون" },
     { key: "taxi"       as const, en: "TAXI",        ar: "🚕 التكسي" },
     { key: "settings"   as const, en: "SETTINGS",    ar: "الإعدادات" },
   ];
@@ -1108,6 +1222,7 @@ export function AdminDashboard() {
         {tab === "merchants"  && <MerchantsTab cats={cats} toast={toast} />}
         {tab === "map"        && <MapEditorTab cats={cats} toast={toast} />}
         {tab === "categories" && <CategoriesTab cats={cats} onRefresh={loadCats} toast={toast} />}
+        {tab === "drivers"    && <DriversTab toast={toast} />}
         {tab === "taxi"       && <TaxiTab toast={toast} />}
         {tab === "settings"   && <SettingsTab toast={toast} />}
       </main>

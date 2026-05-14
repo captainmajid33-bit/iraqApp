@@ -15,6 +15,31 @@ function isAuthorised(req: any): boolean {
   return !!(validAdmin || partnerKey || merchantKey);
 }
 
+// ── GET /api/drivers-online/all — admin: returns ALL drivers regardless of status ─
+router.get("/drivers-online/all", async (req, res) => {
+  if (!isAuthorised(req)) { res.status(403).json({ error: "غير مصرح" }); return; }
+  try {
+    const rows = await db
+      .select({
+        id:         driversOnlineTable.id,
+        locationId: driversOnlineTable.locationId,
+        driverName: driversOnlineTable.driverName,
+        phone:      driversOnlineTable.phone,
+        lat:        driversOnlineTable.lat,
+        lng:        driversOnlineTable.lng,
+        isOnline:   driversOnlineTable.isOnline,
+        isBusy:     driversOnlineTable.isBusy,
+        updatedAt:  driversOnlineTable.updatedAt,
+      })
+      .from(driversOnlineTable)
+      .orderBy(driversOnlineTable.updatedAt);
+    res.json(rows);
+  } catch (err: any) {
+    console.error("[GET /drivers-online/all] error:", err);
+    res.status(500).json({ error: "فشل جلب السائقين" });
+  }
+});
+
 // ── GET /api/drivers-online ───────────────────────────────────────────────────
 // Public — returns only drivers that are:
 //   • isOnline  = true
