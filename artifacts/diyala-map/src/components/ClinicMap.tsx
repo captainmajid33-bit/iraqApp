@@ -547,6 +547,21 @@ export function ClinicMap({
   const [showTaxiQuickForm, setShowTaxiQuickForm] = useState(false);
   const [taxiQuickDest,     setTaxiQuickDest]     = useState('');
   const [taxiQuickError,    setTaxiQuickError]    = useState<string|null>(null);
+  // Manual pin routing (two-step: from → to)
+  const [taxiManualStep,    setTaxiManualStep]    = useState<'idle'|'from'|'to'>('idle');
+  const taxiManualStepRef   = useRef<'idle'|'from'|'to'>('idle');
+  const [taxiQuickFromPt,   setTaxiQuickFromPt]   = useState<{lat:number;lng:number}|null>(null);
+  const taxiQuickFromPtRef  = useRef<{lat:number;lng:number}|null>(null);
+  const [taxiQuickToPt,     setTaxiQuickToPt]     = useState<{lat:number;lng:number}|null>(null);
+  const [taxiQuickDistKm,   setTaxiQuickDistKm]   = useState<number|null>(null);
+  const [taxiQuickPrice,    setTaxiQuickPrice]     = useState<number|null>(null);
+  const taxiQuickPolyRef    = useRef<L.Polyline|null>(null);
+  const taxiManualARef      = useRef<L.Marker|null>(null);
+  // Destination autocomplete (Nominatim)
+  type DestSugg = { name:string; lat:number; lng:number };
+  const [taxiDestSuggs,     setTaxiDestSuggs]     = useState<DestSugg[]>([]);
+  const [taxiDestLoading,   setTaxiDestLoading]   = useState(false);
+  const taxiDestTimerRef    = useRef<ReturnType<typeof setTimeout>|null>(null);
   const [taxiFoundSnack,    setTaxiFoundSnack]    = useState<string|null>(null); // driver name when found
   const [taxiAutoConnect,   setTaxiAutoConnect]   = useState(false); // true → auto-submit when route ready
   const prevDriverPosRef    = useRef<{lat:number;lng:number}|null>(null);
@@ -1217,6 +1232,11 @@ export function ClinicMap({
     const loc = userLocationRef.current;
     if (!loc)   { setTaxiQuickError('تعذّر تحديد موقعك — فعّل الـ GPS أولاً'); return; }
 
+    // Use manual selected points if available, otherwise fall back to GPS
+    const fromPt = taxiQuickFromPt  || loc;
+    const toPt   = taxiQuickToPt    || taxiQuickFromPt || loc;
+    const estPrice = taxiQuickPrice ?? 0;
+
     setTaxiQuickError(null);
     setShowTaxiQuickForm(false);
     setTaxiLoading(true);
@@ -1226,7 +1246,7 @@ export function ClinicMap({
       const drivers: { locationId:number; driverName:string; phone:string; lat:number; lng:number; }[] = await res.json();
 
       const available = drivers
-        .map(d=>({ ...d, distKm: haversineDist(loc.lat, loc.lng, d.lat, d.lng) }))
+        .map(d=>({ ...d, distKm: haversineDist(fromPt.lat, fromPt.lng, d.lat, d.lng) }))
         .filter(d=>d.distKm <= SEARCH_RADIUS_KM)
         .sort((a,b)=>a.distKm - b.distKm);
 
@@ -1241,11 +1261,11 @@ export function ClinicMap({
       }
 
       // Save loop context
-      loopFromPtRef.current    = loc;
-      loopToPtRef.current      = loc;
+      loopFromPtRef.current    = fromPt;
+      loopToPtRef.current      = toPt;
       loopUserNameRef.current  = name;
       loopUserPhoneRef.current = phone;
-      loopEstPriceRef.current  = 0;
+      loopEstPriceRef.current  = estPrice;
       loopIgnoredRef.current.clear();
       localStorage.setItem('diyala_user', JSON.stringify({ name, phone }));
 
@@ -1263,13 +1283,13 @@ export function ClinicMap({
           userName:       name,
           phone:          phone,
           destination:    dest,
-          fromLat:        loc.lat,
-          fromLng:        loc.lng,
-          toLat:          loc.lat,
-          toLng:          loc.lng,
-          estimatedPrice: 0,
-          lat:            loc.lat,
-          lng:            loc.lng,
+          fromLat:        fromPt.lat,
+          fromLng:        fromPt.lng,
+          toLat:          toPt.lat,
+          toLng:          toPt.lng,
+          estimatedPrice: estPrice,
+          lat:            fromPt.lat,
+          lng:            fromPt.lng,
         }),
       });
 
@@ -1294,7 +1314,100 @@ export function ClinicMap({
     } finally {
       setTaxiLoading(false);
     }
-  },[taxiUserName, taxiUserPhone, taxiQuickDest]);
+  },[taxiUserName, taxiUserPhone, taxiQuickDest, taxiQuickFromPt, taxiQuickToPt, taxiQuickPrice]);
+
+  // ── Quick-route helpers ────────────────────────────────────────────────────
+  const clearQuickRoute = useCallback(()=>{
+    taxiQuickPolyRef.current?.remove();  taxiQuickPolyRef.current = null;
+    taxiManualARef.current?.remove();    taxiManualARef.current   = null;
+    setTaxiQuickFromPt(null); taxiQuickFromPtRef.current = null;
+    setTaxiQuickToPt(null);   setTaxiQuickDistKm(null);  setTaxiQuickPrice(null);
+  },[]);
+
+  const startManualPick = useCallback(()=>{
+    clearQuickRoute();
+    setShowTaxiQuickForm(false);
+    setTaxiManualStep('from');
+    taxiManualStepRef.current = 'from';
+    const loc = userLocationRef.current;
+    if (loc && mapRef.current) mapRef.current.flyTo([loc.lat, loc.lng], 17, { animate:true, duration:0.8 });
+  },[clearQuickRoute]);
+
+  const cancelManualPick = useCallback(()=>{
+    setTaxiManualStep('idle');
+    taxiManualStepRef.current = 'idle';
+    taxiManualARef.current?.remove(); taxiManualARef.current = null;
+    setShowTaxiQuickForm(true);
+  },[]);
+
+  const confirmManualPin = useCallback(()=>{
+    if (!mapRef.current) return;
+    const center = mapRef.current.getCenter();
+    const pt = { lat: center.lat, lng: center.lng };
+    if (taxiManualStepRef.current === 'from') {
+      taxiQuickFromPtRef.current = pt;
+      setTaxiQuickFromPt(pt);
+      // Drop teal A-marker
+      taxiManualARef.current?.remove();
+      taxiManualARef.current = L.marker([pt.lat, pt.lng], {
+        icon: L.divIcon({
+          className:'',
+          html:`<div style="display:flex;flex-direction:column;align-items:center;gap:2px">
+            <div style="width:34px;height:34px;border-radius:50%;background:rgba(0,245,212,0.18);border:2.5px solid #00f5d4;display:flex;align-items:center;justify-content:center;box-shadow:0 0 18px #00f5d466">
+              <span style="font-size:12px;font-weight:900;color:#00f5d4;font-family:Orbitron,sans-serif">A</span>
+            </div>
+          </div>`,
+          iconSize:[34,34], iconAnchor:[17,34],
+        }),
+      }).addTo(mapRef.current);
+      setTaxiManualStep('to');
+      taxiManualStepRef.current = 'to';
+    } else if (taxiManualStepRef.current === 'to') {
+      setTaxiQuickToPt(pt);
+      const fromPt = taxiQuickFromPtRef.current || userLocationRef.current || pt;
+      const distKm  = haversineDist(fromPt.lat, fromPt.lng, pt.lat, pt.lng);
+      const price   = Math.round(distKm * 750 / 250) * 250; // round to nearest 250
+      setTaxiQuickDistKm(distKm);
+      setTaxiQuickPrice(price);
+      // Polyline A→B
+      taxiQuickPolyRef.current?.remove();
+      taxiQuickPolyRef.current = L.polyline(
+        [[fromPt.lat, fromPt.lng],[pt.lat, pt.lng]],
+        { color:'#f5c518', weight:3.5, opacity:0.88, dashArray:'9 5' }
+      ).addTo(mapRef.current);
+      mapRef.current.fitBounds(
+        L.latLngBounds([[fromPt.lat, fromPt.lng],[pt.lat, pt.lng]]),
+        { padding:[60,60] }
+      );
+      setTaxiManualStep('idle');
+      taxiManualStepRef.current = 'idle';
+      setShowTaxiQuickForm(true);
+    }
+  },[]);
+
+  // ── Destination autocomplete (Nominatim / OpenStreetMap) ──────────────────
+  const searchDestination = useCallback((q: string)=>{
+    setTaxiQuickDest(q);
+    setTaxiDestSuggs([]);
+    if (taxiDestTimerRef.current) clearTimeout(taxiDestTimerRef.current);
+    if (q.length < 2) { setTaxiDestLoading(false); return; }
+    setTaxiDestLoading(true);
+    taxiDestTimerRef.current = setTimeout(async ()=>{
+      try {
+        const r = await fetch(
+          `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}&limit=5&countrycodes=iq&accept-language=ar`,
+          { headers:{'User-Agent':'DiyalaHealthMap/1.0'} }
+        );
+        const data: any[] = await r.json();
+        setTaxiDestSuggs(data.map(d=>({
+          name: d.display_name.split(',').slice(0,3).join('، '),
+          lat:  parseFloat(d.lat),
+          lng:  parseFloat(d.lon),
+        })));
+      } catch { setTaxiDestSuggs([]); }
+      finally   { setTaxiDestLoading(false); }
+    }, 500);
+  },[]);
 
   // ── Contextual POIs: fetch Overpass when taxi enters pick-to step ─────────
   // Depends only on taxiStep (NOT userLocation) so GPS updates don't re-trigger
@@ -2385,6 +2498,80 @@ export function ClinicMap({
       )}
 
       {/* ── Taxi Prompt Banner (shown after bottom taxi button pressed) ── */}
+      {/* ── Manual Pin Overlay (step: from / to) ── */}
+      {taxiManualStep !== 'idle' && (
+        <>
+          {/* Dim top strip with instruction */}
+          <div style={{
+            position:'absolute',top:0,left:0,right:0,zIndex:4500,
+            background:'rgba(5,8,15,0.88)',backdropFilter:'blur(6px)',
+            padding:'14px 20px',direction:'rtl',
+            display:'flex',alignItems:'center',justifyContent:'space-between',
+            borderBottom:`2px solid ${taxiManualStep==='from'?'#00f5d4':'#ff2d78'}`,
+          }}>
+            <div>
+              <div style={{fontFamily:'Orbitron,sans-serif',fontSize:'8px',
+                color:taxiManualStep==='from'?'rgba(0,245,212,0.6)':'rgba(255,45,120,0.6)',
+                letterSpacing:'0.18em',marginBottom:'3px'}}>
+                {taxiManualStep==='from' ? 'الخطوة ١ / ٢' : 'الخطوة ٢ / ٢'}
+              </div>
+              <div style={{fontFamily:'Rajdhani,sans-serif',fontSize:'17px',fontWeight:700,color:'#f5f0d0'}}>
+                {taxiManualStep==='from' ? '📍 حرّك الخريطة لنقطة الانطلاق' : '🏁 حرّك الخريطة للوجهة'}
+              </div>
+            </div>
+            <button onClick={cancelManualPick} style={{
+              background:'none',border:'1px solid rgba(255,45,120,0.4)',color:'rgba(255,45,120,0.7)',
+              fontFamily:'Orbitron,sans-serif',fontSize:'8px',letterSpacing:'0.1em',
+              padding:'6px 12px',cursor:'pointer',
+            }}>إلغاء</button>
+          </div>
+
+          {/* Center crosshair */}
+          <div style={{
+            position:'absolute',top:'50%',left:'50%',
+            transform:'translate(-50%,-50%)',
+            zIndex:4500,pointerEvents:'none',
+          }}>
+            <div style={{position:'relative',width:'56px',height:'56px',display:'flex',alignItems:'center',justifyContent:'center'}}>
+              {/* Outer ring */}
+              <div style={{position:'absolute',inset:0,borderRadius:'50%',
+                border:`2px solid ${taxiManualStep==='from'?'rgba(0,245,212,0.4)':'rgba(255,45,120,0.4)'}`,
+                animation:'lf-ping-subtle 2s cubic-bezier(0,0,0.2,1) infinite'}}/>
+              {/* Cross lines */}
+              <div style={{position:'absolute',top:'50%',left:0,right:0,height:'1.5px',marginTop:'-0.75px',
+                background:taxiManualStep==='from'?'rgba(0,245,212,0.7)':'rgba(255,45,120,0.7)'}}/>
+              <div style={{position:'absolute',left:'50%',top:0,bottom:0,width:'1.5px',marginLeft:'-0.75px',
+                background:taxiManualStep==='from'?'rgba(0,245,212,0.7)':'rgba(255,45,120,0.7)'}}/>
+              {/* Center dot */}
+              <div style={{width:'8px',height:'8px',borderRadius:'50%',
+                background:taxiManualStep==='from'?'#00f5d4':'#ff2d78',
+                boxShadow:`0 0 10px ${taxiManualStep==='from'?'#00f5d4':'#ff2d78'}`}}/>
+            </div>
+          </div>
+
+          {/* Confirm button at bottom */}
+          <div style={{
+            position:'absolute',bottom:'90px',left:'50%',transform:'translateX(-50%)',
+            zIndex:4500,
+          }}>
+            <button
+              onClick={confirmManualPin}
+              style={{
+                background:taxiManualStep==='from'?'rgba(0,245,212,0.18)':'rgba(255,45,120,0.18)',
+                border:`1.5px solid ${taxiManualStep==='from'?'#00f5d4':'#ff2d78'}`,
+                color:taxiManualStep==='from'?'#00f5d4':'#ff2d78',
+                fontFamily:'Orbitron,sans-serif',fontSize:'11px',letterSpacing:'0.14em',
+                padding:'13px 36px',cursor:'pointer',
+                boxShadow:`0 0 24px ${taxiManualStep==='from'?'rgba(0,245,212,0.3)':'rgba(255,45,120,0.3)'}`,
+                backdropFilter:'blur(8px)',
+              }}
+            >
+              {taxiManualStep==='from' ? '✓ تأكيد موقع الانطلاق' : '✓ تأكيد الوجهة'}
+            </button>
+          </div>
+        </>
+      )}
+
       {/* ── Quick-Dispatch Form: full-screen overlay (auto mode) ── */}
       {showTaxiQuickForm && (
         <div style={{
@@ -2439,24 +2626,109 @@ export function ClinicMap({
               </div>
             ))}
 
-            {/* Destination */}
-            <div>
-              <div style={{fontFamily:'Rajdhani,sans-serif',fontSize:'11px',color:'rgba(245,197,24,0.65)',marginBottom:'5px',letterSpacing:'0.06em'}}>الوجهة</div>
-              <input
-                type="text"
-                value={taxiQuickDest}
-                placeholder="أين تريد أن تذهب؟"
-                onChange={e=>setTaxiQuickDest(e.target.value)}
-                onKeyDown={e=>{ if(e.key==='Enter') dispatchTaxiNow(); }}
-                style={{
-                  width:'100%',boxSizing:'border-box',
-                  background:'rgba(245,197,24,0.06)',
-                  border:'1px solid rgba(245,197,24,0.3)',
-                  color:'#f5f0d0',fontFamily:'Rajdhani,sans-serif',fontSize:'15px',
-                  padding:'10px 12px',outline:'none',
-                }}
-              />
+            {/* Destination — autocomplete + manual */}
+            <div style={{position:'relative'}}>
+              <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:'5px'}}>
+                <span style={{fontFamily:'Rajdhani,sans-serif',fontSize:'11px',color:'rgba(245,197,24,0.65)',letterSpacing:'0.06em'}}>الوجهة</span>
+                <button
+                  onClick={startManualPick}
+                  style={{
+                    background:'none',border:'1px solid rgba(0,245,212,0.4)',
+                    color:'#00f5d4',fontFamily:'Orbitron,sans-serif',fontSize:'7px',
+                    letterSpacing:'0.1em',padding:'3px 8px',cursor:'pointer',transition:'all 0.2s',
+                  }}
+                  onMouseEnter={e=>{(e.currentTarget as HTMLElement).style.background='rgba(0,245,212,0.1)';}}
+                  onMouseLeave={e=>{(e.currentTarget as HTMLElement).style.background='none';}}
+                >📍 تحديد يدوي</button>
+              </div>
+              <div style={{position:'relative'}}>
+                <input
+                  type="text"
+                  value={taxiQuickDest}
+                  placeholder="ابحث عن وجهتك..."
+                  onChange={e=>searchDestination(e.target.value)}
+                  onKeyDown={e=>{ if(e.key==='Escape') setTaxiDestSuggs([]); }}
+                  style={{
+                    width:'100%',boxSizing:'border-box',
+                    background:'rgba(245,197,24,0.06)',
+                    border:'1px solid rgba(245,197,24,0.3)',
+                    color:'#f5f0d0',fontFamily:'Rajdhani,sans-serif',fontSize:'15px',
+                    padding:'10px 36px 10px 12px',outline:'none',
+                  }}
+                />
+                {taxiDestLoading && (
+                  <svg width="16" height="16" viewBox="0 0 28 28" fill="none"
+                    style={{position:'absolute',top:'50%',left:'10px',transform:'translateY(-50%)',animation:'lf-spin 0.8s linear infinite',pointerEvents:'none'}}>
+                    <circle cx="14" cy="14" r="10" stroke="rgba(245,197,24,0.5)" strokeWidth="2.5" strokeDasharray="22 14" strokeLinecap="round"/>
+                  </svg>
+                )}
+              </div>
+              {/* Autocomplete dropdown */}
+              {taxiDestSuggs.length > 0 && (
+                <div style={{
+                  position:'absolute',top:'100%',left:0,right:0,zIndex:100,
+                  background:'rgba(8,12,22,0.99)',border:'1px solid rgba(245,197,24,0.3)',
+                  borderTop:'none',maxHeight:'160px',overflowY:'auto',
+                }}>
+                  {taxiDestSuggs.map((s,i)=>(
+                    <div key={i}
+                      onClick={()=>{
+                        setTaxiQuickDest(s.name);
+                        setTaxiQuickToPt({lat:s.lat, lng:s.lng});
+                        const fromPt = taxiQuickFromPt || userLocationRef.current;
+                        if (fromPt) {
+                          const dist = haversineDist(fromPt.lat, fromPt.lng, s.lat, s.lng);
+                          setTaxiQuickDistKm(dist);
+                          setTaxiQuickPrice(Math.round(dist*750/250)*250);
+                          // Draw polyline
+                          taxiQuickPolyRef.current?.remove();
+                          if (mapRef.current) {
+                            taxiQuickPolyRef.current = L.polyline(
+                              [[fromPt.lat,fromPt.lng],[s.lat,s.lng]],
+                              {color:'#f5c518',weight:3.5,opacity:0.88,dashArray:'9 5'}
+                            ).addTo(mapRef.current);
+                          }
+                        }
+                        setTaxiDestSuggs([]);
+                      }}
+                      style={{
+                        padding:'8px 12px',cursor:'pointer',
+                        borderBottom:'1px solid rgba(245,197,24,0.08)',
+                        fontFamily:'Rajdhani,sans-serif',fontSize:'13px',color:'#d0c8b0',
+                        direction:'rtl',
+                      }}
+                      onMouseEnter={e=>{(e.currentTarget as HTMLElement).style.background='rgba(245,197,24,0.08)';}}
+                      onMouseLeave={e=>{(e.currentTarget as HTMLElement).style.background='';}}
+                    >
+                      <span style={{marginLeft:'6px',opacity:0.5}}>📍</span>{s.name}
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
+
+            {/* Route summary (shown after manual or autocomplete selection) */}
+            {taxiQuickToPt && taxiQuickDistKm !== null && (
+              <div style={{
+                background:'rgba(0,245,212,0.06)',border:'1px solid rgba(0,245,212,0.25)',
+                padding:'10px 12px',display:'flex',justifyContent:'space-between',alignItems:'center',
+              }}>
+                <div style={{fontFamily:'Rajdhani,sans-serif',fontSize:'12px',color:'rgba(0,245,212,0.8)'}}>
+                  <div>📏 {taxiQuickDistKm.toFixed(2)} كم</div>
+                  {taxiQuickFromPt && <div style={{fontSize:'10px',color:'rgba(0,245,212,0.5)',marginTop:'2px'}}>من نقطة يدوية</div>}
+                </div>
+                <div style={{textAlign:'left'}}>
+                  <div style={{fontFamily:'Orbitron,sans-serif',fontSize:'14px',color:'#f5c518',fontWeight:900}}>
+                    {(taxiQuickPrice ?? 0).toLocaleString()}
+                  </div>
+                  <div style={{fontFamily:'Rajdhani,sans-serif',fontSize:'9px',color:'rgba(245,197,24,0.5)'}}>دينار عراقي</div>
+                </div>
+                <button
+                  onClick={()=>{ clearQuickRoute(); setTaxiQuickDest(''); }}
+                  style={{background:'none',border:'none',color:'rgba(255,45,120,0.6)',cursor:'pointer',fontSize:'16px',padding:'2px 6px'}}
+                >✕</button>
+              </div>
+            )}
 
             {/* Error */}
             {taxiQuickError && (
@@ -2470,7 +2742,7 @@ export function ClinicMap({
             {/* Buttons */}
             <div style={{display:'flex',gap:'10px',paddingTop:'4px'}}>
               <button
-                onClick={()=>{ setShowTaxiQuickForm(false); setTaxiQuickError(null); setTaxiQuickDest(''); }}
+                onClick={()=>{ setShowTaxiQuickForm(false); setTaxiQuickError(null); setTaxiQuickDest(''); setTaxiDestSuggs([]); clearQuickRoute(); }}
                 style={{
                   flex:1,padding:'11px 8px',
                   background:'none',border:'1px solid rgba(245,197,24,0.25)',
