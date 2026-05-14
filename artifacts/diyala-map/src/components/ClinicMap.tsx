@@ -277,14 +277,18 @@ export function ClinicMap({
         if (mapRef.current) mapRef.current.getContainer().style.cursor='';
         setTaxiRouteLoading(true);
 
-        // ── Fetch real road route from OSRM ──────────────────────────────────
+        // ── Fetch real road route from OSRM (with retry) ─────────────────────
         const osrmUrl = `https://router.project-osrm.org/route/v1/driving/${fromPt.lng},${fromPt.lat};${lng},${lat}?overview=full&geometries=geojson`;
-        fetch(osrmUrl)
-          .then(r=>r.json())
-          .then(data=>{
+
+        const drawOsrmRoute = async (attempt = 1): Promise<void> => {
+          const ctrl = new AbortController();
+          const tId  = setTimeout(()=>ctrl.abort(), 9000);
+          try {
+            const r    = await fetch(osrmUrl, { signal: ctrl.signal });
+            clearTimeout(tId);
+            const data = await r.json();
             const route = data.routes?.[0];
             if (!route || !mapRef.current) return;
-            // Flip [lng,lat] → [lat,lng] for Leaflet
             const coords:[number,number][] = route.geometry.coordinates.map(
               ([lo,la]:[number,number]) => [la,lo]
             );
@@ -292,22 +296,29 @@ export function ClinicMap({
             taxiRouteLineRef.current?.remove();
             taxiGlowLineRef.current  = L.polyline(coords,{color:'#7b2ff7',weight:14,opacity:0.18,lineCap:'round',lineJoin:'round'}).addTo(mapRef.current);
             taxiRouteLineRef.current = L.polyline(coords,{color:'#7b2ff7',weight:3.5,opacity:1,lineCap:'round',lineJoin:'round',dashArray:'10 6'}).addTo(mapRef.current);
-            const distKm = route.distance / 1000; // metres → km (real road distance)
-            setTaxiDistKm(distKm);
-            setTaxiEstPrice(Math.round(distKm * 750)); // 750 IQD per km
-            mapRef.current.fitBounds(L.latLngBounds(coords),{padding:[70,70]});
-          })
-          .catch(()=>{
-            // Fallback: draw straight line + haversine estimate on OSRM failure
-            if (!mapRef.current) return;
-            taxiGlowLineRef.current  = L.polyline([[fromPt.lat,fromPt.lng],[lat,lng]],{color:'#7b2ff7',weight:14,opacity:0.15,lineCap:'round',lineJoin:'round'}).addTo(mapRef.current);
-            taxiRouteLineRef.current = L.polyline([[fromPt.lat,fromPt.lng],[lat,lng]],{color:'#7b2ff7',weight:3.5,opacity:1,lineCap:'round',lineJoin:'round',dashArray:'10 6'}).addTo(mapRef.current);
-            const distKm = haversineKm(fromPt.lat,fromPt.lng,lat,lng);
+            const distKm = route.distance / 1000;
             setTaxiDistKm(distKm);
             setTaxiEstPrice(Math.round(distKm * 750));
-            mapRef.current.fitBounds([[fromPt.lat,fromPt.lng],[lat,lng]],{padding:[70,70]});
-          })
-          .finally(()=>setTaxiRouteLoading(false));
+            mapRef.current.fitBounds(L.latLngBounds(coords),{padding:[70,70]});
+          } catch {
+            clearTimeout(tId);
+            if (attempt < 2) {
+              // Retry once after short delay
+              await new Promise(r=>setTimeout(r,1500));
+              return drawOsrmRoute(2);
+            }
+            // Both attempts failed — show error, reset to pick-to so user can retry
+            setTaxiError('تعذّر حساب مسار الشوارع — حاول تحديد نقطة الوصول مجدداً');
+            taxiToMarkerRef.current?.remove();
+            taxiToMarkerRef.current = null;
+            setTaxiStep('pick-to');
+            taxiStepRef.current = 'pick-to';
+            if (mapRef.current) mapRef.current.getContainer().style.cursor = 'crosshair';
+          } finally {
+            setTaxiRouteLoading(false);
+          }
+        };
+        drawOsrmRoute();
       }
     };
   });
@@ -872,6 +883,37 @@ export function ClinicMap({
     setDriverDistKm(null);     setDriverEtaMin(null);
     setShowChat(false);        prevDriverPosRef.current = null;
     activeOrderIdRef.current = null;
+    localStorage.removeItem('diyala_active_order');
+  },[]);
+
+  // ── Restore active order from localStorage on first load ──────────────────
+  useEffect(()=>{
+    const saved = localStorage.getItem('diyala_active_order');
+    if (!saved) return;
+    try {
+      const { orderId, driverPhone } = JSON.parse(saved) as { orderId:number; driverPhone:string };
+      if (!orderId) return;
+      // Verify order is still active before restoring
+      fetch(`/api/orders/${orderId}`)
+        .then(r=>r.json())
+        .then(data=>{
+          const s = data?.status ?? '';
+          if (s === 'done' || s === 'cancelled' || !s) {
+            localStorage.removeItem('diyala_active_order');
+            return;
+          }
+          // Still active — restore tracking
+          setActiveOrderId(orderId);
+          setActiveOrderStatus(s);
+          activeOrderIdRef.current = orderId;
+          if (driverPhone) setActiveDriverPhone(driverPhone);
+          if (s === 'accepted' || s === 'driving') setShowChat(true);
+        })
+        .catch(()=>{ /* network error — leave as-is, polling will start */ });
+    } catch {
+      localStorage.removeItem('diyala_active_order');
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   },[]);
 
   // ── Driver marker icon factory ────────────────────────────────────────────
@@ -1011,7 +1053,9 @@ export function ClinicMap({
       setShowChat(true); // auto-open chat when driver accepts
     }
     if (data.status === 'done' || data.status === 'cancelled') {
-      setTimeout(()=>{ stopOrderTracking(); }, 3000);
+      setShowChat(false);                               // hide chat immediately
+      localStorage.removeItem('diyala_active_order');  // clear persisted order
+      setTimeout(()=>{ stopOrderTracking(); }, 3000);  // clear tracking after 3s
       return;
     }
     if (typeof data.driverLat === 'number' && typeof data.driverLng === 'number') {
@@ -1095,7 +1139,10 @@ export function ClinicMap({
           setActiveOrderStatus('pending');
           activeOrderIdRef.current = orderId;
           // Capture driver phone for call button in chat
-          setActiveDriverPhone(taxiDriverItem.phone ?? '');
+          const driverPhone = taxiDriverItem.phone ?? '';
+          setActiveDriverPhone(driverPhone);
+          // Persist order to localStorage so it survives page refresh
+          localStorage.setItem('diyala_active_order', JSON.stringify({ orderId, driverPhone }));
         }
         setTimeout(()=>{ closeTaxiRouting(); }, 2600);
       } else {
@@ -1977,7 +2024,7 @@ export function ClinicMap({
       )}
 
       {/* ── Chat Overlay ── */}
-      {showChat && activeOrderId && (
+      {showChat && activeOrderId && activeOrderStatus !== 'done' && activeOrderStatus !== 'cancelled' && (
         <ChatOverlay
           orderId={activeOrderId}
           driverPhone={activeDriverPhone}
