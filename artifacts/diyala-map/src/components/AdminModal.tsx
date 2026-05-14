@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { X, Save, MapPin } from "lucide-react";
+import { X, Save, MapPin, Navigation, CheckCircle, AlertCircle } from "lucide-react";
 import { FilterKind } from "@/data/types";
 
 interface AdminModalProps {
@@ -66,6 +66,8 @@ const CATEGORY_CONFIG: Record<FilterKind, {
   },
 };
 
+type GpsState = 'idle' | 'loading' | 'locked' | 'error';
+
 export function AdminModal({ latlng, onClose, onSaved }: AdminModalProps) {
   const [category, setCategory] = useState<FilterKind>("clinic");
   const [form, setForm] = useState({
@@ -76,24 +78,59 @@ export function AdminModal({ latlng, onClose, onSaved }: AdminModalProps) {
     hours: "9:00 ص - 5:00 م",
     status: "مفتوح",
   });
+  // Internal coords — starts from map-click, can be overridden by GPS
+  const [coords, setCoords] = useState<{ lat: number; lng: number } | null>(latlng);
+  const [gpsState, setGpsState] = useState<GpsState>('idle');
+  const [gpsError, setGpsError] = useState<string>('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  if (!latlng) return null;
+  if (!latlng && !coords) return null;
 
   const cfg = CATEGORY_CONFIG[category];
 
   const set = (k: string) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>
     setForm(f => ({ ...f, [k]: e.target.value }));
 
+  // ── GPS snap ────────────────────────────────────────────────────────────────
+  const snapToGps = () => {
+    if (!navigator.geolocation) {
+      setGpsState('error');
+      setGpsError('GPS غير مدعوم في هذا المتصفح');
+      return;
+    }
+    setGpsState('loading');
+    setGpsError('');
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const { latitude, longitude } = pos.coords;
+        setCoords({ lat: latitude, lng: longitude });
+        setGpsState('locked');
+        // Auto-reset glow after 4s
+        setTimeout(() => setGpsState('idle'), 4000);
+      },
+      (err) => {
+        setGpsState('error');
+        setGpsError(
+          err.code === 1 ? 'تم رفض إذن الموقع' :
+          err.code === 2 ? 'تعذّر تحديد الموقع' :
+          'انتهت مهلة طلب الموقع'
+        );
+        setTimeout(() => setGpsState('idle'), 3500);
+      },
+      { enableHighAccuracy: true, timeout: 12000, maximumAge: 0 }
+    );
+  };
+
   const handleSave = async () => {
     if (!form.name.trim()) { setError("الاسم مطلوب"); return; }
+    if (!coords) { setError("يرجى تحديد الموقع"); return; }
     setSaving(true); setError(null);
     try {
       const res = await fetch("/api/locations", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...form, category, lat: latlng.lat, lng: latlng.lng }),
+        body: JSON.stringify({ ...form, category, lat: coords.lat, lng: coords.lng }),
       });
       if (!res.ok) throw new Error(await res.text());
       const saved = await res.json();
@@ -105,6 +142,16 @@ export function AdminModal({ latlng, onClose, onSaved }: AdminModalProps) {
       setSaving(false);
     }
   };
+
+  // GPS button visual config per state
+  const gpsCfg = {
+    idle:    { bg: 'rgba(0,212,255,0.08)',  border: 'rgba(0,212,255,0.35)', color: '#00d4ff',  shadow: 'none',                        label: 'تحديد موقعي',      Icon: Navigation  },
+    loading: { bg: 'rgba(245,197,24,0.1)',  border: '#f5c518',              color: '#f5c518',  shadow: '0 0 16px rgba(245,197,24,0.4)', label: 'جاري التحديد...', Icon: Navigation  },
+    locked:  { bg: 'rgba(0,245,212,0.15)',  border: '#00f5d4',              color: '#00f5d4',  shadow: '0 0 20px rgba(0,245,212,0.5)', label: 'تم تحديد موقعك ✓', Icon: CheckCircle },
+    error:   { bg: 'rgba(255,45,120,0.1)',  border: '#ff2d78',              color: '#ff2d78',  shadow: '0 0 16px rgba(255,45,120,0.4)', label: gpsError || 'خطأ في GPS', Icon: AlertCircle },
+  }[gpsState];
+
+  const activeCoords = coords ?? latlng!;
 
   return (
     <AnimatePresence>
@@ -137,11 +184,86 @@ export function AdminModal({ latlng, onClose, onSaved }: AdminModalProps) {
           </div>
 
           <div style={{ padding: "16px 18px", display: "flex", flexDirection: "column", gap: "14px" }}>
-            {/* Coordinates badge */}
-            <div style={{ display: "flex", alignItems: "center", gap: "8px", background: "rgba(245,197,24,0.07)", border: "1px solid rgba(245,197,24,0.3)", padding: "6px 12px", color: "#f5c518", fontFamily: "Orbitron, monospace", fontSize: "10px", letterSpacing: "0.08em" }}>
-              <MapPin size={12} />
-              <span>COORD: {latlng.lat.toFixed(5)}, {latlng.lng.toFixed(5)}</span>
+
+            {/* ── Coordinates block: badge + GPS button side by side ── */}
+            <div style={{ display: "flex", gap: "8px", alignItems: "stretch" }}>
+              {/* Coordinates badge */}
+              <div style={{
+                flex: 1, display: "flex", alignItems: "center", gap: "8px",
+                background: gpsState === 'locked' ? "rgba(0,245,212,0.1)" : "rgba(245,197,24,0.07)",
+                border: `1px solid ${gpsState === 'locked' ? 'rgba(0,245,212,0.5)' : 'rgba(245,197,24,0.3)'}`,
+                padding: "6px 12px",
+                color: gpsState === 'locked' ? "#00f5d4" : "#f5c518",
+                fontFamily: "Orbitron, monospace", fontSize: "10px", letterSpacing: "0.08em",
+                transition: "all 0.35s",
+                boxShadow: gpsState === 'locked' ? "0 0 12px rgba(0,245,212,0.2)" : "none",
+              }}>
+                <MapPin size={12} style={{ flexShrink: 0 }} />
+                <span style={{ direction: "ltr" }}>
+                  {activeCoords.lat.toFixed(5)}, {activeCoords.lng.toFixed(5)}
+                </span>
+                {gpsState === 'locked' && (
+                  <span style={{ fontFamily: "Rajdhani, sans-serif", fontSize: "9px", color: "#00f5d4aa", letterSpacing: "0.1em", marginRight: "4px" }}>GPS</span>
+                )}
+              </div>
+
+              {/* GPS Floating Button */}
+              <motion.button
+                onClick={snapToGps}
+                disabled={gpsState === 'loading'}
+                whileHover={{ scale: gpsState === 'loading' ? 1 : 1.05 }}
+                whileTap={{ scale: 0.95 }}
+                style={{
+                  flexShrink: 0,
+                  background: gpsCfg.bg,
+                  border: `1.5px solid ${gpsCfg.border}`,
+                  color: gpsCfg.color,
+                  boxShadow: gpsCfg.shadow,
+                  fontFamily: "Rajdhani, sans-serif",
+                  fontSize: "11px",
+                  fontWeight: 700,
+                  letterSpacing: "0.04em",
+                  padding: "6px 12px",
+                  cursor: gpsState === 'loading' ? "wait" : "pointer",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "6px",
+                  borderRadius: "2px",
+                  transition: "background 0.3s, border-color 0.3s, box-shadow 0.3s, color 0.3s",
+                  minWidth: "max-content",
+                }}
+              >
+                <motion.div
+                  animate={gpsState === 'loading' ? { rotate: 360 } : { rotate: 0 }}
+                  transition={gpsState === 'loading' ? { repeat: Infinity, duration: 1, ease: "linear" } : { duration: 0.2 }}
+                  style={{ display: "flex" }}
+                >
+                  <gpsCfg.Icon size={14} />
+                </motion.div>
+                <span>{gpsCfg.label}</span>
+              </motion.button>
             </div>
+
+            {/* GPS accuracy note — shown only when locked */}
+            {gpsState === 'locked' && (
+              <motion.div
+                initial={{ opacity: 0, y: -6 }}
+                animate={{ opacity: 1, y: 0 }}
+                style={{
+                  display: "flex", alignItems: "center", gap: "6px",
+                  padding: "6px 10px",
+                  background: "rgba(0,245,212,0.07)",
+                  border: "1px solid rgba(0,245,212,0.25)",
+                  color: "rgba(0,245,212,0.8)",
+                  fontFamily: "Rajdhani, sans-serif",
+                  fontSize: "12px",
+                  marginTop: "-6px",
+                }}
+              >
+                <CheckCircle size={12} />
+                <span>تم تحديث الإحداثيات إلى موقعك الدقيق — يمكنك الحفظ الآن</span>
+              </motion.div>
+            )}
 
             {/* Category selector */}
             <div>
