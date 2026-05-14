@@ -298,18 +298,41 @@ export function ClinicMap({
       setTaxiFromPt(null); setTaxiToPt(null);
       setTaxiDistKm(null); setTaxiEstPrice(null);
       setTaxiError(null);   setTaxiSuccess(false);
-      setTaxiDestName('');
+      setTaxiDestName('');   setTaxiFromPlaced(false);
       taxiStepRef.current   = 'pick-from';
       taxiFromPtRef.current = null;
-      if (mapRef.current) mapRef.current.getContainer().style.cursor = 'crosshair';
+      // No crosshair — main interaction is dragging the auto-placed A marker
 
-      // ── Fly camera to user's exact location immediately ───────────────────
+      // ── Helper: place draggable A marker and update from-point refs ───────
+      const autoPlaceFromMarker = (lat: number, lng: number) => {
+        if (!mapRef.current || taxiStepRef.current !== 'pick-from') return;
+        taxiFromMarkerRef.current?.remove();
+        const m = L.marker([lat, lng], {
+          icon: L.divIcon({className:'', html:taxiPinHtml('#00f5d4','A'), iconSize:[34,42], iconAnchor:[17,42]}),
+          zIndexOffset: 1000,
+          draggable: true,
+        }).addTo(mapRef.current);
+        m.on('dragend', ()=>{
+          const pos = m.getLatLng();
+          const pt  = { lat: pos.lat, lng: pos.lng };
+          setTaxiFromPt(pt);
+          taxiFromPtRef.current = pt;
+        });
+        taxiFromMarkerRef.current = m;
+        const pt = { lat, lng };
+        setTaxiFromPt(pt);
+        taxiFromPtRef.current = pt;
+        setTaxiFromPlaced(true);
+        mapRef.current.flyTo([lat, lng], 18, { animate:true, duration:1.0 });
+      };
+
+      // ── Fly camera + auto-place A at GPS (or wait for first fix) ─────────
       const loc = userLocationRef.current;
-      if (loc && mapRef.current) {
-        mapRef.current.flyTo([loc.lat, loc.lng], 17, { animate:true, duration:1.2 });
+      if (loc) {
+        autoPlaceFromMarker(loc.lat, loc.lng);
       } else {
-        // GPS not acquired yet — start locating; camera will fly on first fix
-        locateUserRef.current?.();
+        // GPS not acquired yet — start locating; auto-place on first fix
+        locateUserRef.current?.((newLoc)=> autoPlaceFromMarker(newLoc.lat, newLoc.lng));
       }
     };
   },[]);
@@ -321,16 +344,25 @@ export function ClinicMap({
       const fromPt = taxiFromPtRef.current;
       if (step === 'idle') return;
       if (step === 'pick-from') {
+        // Re-place draggable A marker at tapped location (user can also drag)
         taxiFromMarkerRef.current?.remove();
-        taxiFromMarkerRef.current = L.marker([lat,lng],{
+        const m = L.marker([lat,lng],{
           icon: L.divIcon({className:'',html:taxiPinHtml('#00f5d4','A'),iconSize:[34,42],iconAnchor:[17,42]}),
           zIndexOffset:1000,
+          draggable:true,
         }).addTo(mapRef.current!);
+        m.on('dragend',()=>{
+          const pos = m.getLatLng();
+          const pt2 = {lat:pos.lat,lng:pos.lng};
+          setTaxiFromPt(pt2);
+          taxiFromPtRef.current=pt2;
+        });
+        taxiFromMarkerRef.current = m;
         const pt={lat,lng};
         setTaxiFromPt(pt);
         taxiFromPtRef.current=pt;
-        setTaxiStep('pick-to');
-        taxiStepRef.current='pick-to';
+        setTaxiFromPlaced(true);
+        // Stay on pick-from — user must press confirm button to advance
       } else if (step === 'pick-to' && fromPt) {
         // Place B marker immediately so user gets instant feedback
         taxiToMarkerRef.current?.remove();
@@ -486,6 +518,8 @@ export function ClinicMap({
   // Brief "can't order — active trip" notification
   const [blockTaxiMsg,      setBlockTaxiMsg]      = useState(false);
   const blockTaxiTimerRef   = useRef<ReturnType<typeof setTimeout>|null>(null);
+  // true while A-marker is placed and awaiting user drag/confirm in pick-from step
+  const [taxiFromPlaced,    setTaxiFromPlaced]    = useState(false);
   const prevDriverPosRef    = useRef<{lat:number;lng:number}|null>(null);
 
   // ── Online drivers (all open taxis visible on map) ────────────────────────
@@ -673,7 +707,7 @@ export function ClinicMap({
         else if (err.code===2) setLocateError('تعذّر تحديد الموقع');
         else                   setLocateError('انتهت مهلة تحديد الموقع');
       },
-      {enableHighAccuracy:true,timeout:12000,maximumAge:3000}
+      {enableHighAccuracy:true,timeout:20000,maximumAge:0}
     );
   },[onUserLocationChange, refreshUserMarker]);
 
@@ -965,12 +999,20 @@ export function ClinicMap({
     setTaxiFromPt(null);     setTaxiToPt(null);
     setTaxiDistKm(null);     setTaxiEstPrice(null);
     setTaxiError(null);      setTaxiSuccess(false);
-    setTaxiDestName('');
+    setTaxiDestName('');     setTaxiFromPlaced(false);
     taxiStepRef.current   = 'idle';
     poiMarkersRef.current.forEach(m=>m.remove());
     poiMarkersRef.current = [];
     taxiFromPtRef.current = null;
     if (mapRef.current) mapRef.current.getContainer().style.cursor = adminModeRef.current ? 'crosshair' : '';
+  },[]);
+
+  // ── Confirm "from" point and advance to pick-to step ─────────────────────
+  const confirmTaxiFrom = useCallback(()=>{
+    if (!taxiFromPtRef.current) return;
+    setTaxiStep('pick-to');
+    taxiStepRef.current = 'pick-to';
+    if (mapRef.current) mapRef.current.getContainer().style.cursor = '';
   },[]);
 
   // ── Contextual POIs: fetch Overpass when taxi enters pick-to step ─────────
@@ -1980,9 +2022,44 @@ export function ClinicMap({
                 {taxiStep==='pick-from'?'STEP 1 / 2':'STEP 2 / 2'} · {taxiDriverItem.name}
               </div>
               {taxiStep==='pick-from' ? (
-                <div style={{fontFamily:'Rajdhani,sans-serif',fontSize:'16px',fontWeight:700,color:'#00f5d4'}}>
-                  انقر على نقطة انطلاقك في الخريطة
-                </div>
+                taxiFromPlaced ? (
+                  /* A marker placed — show drag hint + confirm button */
+                  <div style={{display:'flex',alignItems:'center',gap:'10px',flexWrap:'wrap'}}>
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{fontFamily:'Rajdhani,sans-serif',fontSize:'13px',fontWeight:700,color:'#00f5d4',lineHeight:1.35}}>
+                        اسحب الدبوس لوضعه فوق باب منزلك بالضبط
+                      </div>
+                      <div style={{fontFamily:'Orbitron,sans-serif',fontSize:'7.5px',color:'rgba(0,245,212,0.5)',letterSpacing:'0.1em',marginTop:'2px'}}>
+                        أو انقر موقعاً آخر على الخريطة
+                      </div>
+                    </div>
+                    <button
+                      onClick={confirmTaxiFrom}
+                      style={{
+                        flexShrink:0,padding:'7px 14px',
+                        background:'rgba(0,245,212,0.18)',
+                        border:'1.5px solid #00f5d4',
+                        color:'#00f5d4',
+                        fontFamily:'Orbitron,sans-serif',fontSize:'8.5px',
+                        letterSpacing:'0.1em',cursor:'pointer',
+                        boxShadow:'0 0 12px rgba(0,245,212,0.25)',
+                        transition:'all 0.18s',whiteSpace:'nowrap',
+                      }}
+                      onMouseEnter={e=>{(e.currentTarget as HTMLElement).style.background='rgba(0,245,212,0.3)';}}
+                      onMouseLeave={e=>{(e.currentTarget as HTMLElement).style.background='rgba(0,245,212,0.18)';}}
+                    >✓ تأكيد الموقع</button>
+                  </div>
+                ) : (
+                  /* GPS not yet acquired — locating spinner */
+                  <div style={{display:'flex',alignItems:'center',gap:'8px'}}>
+                    <svg width="14" height="14" viewBox="0 0 28 28" fill="none" style={{animation:'lf-spin 0.9s linear infinite',flexShrink:0}}>
+                      <circle cx="14" cy="14" r="10" stroke="#00f5d4" strokeWidth="2.5" strokeDasharray="22 14" strokeLinecap="round"/>
+                    </svg>
+                    <span style={{fontFamily:'Rajdhani,sans-serif',fontSize:'14px',color:'rgba(0,245,212,0.8)'}}>
+                      جاري تحديد موقعك...
+                    </span>
+                  </div>
+                )
               ) : taxiDestName ? (
                 /* Destination chosen — show name */
                 <div style={{display:'flex',alignItems:'center',gap:'6px'}}>
