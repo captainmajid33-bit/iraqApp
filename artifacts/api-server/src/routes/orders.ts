@@ -1,9 +1,9 @@
 import { Router, type IRouter } from "express";
 import { db } from "@workspace/db";
-import { ordersTable, insertOrderSchema, locationsTable, driversOnlineTable } from "@workspace/db";
-import { eq, desc } from "drizzle-orm";
+import { ordersTable, insertOrderSchema, locationsTable, driversOnlineTable, messagesTable, insertMessageSchema } from "@workspace/db";
+import { eq, desc, asc } from "drizzle-orm";
 import { requireAdmin } from "./admin";
-import { broadcastOrderUpdate, broadcastDriverUpdate } from "../lib/sse";
+import { broadcastOrderUpdate, broadcastDriverUpdate, broadcastNewMessage } from "../lib/sse";
 
 const router: IRouter = Router();
 
@@ -278,6 +278,55 @@ router.patch("/orders/:id", requireAdmin, async (req, res) => {
   } catch (err: any) {
     console.error("[PATCH /orders/:id] error:", err);
     res.status(500).json({ error: "فشل تحديث الطلب" });
+  }
+});
+
+// ── GET /api/orders/:id/messages — public: fetch taxi chat messages ───────────
+// Scoped to a single order_id — no cross-order or gas leakage possible.
+router.get("/orders/:id/messages", async (req, res) => {
+  const orderId = Number(req.params.id);
+  if (!Number.isFinite(orderId) || orderId <= 0) {
+    res.status(400).json({ error: "id غير صالح" }); return;
+  }
+  try {
+    const msgs = await db
+      .select()
+      .from(messagesTable)
+      .where(eq(messagesTable.orderId, orderId))
+      .orderBy(asc(messagesTable.createdAt));
+    res.json(msgs);
+  } catch (err: any) {
+    console.error(`[GET /orders/${orderId}/messages] error:`, err);
+    res.status(500).json({ error: "فشل جلب الرسائل" });
+  }
+});
+
+// ── POST /api/orders/:id/messages — public: send a taxi chat message ──────────
+// Creates a message scoped to this order_id and broadcasts via SSE.
+router.post("/orders/:id/messages", async (req, res) => {
+  const orderId = Number(req.params.id);
+  if (!Number.isFinite(orderId) || orderId <= 0) {
+    res.status(400).json({ error: "id غير صالح" }); return;
+  }
+  const parsed = insertMessageSchema.safeParse({ ...req.body, orderId });
+  if (!parsed.success) {
+    res.status(400).json({ error: "بيانات غير صالحة", details: parsed.error?.issues }); return;
+  }
+  try {
+    const [msg] = await db.insert(messagesTable).values(parsed.data).returning();
+    broadcastNewMessage({
+      id:          msg.id,
+      orderId:     msg.orderId,
+      senderRole:  msg.senderRole,
+      content:     msg.content,
+      isSystemMsg: msg.isSystemMsg,
+      createdAt:   msg.createdAt,
+    });
+    console.log(`[POST /orders/${orderId}/messages] role=${msg.senderRole} len=${msg.content.length}`);
+    res.status(201).json(msg);
+  } catch (err: any) {
+    console.error(`[POST /orders/${orderId}/messages] error:`, err);
+    res.status(500).json({ error: "فشل إرسال الرسالة" });
   }
 });
 
