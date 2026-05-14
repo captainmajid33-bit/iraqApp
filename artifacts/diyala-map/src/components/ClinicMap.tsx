@@ -1298,7 +1298,7 @@ export function ClinicMap({
           activeOrderIdRef.current    = orderId;
           activeOrderStatusRef.current = s;
           if (driverPhone) setActiveDriverPhone(driverPhone);
-          if (s === 'accepted' || s === 'driving') setShowChat(true);
+          // Chat is NOT auto-opened — user must tap 💬 or status-bar button
         })
         .catch(()=>{ /* network error — leave as-is, polling will start */ });
     } catch {
@@ -1470,7 +1470,7 @@ export function ClinicMap({
     setActiveOrderStatus(data.status);
     activeOrderStatusRef.current = data.status;
     if (data.status === 'accepted' || data.status === 'driving') {
-      setShowChat(true); // auto-open chat when driver accepts
+      // Chat is NOT auto-opened — user must tap 💬 or status-bar button
       // Driver accepted → stop the search loop
       setLoopActive(false); setLoopCountdown(null);
     }
@@ -2681,7 +2681,7 @@ export function ClinicMap({
             {/* Chat toggle button */}
             {activeOrderId && activeOrderStatus !== 'done' && activeOrderStatus !== 'cancelled' && (
               <button
-                onClick={()=>setShowChat(v=>!v)}
+                onClick={()=>setShowChat(true)}
                 style={{
                   background: showChat ? 'rgba(123,47,247,0.25)' : 'rgba(123,47,247,0.1)',
                   border:'1px solid rgba(123,47,247,0.5)',
