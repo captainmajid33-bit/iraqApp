@@ -74,8 +74,10 @@ router.get("/gas-orders/pending", async (req, res) => {
   const agentLat  = req.query.lat       ? Number(req.query.lat)      : null;
   const agentLng  = req.query.lng       ? Number(req.query.lng)      : null;
   const radiusKm  = req.query.radiusKm  ? Number(req.query.radiusKm) : 3;
+  // Only apply geo-filter when coordinates are valid AND non-zero (0,0 = no GPS fix yet)
   const geoFilter = agentLat !== null && agentLng !== null &&
-                    Number.isFinite(agentLat) && Number.isFinite(agentLng);
+                    Number.isFinite(agentLat) && Number.isFinite(agentLng) &&
+                    (Math.abs(agentLat) > 0.001 || Math.abs(agentLng) > 0.001);
 
   try {
     const rows = await db
