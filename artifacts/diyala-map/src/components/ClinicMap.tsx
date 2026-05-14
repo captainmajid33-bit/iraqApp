@@ -900,25 +900,29 @@ export function ClinicMap({
     const poiLayer = L.layerGroup().addTo(mapRef.current);
     poiLayerRef.current = poiLayer;
 
-    const POI_CAT: Record<string,{emoji:string;color:string}> = {
-      place_of_worship:{emoji:'🕌',color:'#f5c518'},
-      mosque:          {emoji:'🕌',color:'#f5c518'},
-      restaurant:      {emoji:'🍽️',color:'#ff6b35'},
-      cafe:            {emoji:'☕',color:'#c8a26b'},
-      fast_food:       {emoji:'🍟',color:'#ff9900'},
-      hospital:        {emoji:'🏥',color:'#00d4ff'},
-      clinic:          {emoji:'🏥',color:'#00d4ff'},
-      pharmacy:        {emoji:'💊',color:'#00ff9f'},
-      school:          {emoji:'🏫',color:'#a78bfa'},
-      university:      {emoji:'🎓',color:'#a78bfa'},
-      fuel:            {emoji:'⛽',color:'#ff2d78'},
-      bank:            {emoji:'🏦',color:'#00f5d4'},
-      park:            {emoji:'🌿',color:'#39ff14'},
-      garden:          {emoji:'🌺',color:'#39ff14'},
-      supermarket:     {emoji:'🛒',color:'#ff9900'},
-      hotel:           {emoji:'🏨',color:'#c084fc'},
-      bakery:          {emoji:'🥖',color:'#fb923c'},
-      butcher:         {emoji:'🥩',color:'#ef4444'},
+    // POI route lines (separate from the main app route)
+    let poiRouteGlow: L.Polyline|null = null;
+    let poiRouteLine: L.Polyline|null = null;
+
+    const POI_CAT: Record<string,{emoji:string;color:string;label:string}> = {
+      place_of_worship:{emoji:'🕌',color:'#f5c518',label:'مسجد'},
+      mosque:          {emoji:'🕌',color:'#f5c518',label:'مسجد'},
+      restaurant:      {emoji:'🍽️',color:'#ff6b35',label:'مطعم'},
+      cafe:            {emoji:'☕',color:'#c8a26b',label:'كافيه'},
+      fast_food:       {emoji:'🍟',color:'#ff9900',label:'وجبات سريعة'},
+      hospital:        {emoji:'🏥',color:'#00d4ff',label:'مستشفى'},
+      clinic:          {emoji:'🏥',color:'#00d4ff',label:'عيادة'},
+      pharmacy:        {emoji:'💊',color:'#00ff9f',label:'صيدلية'},
+      school:          {emoji:'🏫',color:'#a78bfa',label:'مدرسة'},
+      university:      {emoji:'🎓',color:'#a78bfa',label:'جامعة'},
+      fuel:            {emoji:'⛽',color:'#ff2d78',label:'محطة وقود'},
+      bank:            {emoji:'🏦',color:'#00f5d4',label:'بنك'},
+      park:            {emoji:'🌿',color:'#39ff14',label:'متنزه'},
+      garden:          {emoji:'🌺',color:'#39ff14',label:'حديقة'},
+      supermarket:     {emoji:'🛒',color:'#ff9900',label:'سوبرماركت'},
+      hotel:           {emoji:'🏨',color:'#c084fc',label:'فندق'},
+      bakery:          {emoji:'🥖',color:'#fb923c',label:'مخبز'},
+      butcher:         {emoji:'🥩',color:'#ef4444',label:'ملحمة'},
     };
 
     let poiAbort: AbortController|null = null;
@@ -928,7 +932,8 @@ export function ClinicMap({
       const map = mapRef.current;
       if (!map) return;
       const zoom = map.getZoom();
-      if (zoom < 14) { poiLayer.clearLayers(); lastBoundsKey = ''; return; }
+      // Don't clear existing POIs when zooming out — just stop re-fetching
+      if (zoom < 13) return;
 
       const b   = map.getBounds();
       const key = `${b.getSouth().toFixed(3)},${b.getWest().toFixed(3)},${b.getNorth().toFixed(3)},${b.getEast().toFixed(3)}`;
@@ -955,21 +960,97 @@ export function ClinicMap({
         const elements: any[] = data.elements ?? [];
         elements.slice(0, 300).forEach((el:any) => {
           const amenity = el.tags?.amenity ?? el.tags?.leisure ?? '';
-          const cat = POI_CAT[amenity] ?? { emoji:'📍', color:'#94a3b8' };
+          const cat = POI_CAT[amenity] ?? { emoji:'📍', color:'#94a3b8', label:'معلم' };
           const name = el.tags?.['name:ar'] ?? el.tags?.name ?? '';
           if (!name || typeof el.lat !== 'number') return;
 
           const shortName = name.length > 18 ? name.slice(0,17)+'…' : name;
           const icon = L.divIcon({
             className: '',
-            html: `<div style="display:flex;flex-direction:column;align-items:center;pointer-events:none;transform:translate(-50%,-100%);">
-              <div style="background:rgba(5,8,15,0.9);border:1.5px solid ${cat.color};border-radius:50%;width:26px;height:26px;display:flex;align-items:center;justify-content:center;font-size:13px;box-shadow:0 0 8px ${cat.color}77;flex-shrink:0;">${cat.emoji}</div>
+            html: `<div style="display:flex;flex-direction:column;align-items:center;cursor:pointer;transform:translate(-50%,-100%);">
+              <div style="background:rgba(5,8,15,0.92);border:1.5px solid ${cat.color};border-radius:50%;width:28px;height:28px;display:flex;align-items:center;justify-content:center;font-size:14px;box-shadow:0 0 10px ${cat.color}88;flex-shrink:0;transition:transform 0.15s;">${cat.emoji}</div>
               <div style="font-family:'Noto Sans Arabic',Rajdhani,sans-serif;font-size:10px;font-weight:600;color:#f0f0f0;text-shadow:0 1px 5px #000,0 0 12px #000,1px 1px 0 #000;white-space:nowrap;text-align:center;margin-top:2px;line-height:1.2;">${shortName}</div>
             </div>`,
             iconSize:  [0, 0],
             iconAnchor:[0, 0],
           });
-          L.marker([el.lat, el.lon], { icon, interactive:false, keyboard:false }).addTo(poiLayer);
+
+          const marker = L.marker([el.lat, el.lon], { icon, interactive:true, keyboard:false, zIndexOffset:100 });
+
+          marker.on('click', () => {
+            const map = mapRef.current;
+            if (!map) return;
+            const userLoc = userLocationRef.current;
+
+            // Popup content
+            const popupEl = document.createElement('div');
+            popupEl.style.cssText = 'padding:14px 16px 12px;direction:rtl;min-width:210px;';
+            popupEl.innerHTML = `
+              <div style="font-family:Orbitron,sans-serif;font-size:9px;color:${cat.color}99;letter-spacing:0.12em;margin-bottom:5px;">${cat.emoji} ${cat.label.toUpperCase()}</div>
+              <div style="font-family:Rajdhani,sans-serif;font-size:17px;font-weight:700;color:#e8f8f5;line-height:1.2;margin-bottom:10px;">${name}</div>
+            `;
+
+            const navBtn = document.createElement('button');
+            navBtn.className = 'popup-nav-btn';
+            navBtn.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none"><path d="M3 11l19-9-9 19-2-8-8-2z" fill="#f5c518"/></svg>الذهاب إليه`;
+
+            navBtn.addEventListener('click', async () => {
+              map.closePopup();
+              if (!userLoc) return;
+
+              // Clear previous POI route
+              poiRouteGlow?.remove(); poiRouteGlow = null;
+              poiRouteLine?.remove(); poiRouteLine = null;
+
+              navBtn.disabled = true;
+              try {
+                const osrmUrl = `https://router.project-osrm.org/route/v1/driving/${userLoc.lng},${userLoc.lat};${el.lon},${el.lat}?overview=full&geometries=geojson`;
+                const rRes = await fetch(osrmUrl);
+                const rData = await rRes.json();
+                const route = rData.routes?.[0];
+                if (!route) return;
+
+                const coords:[number,number][] = route.geometry.coordinates.map(([ln,la]:[number,number])=>[la,ln]);
+                poiRouteGlow = L.polyline(coords,{color:cat.color,weight:14,opacity:0.18,lineCap:'round',lineJoin:'round'}).addTo(map);
+                poiRouteLine = L.polyline(coords,{color:cat.color,weight:3.5,opacity:1,lineCap:'round',lineJoin:'round',dashArray:'10 6'}).addTo(map);
+
+                const distKm   = route.distance / 1000;
+                const durMin   = route.duration / 60;
+                const distTxt  = distKm < 1 ? `${(distKm*1000).toFixed(0)} م` : `${distKm.toFixed(1)} كم`;
+                const durTxt   = durMin < 60 ? `${Math.round(durMin)} دقيقة` : `${(durMin/60).toFixed(1)} ساعة`;
+
+                // Show info popup at destination
+                L.popup({ className:'map-popup', closeButton:true, autoPan:true, offset:[0,-18] })
+                  .setLatLng([el.lat, el.lon])
+                  .setContent(`<div style="padding:12px 16px;direction:rtl;">
+                    <div style="font-family:Orbitron,sans-serif;font-size:9px;color:${cat.color}99;letter-spacing:0.1em;margin-bottom:5px;">${cat.emoji} ${cat.label.toUpperCase()}</div>
+                    <div style="font-family:Rajdhani,sans-serif;font-size:16px;font-weight:700;color:#e8f8f5;margin-bottom:10px;">${name}</div>
+                    <div style="display:flex;gap:16px;align-items:center;">
+                      <div style="display:flex;flex-direction:column;align-items:center;gap:2px;">
+                        <span style="font-family:Orbitron,sans-serif;font-size:14px;font-weight:700;color:#00d4ff;">${distTxt}</span>
+                        <span style="font-family:Rajdhani,sans-serif;font-size:10px;color:#ffffff55;letter-spacing:0.06em;">المسافة</span>
+                      </div>
+                      <div style="width:1px;height:30px;background:#ffffff18;"></div>
+                      <div style="display:flex;flex-direction:column;align-items:center;gap:2px;">
+                        <span style="font-family:Orbitron,sans-serif;font-size:14px;font-weight:700;color:#f5c518;">${durTxt}</span>
+                        <span style="font-family:Rajdhani,sans-serif;font-size:10px;color:#ffffff55;letter-spacing:0.06em;">وقت الوصول</span>
+                      </div>
+                    </div>
+                  </div>`)
+                  .openOn(map);
+
+                map.flyToBounds(L.latLngBounds(coords), { padding:[70,100], duration:1.5 });
+              } catch(_) { /* OSRM error — silent */ }
+            });
+
+            popupEl.appendChild(navBtn);
+            L.popup({ className:'map-popup', closeButton:true, autoPan:true, offset:[0,-18] })
+              .setLatLng([el.lat, el.lon])
+              .setContent(popupEl)
+              .openOn(map);
+          });
+
+          marker.addTo(poiLayer);
         });
       } catch (_) { /* aborted or network error — silent */ }
     };
