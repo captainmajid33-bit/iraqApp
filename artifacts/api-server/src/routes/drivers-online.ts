@@ -1,7 +1,7 @@
 import { Router, type IRouter } from "express";
 import { db } from "@workspace/db";
 import { driversOnlineTable, locationsTable } from "@workspace/db";
-import { eq, and, or } from "drizzle-orm";
+import { eq, and, or, isNull } from "drizzle-orm";
 import { broadcastDriverUpdate } from "../lib/sse";
 
 const router: IRouter = Router();
@@ -35,13 +35,14 @@ router.get("/drivers-online", async (_req, res) => {
         updatedAt:  driversOnlineTable.updatedAt,
       })
       .from(driversOnlineTable)
-      .innerJoin(locationsTable, eq(driversOnlineTable.locationId, locationsTable.id))
+      .leftJoin(locationsTable, eq(driversOnlineTable.locationId, locationsTable.id))
       .where(
         and(
           eq(driversOnlineTable.isOnline, true),
           eq(driversOnlineTable.isBusy,   false),
-          // Accept both Arabic "مفتوح" and English "open" — partner app may send either
+          // Show driver if: location is open OR location row doesn't exist (partner uses different locationId)
           or(
+            isNull(locationsTable.id),
             eq(locationsTable.status, "مفتوح"),
             eq(locationsTable.status, "open"),
           ),
@@ -66,7 +67,7 @@ router.put("/drivers-online/:locationId", async (req, res) => {
     res.status(400).json({ error: "locationId غير صالح" }); return;
   }
 
-  const { lat, lng } = req.body ?? {};
+  const { lat, lng, driverName: bodyName, phone: bodyPhone } = req.body ?? {};
   if (typeof lat !== "number" || typeof lng !== "number") {
     res.status(400).json({ error: "lat و lng مطلوبان" }); return;
   }
@@ -77,15 +78,19 @@ router.put("/drivers-online/:locationId", async (req, res) => {
       .from(locationsTable)
       .where(eq(locationsTable.id, locationId));
 
-    const driverName = loc?.name ?? "";
-    const phone      = loc?.phone ?? "";
+    // Use DB location name/phone first; fall back to body-provided values
+    const driverName = loc?.name ?? (typeof bodyName === "string" ? bodyName : "") ?? "";
+    const phone      = loc?.phone ?? (typeof bodyPhone === "string" ? bodyPhone : "") ?? "";
 
     const [row] = await db
       .insert(driversOnlineTable)
       .values({ locationId, driverName, phone, lat, lng, isOnline: true, isBusy: false, updatedAt: new Date() })
       .onConflictDoUpdate({
         target: driversOnlineTable.locationId,
-        set:    { lat, lng, isOnline: true, updatedAt: new Date() },
+        // Update name/phone too in case they were empty on first insert
+        set:    { lat, lng, isOnline: true, updatedAt: new Date(),
+                  ...(driverName ? { driverName } : {}),
+                  ...(phone      ? { phone }      : {}) },
         // NOTE: isBusy is NOT reset on location update — preserve current busy state
       })
       .returning();

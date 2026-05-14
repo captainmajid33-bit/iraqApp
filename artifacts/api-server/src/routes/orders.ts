@@ -39,31 +39,34 @@ router.post("/orders", async (req, res) => {
       lat, lng,
     } = parsed.data;
 
-    // ── Fetch driver's location profile ───────────────────────────────────────
+    // ── Fetch driver's location profile (optional — partner app may use a different locationId) ──
     const [loc] = await db
       .select({ id: locationsTable.id, name: locationsTable.name, status: locationsTable.status })
       .from(locationsTable)
       .where(eq(locationsTable.id, locationId));
 
-    if (!loc) {
-      res.status(404).json({ error: "لم يتم العثور على السائق" });
-      return;
-    }
-    if (loc.status === "معطّل") {
+    if (loc?.status === "معطّل") {
       res.status(409).json({ error: "هذا السائق غير متاح حالياً" });
       return;
     }
 
-    // ── Check isBusy: reject if driver is already on a ride ───────────────────
+    // ── Fallback: get driver name from driversOnline table if location not found ─
     const [onlineRow] = await db
-      .select({ isBusy: driversOnlineTable.isBusy, isOnline: driversOnlineTable.isOnline })
+      .select({ isBusy: driversOnlineTable.isBusy, isOnline: driversOnlineTable.isOnline, driverName: driversOnlineTable.driverName })
       .from(driversOnlineTable)
       .where(eq(driversOnlineTable.locationId, locationId));
+
+    if (!loc && !onlineRow) {
+      res.status(404).json({ error: "لم يتم العثور على السائق" });
+      return;
+    }
 
     if (onlineRow?.isBusy) {
       res.status(409).json({ error: "السائق مشغول حالياً في رحلة أخرى، يرجى اختيار سائق آخر" });
       return;
     }
+
+    const driverLabel = loc?.name ?? onlineRow?.driverName ?? `driver#${locationId}`;
 
     // ── Insert order ──────────────────────────────────────────────────────────
     const [order] = await db
@@ -84,7 +87,7 @@ router.post("/orders", async (req, res) => {
       .returning();
 
     console.log(
-      `[POST /orders] #${order.id} → ${loc.name} | user:${userName ?? '?'} | phone:${phone} | dest:${destination} | price:${estimatedPrice ?? '?'} IQD`
+      `[POST /orders] #${order.id} → ${driverLabel} (locId=${locationId}) | user:${userName ?? '?'} | phone:${phone} | dest:${destination} | price:${estimatedPrice ?? '?'} IQD`
     );
     res.status(201).json({ ok: true, orderId: order.id, status: order.status });
   } catch (err: any) {
