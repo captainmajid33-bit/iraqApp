@@ -3,7 +3,7 @@ import { db } from "@workspace/db";
 import { gasOrdersTable, insertGasOrderSchema } from "@workspace/db";
 import { and, eq, desc } from "drizzle-orm";
 import { requireAdmin } from "./admin";
-import { broadcastGasOrderUpdate } from "../lib/sse";
+import { broadcastGasOrderUpdate, broadcastGasOrdersToOrdersStream } from "../lib/sse";
 
 const router: IRouter = Router();
 
@@ -39,6 +39,26 @@ router.post("/gas-orders", async (req, res) => {
       locationAddress: order.locationAddress,
       lat: order.lat, lng: order.lng,
     });
+    // Also push to /api/orders/stream (partner app SSE channel)
+    broadcastGasOrdersToOrdersStream([{
+      id:             `gas_${order.id}`,
+      type:           "gas",
+      locationId:     null,
+      userName:       order.userName,
+      phone:          order.phone,
+      destination:    order.locationAddress,
+      fromLat:        order.lat,
+      fromLng:        order.lng,
+      toLat:          null,
+      toLng:          null,
+      estimatedPrice: null,
+      lat:            order.lat,
+      lng:            order.lng,
+      driverLat:      null,
+      driverLng:      null,
+      status:         order.status,
+      createdAt:      order.createdAt,
+    }]);
     res.status(201).json({ ok: true, orderId: order.id });
   } catch (err: any) {
     console.error("[POST /gas-orders] error:", err);
