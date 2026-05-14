@@ -557,6 +557,7 @@ export function ClinicMap({
   const [taxiQuickPrice,    setTaxiQuickPrice]     = useState<number|null>(null);
   const taxiQuickPolyRef    = useRef<L.Polyline|null>(null);
   const taxiManualARef      = useRef<L.Marker|null>(null);
+  const manualNavLayerRef   = useRef<L.LayerGroup|null>(null);
   // Destination autocomplete (Nominatim)
   type DestSugg = { name:string; lat:number; lng:number };
   const [taxiDestSuggs,     setTaxiDestSuggs]     = useState<DestSugg[]>([]);
@@ -1350,8 +1351,10 @@ export function ClinicMap({
     setShowTaxiQuickForm(false);
     setTaxiManualStep('from');
     taxiManualStepRef.current = 'from';
+    // Force Leaflet to recalculate container size after overlay removal
+    setTimeout(()=> mapRef.current?.invalidateSize(), 60);
     const loc = userLocationRef.current;
-    if (loc && mapRef.current) mapRef.current.flyTo([loc.lat, loc.lng], 17, { animate:true, duration:0.8 });
+    if (loc && mapRef.current) mapRef.current.flyTo([loc.lat, loc.lng], 15, { animate:true, duration:0.9 });
   },[clearQuickRoute]);
 
   const cancelManualPick = useCallback(()=>{
@@ -2047,6 +2050,35 @@ export function ClinicMap({
     });
   },[selectedItem,items,activeFilter]);
 
+  // ── Manual-pick navigation layer: show ALL saved locations as reference dots ──
+  // So user can see doctors, gas stations, landmarks while dragging map
+  useEffect(()=>{
+    if (!mapRef.current) return;
+    if (taxiManualStep !== 'idle') {
+      // Remove old layer
+      manualNavLayerRef.current?.remove();
+      const group = L.layerGroup();
+      items.filter(i=>i.status!=='معطّل').forEach(item=>{
+        const cat   = catMapRef.current.get(item.kind);
+        const color = cat?.color ?? '#00f5d4';
+        // Dot marker — non-interactive so map drag works through it
+        const dot = L.circleMarker([item.lat, item.lng], {
+          radius:6, color, fillColor:color, fillOpacity:0.85,
+          weight:1.5, bubblingMouseEvents:false,
+        } as L.CircleMarkerOptions);
+        dot.bindTooltip(item.name, { direction:'top', offset:[0,-6] });
+        group.addLayer(dot);
+      });
+      group.addTo(mapRef.current);
+      manualNavLayerRef.current = group;
+      // Re-render Leaflet after overlay state change to restore tiles+style
+      mapRef.current.invalidateSize();
+    } else {
+      manualNavLayerRef.current?.remove();
+      manualNavLayerRef.current = null;
+    }
+  },[taxiManualStep, items]);
+
   // Draw route
   useEffect(()=>{
     clearRouteVisuals();
@@ -2573,13 +2605,14 @@ export function ClinicMap({
       {/* ── Manual Pin Overlay (step: from / to) ── */}
       {taxiManualStep !== 'idle' && (
         <>
-          {/* Dim top strip with instruction */}
+          {/* Dim top strip with instruction — pointer-events only on the strip itself */}
           <div style={{
             position:'absolute',top:0,left:0,right:0,zIndex:4500,
             background:'rgba(5,8,15,0.88)',backdropFilter:'blur(6px)',
             padding:'14px 20px',direction:'rtl',
             display:'flex',alignItems:'center',justifyContent:'space-between',
             borderBottom:`2px solid ${taxiManualStep==='from'?'#00f5d4':'#ff2d78'}`,
+            pointerEvents:'auto',
           }}>
             <div>
               <div style={{fontFamily:'Orbitron,sans-serif',fontSize:'8px',
