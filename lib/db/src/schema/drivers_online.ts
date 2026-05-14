@@ -8,6 +8,7 @@ export const driversOnlineTable = pgTable("drivers_online", {
   lat:         real("lat").notNull(),
   lng:         real("lng").notNull(),
   isOnline:    boolean("is_online").notNull().default(true),
+  isBusy:      boolean("is_busy").notNull().default(false),
   updatedAt:   timestamp("updated_at").defaultNow(),
 });
 
