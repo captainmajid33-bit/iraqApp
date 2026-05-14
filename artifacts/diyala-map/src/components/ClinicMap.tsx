@@ -302,14 +302,10 @@ export function ClinicMap({
         setTaxiUserPhone(saved?.phone ?? '');
       } catch { setTaxiUserName(''); setTaxiUserPhone(''); }
       setShowTaxiPrompt(false);
-      setTaxiDriverItem(item); setTaxiStep('pick-from');
-      setTaxiFromPt(null); setTaxiToPt(null);
-      setTaxiDistKm(null); setTaxiEstPrice(null);
-      setTaxiError(null);   setTaxiSuccess(false);
-      setTaxiDestName('');   setTaxiFromPlaced(false);
-      taxiStepRef.current   = 'pick-from';
-      taxiFromPtRef.current = null;
-      // No crosshair — main interaction is dragging the auto-placed A marker
+      // Auto-dispatch mode: manual driver selection disabled.
+      // Customer uses the taxi button to open the quick-form instead.
+      setShowTaxiQuickForm(true);
+      return;
 
       // ── Helper: place draggable A marker and update from-point refs ───────
       const autoPlaceFromMarker = (lat: number, lng: number) => {
@@ -547,6 +543,10 @@ export function ClinicMap({
   // Auto-find nearest driver states
   const [taxiAutoSearching, setTaxiAutoSearching] = useState(false);
   const [taxiNoDriverSnack, setTaxiNoDriverSnack] = useState(false);
+  // ── Quick-dispatch form (auto mode: no manual driver selection) ───────────
+  const [showTaxiQuickForm, setShowTaxiQuickForm] = useState(false);
+  const [taxiQuickDest,     setTaxiQuickDest]     = useState('');
+  const [taxiQuickError,    setTaxiQuickError]    = useState<string|null>(null);
   const [taxiFoundSnack,    setTaxiFoundSnack]    = useState<string|null>(null); // driver name when found
   const [taxiAutoConnect,   setTaxiAutoConnect]   = useState(false); // true → auto-submit when route ready
   const prevDriverPosRef    = useRef<{lat:number;lng:number}|null>(null);
@@ -1196,6 +1196,106 @@ export function ClinicMap({
     }
   },[taxiCategory, onFilterChange]);
 
+  // ── Quick-dispatch: pre-fill name/phone from localStorage when form opens ──
+  useEffect(()=>{
+    if (!showTaxiQuickForm) return;
+    try {
+      const saved = JSON.parse(localStorage.getItem('diyala_user') ?? 'null');
+      if (saved?.name)  setTaxiUserName(saved.name);
+      if (saved?.phone) setTaxiUserPhone(saved.phone);
+    } catch { /* ignore */ }
+  },[showTaxiQuickForm]);
+
+  // ── dispatchTaxiNow: find nearest driver and post order without routing UI ─
+  const dispatchTaxiNow = useCallback(async ()=>{
+    const name  = taxiUserName.trim();
+    const phone = taxiUserPhone.trim();
+    const dest  = taxiQuickDest.trim();
+    if (!name)  { setTaxiQuickError('الرجاء إدخال اسمك');        return; }
+    if (!phone) { setTaxiQuickError('الرجاء إدخال رقم الهاتف');  return; }
+    if (!dest)  { setTaxiQuickError('الرجاء إدخال وجهتك');        return; }
+    const loc = userLocationRef.current;
+    if (!loc)   { setTaxiQuickError('تعذّر تحديد موقعك — فعّل الـ GPS أولاً'); return; }
+
+    setTaxiQuickError(null);
+    setShowTaxiQuickForm(false);
+    setTaxiLoading(true);
+
+    try {
+      const res     = await fetch('/api/drivers-online');
+      const drivers: { locationId:number; driverName:string; phone:string; lat:number; lng:number; }[] = await res.json();
+
+      const available = drivers
+        .map(d=>({ ...d, distKm: haversineDist(loc.lat, loc.lng, d.lat, d.lng) }))
+        .filter(d=>d.distKm <= SEARCH_RADIUS_KM)
+        .sort((a,b)=>a.distKm - b.distKm);
+
+      console.log(`[dispatchTaxiNow] ${available.length} driver(s) within ${SEARCH_RADIUS_KM} km`,
+        available.map(d=>({ name:d.driverName, distKm:+d.distKm.toFixed(3) })));
+
+      if (available.length === 0) {
+        setTaxiNoDriverSnack(true);
+        setTimeout(()=> setTaxiNoDriverSnack(false), 7000);
+        setTaxiLoading(false);
+        return;
+      }
+
+      // Save loop context
+      loopFromPtRef.current    = loc;
+      loopToPtRef.current      = loc;
+      loopUserNameRef.current  = name;
+      loopUserPhoneRef.current = phone;
+      loopEstPriceRef.current  = 0;
+      loopIgnoredRef.current.clear();
+      localStorage.setItem('diyala_user', JSON.stringify({ name, phone }));
+
+      const first = available[0];
+      loopIgnoredRef.current.add(first.locationId);
+      setLoopCurrentDriver(first.driverName);
+      setLoopCurrentDriverDist(first.distKm);
+
+      // Post order to first (nearest) driver
+      const orderRes = await fetch('/api/orders', {
+        method:  'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({
+          locationId:     first.locationId,
+          userName:       name,
+          phone:          phone,
+          destination:    dest,
+          fromLat:        loc.lat,
+          fromLng:        loc.lng,
+          toLat:          loc.lat,
+          toLng:          loc.lng,
+          estimatedPrice: 0,
+          lat:            loc.lat,
+          lng:            loc.lng,
+        }),
+      });
+
+      if (orderRes.ok) {
+        const { orderId } = await orderRes.json();
+        setActiveOrderId(orderId);
+        setActiveOrderStatus('pending');
+        activeOrderIdRef.current    = orderId;
+        activeOrderStatusRef.current = 'pending';
+        setActiveDriverPhone(first.phone);
+        setActiveDriverId(first.locationId);
+        localStorage.setItem('diyala_active_order', JSON.stringify({ orderId, driverPhone: first.phone, driverId: first.locationId }));
+        setLoopActive(true);
+        setLoopCountdown(120);
+      } else {
+        // First driver busy — jump into loop redirect
+        redirectToNextRef.current();
+      }
+    } catch {
+      setTaxiQuickError('تعذّر الاتصال بالسيرفر');
+      setShowTaxiQuickForm(true);
+    } finally {
+      setTaxiLoading(false);
+    }
+  },[taxiUserName, taxiUserPhone, taxiQuickDest]);
+
   // ── Contextual POIs: fetch Overpass when taxi enters pick-to step ─────────
   // Depends only on taxiStep (NOT userLocation) so GPS updates don't re-trigger
   // the effect and cause markers to flash/disappear on every position update.
@@ -1365,6 +1465,9 @@ export function ClinicMap({
       onlineDriverMarkersRef.current.delete(driver.locationId);
       return;
     }
+    // Auto-dispatch mode: driver markers are hidden from customer view.
+    // The search algorithm still uses /api/drivers-online data.
+    return;
     if (existing) {
       existing.setLatLng([driver.lat, driver.lng]);
       const el = existing.getElement();
@@ -2282,6 +2385,123 @@ export function ClinicMap({
       )}
 
       {/* ── Taxi Prompt Banner (shown after bottom taxi button pressed) ── */}
+      {/* ── Quick-Dispatch Form: full-screen overlay (auto mode) ── */}
+      {showTaxiQuickForm && (
+        <div style={{
+          position:'absolute',inset:0,zIndex:5000,
+          background:'rgba(5,8,15,0.93)',
+          display:'flex',alignItems:'center',justifyContent:'center',
+          padding:'20px 16px',boxSizing:'border-box',
+          backdropFilter:'blur(8px)',
+          direction:'rtl',
+        }}>
+          <div style={{
+            background:'rgba(8,12,22,0.98)',
+            border:'2px solid rgba(245,197,24,0.6)',
+            boxShadow:'0 0 60px rgba(245,197,24,0.18), 0 0 120px rgba(245,197,24,0.08)',
+            padding:'28px 24px',
+            width:'100%',maxWidth:'380px',
+            display:'flex',flexDirection:'column',gap:'16px',
+          }}>
+            {/* Header */}
+            <div style={{textAlign:'center',paddingBottom:'4px'}}>
+              {/* Radar animation */}
+              <div style={{position:'relative',width:'64px',height:'64px',margin:'0 auto 12px'}}>
+                <div style={{position:'absolute',inset:0,borderRadius:'50%',border:'2px solid rgba(245,197,24,0.15)',animation:'lf-ping 2s cubic-bezier(0,0,0.2,1) infinite'}}/>
+                <div style={{position:'absolute',inset:'8px',borderRadius:'50%',border:'1.5px solid rgba(245,197,24,0.3)',animation:'lf-ping 2s cubic-bezier(0,0,0.2,1) infinite',animationDelay:'0.4s'}}/>
+                <div style={{position:'absolute',inset:'18px',borderRadius:'50%',border:'1.5px solid rgba(245,197,24,0.5)',animation:'lf-ping 2s cubic-bezier(0,0,0.2,1) infinite',animationDelay:'0.8s'}}/>
+                <span style={{position:'absolute',inset:0,display:'flex',alignItems:'center',justifyContent:'center',fontSize:'24px'}}>🚕</span>
+              </div>
+              <div style={{fontFamily:'Orbitron,sans-serif',fontSize:'9px',color:'rgba(245,197,24,0.6)',letterSpacing:'0.2em',marginBottom:'4px'}}>TAXI DISPATCH</div>
+              <div style={{fontFamily:'Rajdhani,sans-serif',fontSize:'20px',fontWeight:700,color:'#f5f0d0'}}>طلب تكسي</div>
+            </div>
+
+            {/* Fields */}
+            {([
+              { label:'الاسم', placeholder:'اسمك الكريم', value:taxiUserName,  setter:setTaxiUserName,  type:'text' },
+              { label:'الهاتف', placeholder:'رقم هاتفك',  value:taxiUserPhone, setter:setTaxiUserPhone, type:'tel'  },
+            ] as const).map(f=>(
+              <div key={f.label}>
+                <div style={{fontFamily:'Rajdhani,sans-serif',fontSize:'11px',color:'rgba(245,197,24,0.65)',marginBottom:'5px',letterSpacing:'0.06em'}}>{f.label}</div>
+                <input
+                  type={f.type}
+                  value={f.value}
+                  placeholder={f.placeholder}
+                  onChange={e=>f.setter(e.target.value)}
+                  style={{
+                    width:'100%',boxSizing:'border-box',
+                    background:'rgba(245,197,24,0.06)',
+                    border:'1px solid rgba(245,197,24,0.3)',
+                    color:'#f5f0d0',fontFamily:'Rajdhani,sans-serif',fontSize:'15px',
+                    padding:'10px 12px',outline:'none',
+                  }}
+                />
+              </div>
+            ))}
+
+            {/* Destination */}
+            <div>
+              <div style={{fontFamily:'Rajdhani,sans-serif',fontSize:'11px',color:'rgba(245,197,24,0.65)',marginBottom:'5px',letterSpacing:'0.06em'}}>الوجهة</div>
+              <input
+                type="text"
+                value={taxiQuickDest}
+                placeholder="أين تريد أن تذهب؟"
+                onChange={e=>setTaxiQuickDest(e.target.value)}
+                onKeyDown={e=>{ if(e.key==='Enter') dispatchTaxiNow(); }}
+                style={{
+                  width:'100%',boxSizing:'border-box',
+                  background:'rgba(245,197,24,0.06)',
+                  border:'1px solid rgba(245,197,24,0.3)',
+                  color:'#f5f0d0',fontFamily:'Rajdhani,sans-serif',fontSize:'15px',
+                  padding:'10px 12px',outline:'none',
+                }}
+              />
+            </div>
+
+            {/* Error */}
+            {taxiQuickError && (
+              <div style={{
+                background:'rgba(255,45,120,0.12)',border:'1px solid rgba(255,45,120,0.4)',
+                color:'#ff2d78',fontFamily:'Rajdhani,sans-serif',fontSize:'13px',
+                padding:'8px 12px',textAlign:'center',
+              }}>{taxiQuickError}</div>
+            )}
+
+            {/* Buttons */}
+            <div style={{display:'flex',gap:'10px',paddingTop:'4px'}}>
+              <button
+                onClick={()=>{ setShowTaxiQuickForm(false); setTaxiQuickError(null); setTaxiQuickDest(''); }}
+                style={{
+                  flex:1,padding:'11px 8px',
+                  background:'none',border:'1px solid rgba(245,197,24,0.25)',
+                  color:'rgba(245,197,24,0.6)',fontFamily:'Orbitron,sans-serif',fontSize:'9px',
+                  letterSpacing:'0.1em',cursor:'pointer',transition:'all 0.2s',
+                }}
+                onMouseEnter={e=>{(e.currentTarget as HTMLElement).style.background='rgba(245,197,24,0.08)';}}
+                onMouseLeave={e=>{(e.currentTarget as HTMLElement).style.background='none';}}
+              >إلغاء</button>
+              <button
+                onClick={dispatchTaxiNow}
+                style={{
+                  flex:2,padding:'11px 8px',
+                  background:'rgba(245,197,24,0.15)',
+                  border:'1px solid rgba(245,197,24,0.7)',
+                  color:'#f5c518',fontFamily:'Orbitron,sans-serif',fontSize:'9px',
+                  letterSpacing:'0.1em',cursor:'pointer',
+                  fontWeight:700,transition:'all 0.2s',
+                  display:'flex',alignItems:'center',justifyContent:'center',gap:'7px',
+                }}
+                onMouseEnter={e=>{(e.currentTarget as HTMLElement).style.background='rgba(245,197,24,0.26)';}}
+                onMouseLeave={e=>{(e.currentTarget as HTMLElement).style.background='rgba(245,197,24,0.15)';}}
+              >
+                <span style={{fontSize:'14px'}}>🔍</span>
+                ابحث عن أقرب سائق
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showTaxiPrompt && taxiStep === 'idle' && (
         <div style={{
           position:'absolute',top:'14px',left:'50%',transform:'translateX(-50%)',
@@ -3092,7 +3312,7 @@ export function ClinicMap({
 
             {/* Book Taxi button */}
             <button
-              onClick={()=>{ autoFindDriver(); }}
+              onClick={()=>{ setShowTaxiQuickForm(true); }}
               disabled={!taxiCategory}
               style={{
                 flex:1,padding:'12px 8px',
@@ -3135,7 +3355,7 @@ export function ClinicMap({
         <button
           onClick={()=>{
             if (hasTripActive) { showBlockTaxiMsg(); return; }
-            autoFindDriver();
+            setShowTaxiQuickForm(true);
           }}
           style={{
             flex:1,
@@ -3143,13 +3363,13 @@ export function ClinicMap({
             alignItems:'center', justifyContent:'center', gap:'4px',
             background: hasTripActive
               ? 'rgba(255,45,120,0.08)'
-              : (activeFilter === (taxiCategory?.slug ?? '__none__') || showTaxiPrompt)
+              : (activeFilter === (taxiCategory?.slug ?? '__none__') || showTaxiPrompt || showTaxiQuickForm)
                 ? 'rgba(245,197,24,0.18)'
                 : 'transparent',
             border:'none',
             borderTop: hasTripActive
               ? '3px solid rgba(255,45,120,0.4)'
-              : (activeFilter === (taxiCategory?.slug ?? '__none__') || showTaxiPrompt)
+              : (activeFilter === (taxiCategory?.slug ?? '__none__') || showTaxiPrompt || showTaxiQuickForm)
                 ? '3px solid #f5c518'
                 : '3px solid transparent',
             borderRight:'1px solid rgba(255,255,255,0.07)',
