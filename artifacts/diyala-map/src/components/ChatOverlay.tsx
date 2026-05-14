@@ -15,50 +15,92 @@ interface ChatOverlayProps {
 }
 
 const API = '/api';
+const MSG_PATH = (id: number) => `${API}/orders/${id}/messages`;
+
+// Sort helper — guarantees chronological order on client side
+function sortByTime(msgs: Msg[]): Msg[] {
+  return [...msgs].sort(
+    (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+  );
+}
 
 export function ChatOverlay({ orderId, driverPhone, onClose }: ChatOverlayProps) {
   const [messages, setMessages] = useState<Msg[]>([]);
   const [input,    setInput]    = useState('');
   const [sending,  setSending]  = useState(false);
+  const [sseOk,    setSseOk]    = useState(false); // shows green/red SSE indicator
   const bottomRef  = useRef<HTMLDivElement>(null);
   const pollRef    = useRef<ReturnType<typeof setInterval> | null>(null);
-  const lastIdRef  = useRef(0);
 
-  // ── Fetch messages ─────────────────────────────────────────────────────────
+  // ── Merge helper: dedup + sort ────────────────────────────────────────────
+  const mergeMessage = useCallback((msg: Msg) => {
+    setMessages(prev => {
+      if (prev.some(m => m.id === msg.id)) return prev;
+      return sortByTime([...prev, msg]);
+    });
+  }, []);
+
+  // ── Fetch all messages (initial + polling fallback) ───────────────────────
   const fetchMessages = useCallback(async () => {
     try {
-      const res = await fetch(`${API}/orders/${orderId}/messages`);
+      const res = await fetch(MSG_PATH(orderId));
       if (!res.ok) return;
       const data: Msg[] = await res.json();
-      setMessages(data);
-      if (data.length > 0) lastIdRef.current = data[data.length - 1].id;
-    } catch { /* silent */ }
+      setMessages(sortByTime(data));
+    } catch { /* silent — SSE is primary */ }
   }, [orderId]);
 
-  // ── Polling fallback every 2.5 s ──────────────────────────────────────────
+  // ── Initial load + polling fallback (every 2 s) ───────────────────────────
   useEffect(() => {
     fetchMessages();
-    pollRef.current = setInterval(fetchMessages, 2500);
+    pollRef.current = setInterval(fetchMessages, 2000);
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [fetchMessages]);
 
-  // ── SSE listener — instant new_message events ──────────────────────────────
+  // ── SSE real-time listener with auto-reconnect + exponential back-off ─────
   useEffect(() => {
-    const es = new EventSource(`${API}/events`);
-    es.addEventListener('new_message', (e: MessageEvent) => {
-      try {
-        const { message } = JSON.parse(e.data) as { message: Msg };
-        if (message.orderId !== orderId) return;
-        setMessages(prev => {
-          if (prev.some(m => m.id === message.id)) return prev;
-          lastIdRef.current = message.id;
-          return [...prev, message];
-        });
-      } catch { /* */ }
-    });
-    es.onerror = () => es.close();
-    return () => es.close();
-  }, [orderId]);
+    let es: EventSource | null = null;
+    let retryDelay = 1000;       // start at 1 s, doubles on each failure
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let destroyed = false;
+
+    const connect = () => {
+      if (destroyed) return;
+      es = new EventSource(`${API}/events`);
+
+      es.onopen = () => {
+        retryDelay = 1000;   // reset back-off on successful open
+        setSseOk(true);
+      };
+
+      es.addEventListener('new_message', (e: MessageEvent) => {
+        try {
+          const { message } = JSON.parse(e.data) as { message: Msg };
+          if (message.orderId !== orderId) return;
+          mergeMessage(message);
+        } catch { /* malformed event */ }
+      });
+
+      es.onerror = () => {
+        es?.close();
+        setSseOk(false);
+        if (destroyed) return;
+        // Exponential back-off: 1 s → 2 s → 4 s → 8 s → 16 s (max)
+        retryTimer = setTimeout(() => {
+          retryDelay = Math.min(retryDelay * 2, 16_000);
+          connect();
+        }, retryDelay);
+      };
+    };
+
+    connect();
+
+    return () => {
+      destroyed = true;
+      if (retryTimer) clearTimeout(retryTimer);
+      es?.close();
+    };
+  }, [orderId, mergeMessage]);
 
   // ── Auto-scroll to bottom on new messages ─────────────────────────────────
   useEffect(() => {
@@ -69,18 +111,33 @@ export function ChatOverlay({ orderId, driverPhone, onClose }: ChatOverlayProps)
   const sendMessage = useCallback(async () => {
     const text = input.trim();
     if (!text || sending) return;
+
+    const path = MSG_PATH(orderId);
+    console.log(`[CHAT] جاري إرسال الرسالة إلى المسار: ${path}`, {
+      orderId,
+      content: text,
+      senderRole: 'customer',
+    });
+
     setSending(true);
     try {
-      const res = await fetch(`${API}/orders/${orderId}/messages`, {
-        method: 'POST',
+      const res = await fetch(path, {
+        method:  'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ senderRole: 'customer', content: text }),
+        body:    JSON.stringify({ senderRole: 'customer', content: text }),
       });
       if (res.ok) {
+        console.log('[CHAT] تم الإرسال بنجاح ✓', { orderId });
         setInput('');
+        // Immediate poll to reflect the sent message even if SSE is slow
         fetchMessages();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        console.error('[CHAT] فشل الإرسال:', res.status, err);
       }
-    } catch { /* */ } finally {
+    } catch (err) {
+      console.error('[CHAT] خطأ في الاتصال بالسيرفر:', err);
+    } finally {
       setSending(false);
     }
   }, [input, sending, orderId, fetchMessages]);
@@ -108,16 +165,19 @@ export function ChatOverlay({ orderId, driverPhone, onClose }: ChatOverlayProps)
         background: 'rgba(123,47,247,0.08)',
         flexShrink: 0,
       }}>
-        {/* Left side: indicator + title */}
+        {/* Left side: SSE indicator + title */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          {/* SSE live indicator — green = connected, amber = reconnecting */}
           <div style={{
             width: '8px', height: '8px', borderRadius: '50%',
-            background: '#00f5d4', boxShadow: '0 0 8px #00f5d4',
+            background: sseOk ? '#00f5d4' : '#f5c518',
+            boxShadow: sseOk ? '0 0 8px #00f5d4' : '0 0 8px #f5c518',
             animation: 'lf-ping 2s cubic-bezier(0,0,0.2,1) infinite',
+            flexShrink: 0,
           }} />
           <div>
             <div style={{ fontFamily: 'Orbitron,sans-serif', fontSize: '9px', color: '#7b2ff7', letterSpacing: '0.18em' }}>
-              LIVE CHAT · ORDER #{orderId}
+              {sseOk ? 'LIVE' : 'SYNC'} · ORDER #{orderId}
             </div>
             <div style={{ fontFamily: 'Rajdhani,sans-serif', fontSize: '13px', color: '#e8f8f5', fontWeight: 600 }}>
               تواصل مع السائق
@@ -152,7 +212,6 @@ export function ChatOverlay({ orderId, driverPhone, onClose }: ChatOverlayProps)
                 (e.currentTarget as HTMLElement).style.boxShadow = 'none';
               }}
             >
-              {/* Phone icon SVG */}
               <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07A19.5 19.5 0 0 1 4.69 13a19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 3.6 2h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L7.91 9.91a16 16 0 0 0 6.08 6.08l1.48-.93a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92z"/>
               </svg>
