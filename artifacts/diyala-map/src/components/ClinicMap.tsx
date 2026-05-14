@@ -1960,7 +1960,7 @@ export function ClinicMap({
         .then(r=>r.json())
         .then(data=>{
           const s = data?.status ?? '';
-          if (!s || s === 'done' || s === 'finished' || s === 'cancelled') {
+          if (!s || s === 'done' || s === 'finished' || s === 'completed' || s === 'cancelled') {
             localStorage.removeItem('diyala_active_gas_order');
             return;
           }
@@ -2222,7 +2222,7 @@ export function ClinicMap({
         if (!order || order.id !== activeGasOrderIdRef.current) return;
         setActiveGasOrderStatus(order.status);
         activeGasOrderStatusRef.current = order.status;
-        const FINAL = new Set(['done','finished','cancelled']);
+        const FINAL = new Set(['done','finished','completed','cancelled']);
         if (FINAL.has(order.status)) {
           activeGasOrderIdRef.current     = null;
           activeGasOrderStatusRef.current = 'pending';
@@ -2261,7 +2261,7 @@ export function ClinicMap({
         const data = await res.json();
         setActiveGasOrderStatus(data.status);
         activeGasOrderStatusRef.current = data.status;
-        const FINAL = new Set(['done','finished','cancelled']);
+        const FINAL = new Set(['done','finished','completed','cancelled']);
         if (FINAL.has(data.status)) {
           activeGasOrderIdRef.current     = null;
           activeGasOrderStatusRef.current = 'pending';
@@ -3435,7 +3435,7 @@ export function ClinicMap({
               <div style={{fontFamily:'Rajdhani,sans-serif',fontSize:'15px',fontWeight:700,color:'#e8f8f5',lineHeight:1.2}}>
                 {activeGasOrderStatus==='pending'                              ? '⏳ في انتظار قبول الوكيل...'
                 :activeGasOrderStatus==='accepted'                             ? '⛽ الوكيل في الطريق إليك!'
-                :(activeGasOrderStatus==='done'||activeGasOrderStatus==='finished') ? '✅ تم التوصيل — شكراً!'
+                :(activeGasOrderStatus==='done'||activeGasOrderStatus==='finished'||activeGasOrderStatus==='completed') ? '✅ تم التوصيل — شكراً!'
                 :activeGasOrderStatus==='cancelled'                            ? '❌ تم إلغاء الطلب'
                 :`⏳ ${activeGasOrderStatus}`}
               </div>
@@ -3480,7 +3480,7 @@ export function ClinicMap({
               >إلغاء</button>
             )}
             {/* Dismiss — only after final state */}
-            {(activeGasOrderStatus==='done'||activeGasOrderStatus==='finished'||activeGasOrderStatus==='cancelled') && (
+            {(activeGasOrderStatus==='done'||activeGasOrderStatus==='finished'||activeGasOrderStatus==='completed'||activeGasOrderStatus==='cancelled') && (
               <button
                 onClick={()=>{
                   setActiveGasOrderId(null); setActiveGasOrderStatus('pending');
