@@ -578,6 +578,11 @@ export function ClinicMap({
   const [gasFormLoading, setGasFormLoading] = useState(false);
   const [gasFormSuccess, setGasFormSuccess] = useState(false);
   const [gasLocationAddr, setGasLocationAddr] = useState('');
+  // ── Active gas order tracking ─────────────────────────────────────────────
+  const [activeGasOrderId,     setActiveGasOrderId]     = useState<number|null>(null);
+  const [activeGasOrderStatus, setActiveGasOrderStatus] = useState<string>('pending');
+  const activeGasOrderIdRef    = useRef<number|null>(null);
+  const activeGasOrderStatusRef= useRef<string>('pending');
   const taxiManualARef      = useRef<L.Marker|null>(null);
   const manualNavLayerRef   = useRef<L.LayerGroup|null>(null);
   // Destination autocomplete (Nominatim)
@@ -1399,6 +1404,8 @@ export function ClinicMap({
 
   // ── Gas form: open with auto reverse-geocode ─────────────────────────────
   const openGasForm = useCallback(async ()=>{
+    // Block if there's already an active gas order
+    if (activeGasOrderIdRef.current !== null) return;
     setGasFormError(null);
     setGasFormSuccess(false);
     setGasFormLoading(false);
@@ -1446,8 +1453,17 @@ export function ClinicMap({
         }),
       });
       if (res.ok) {
+        const respData = await res.json().catch(()=>({}));
+        const gasOrderId: number|null = (respData as any).orderId ?? null;
         setGasFormSuccess(true);
-        setTimeout(()=>{ setShowGasForm(false); setGasFormSuccess(false); }, 3000);
+        if (gasOrderId) {
+          setActiveGasOrderId(gasOrderId);
+          setActiveGasOrderStatus('pending');
+          activeGasOrderIdRef.current    = gasOrderId;
+          activeGasOrderStatusRef.current = 'pending';
+          localStorage.setItem('diyala_active_gas_order', JSON.stringify({ orderId: gasOrderId }));
+        }
+        setTimeout(()=>{ setShowGasForm(false); setGasFormSuccess(false); }, 2500);
       } else {
         const d = await res.json().catch(()=>({}));
         setGasFormError((d as any).error ?? 'فشل إرسال الطلب');
@@ -1896,6 +1912,33 @@ export function ClinicMap({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   },[]);
 
+  // ── Restore active gas order from localStorage on first load ──────────────
+  useEffect(()=>{
+    const saved = localStorage.getItem('diyala_active_gas_order');
+    if (!saved) return;
+    try {
+      const { orderId } = JSON.parse(saved) as { orderId:number };
+      if (!orderId) return;
+      fetch(`/api/gas-orders/${orderId}`)
+        .then(r=>r.json())
+        .then(data=>{
+          const s = data?.status ?? '';
+          if (!s || s === 'done' || s === 'finished' || s === 'cancelled') {
+            localStorage.removeItem('diyala_active_gas_order');
+            return;
+          }
+          setActiveGasOrderId(orderId);
+          setActiveGasOrderStatus(s);
+          activeGasOrderIdRef.current    = orderId;
+          activeGasOrderStatusRef.current = s;
+        })
+        .catch(()=>{ /* network error — polling will start */ });
+    } catch {
+      localStorage.removeItem('diyala_active_gas_order');
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[]);
+
   // ── Driver marker icon factory ────────────────────────────────────────────
   function makeDriverIcon(): L.DivIcon {
     return L.divIcon({
@@ -2132,6 +2175,53 @@ export function ClinicMap({
     return ()=> es.close();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   },[]);
+
+  // ── SSE listener for gas order updates ────────────────────────────────────
+  useEffect(()=>{
+    const es = new EventSource('/api/events');
+    es.addEventListener('gas_order_update', (e: MessageEvent)=>{
+      try {
+        const { order } = JSON.parse(e.data) as { order: { id:number; status:string; agentId?:string } };
+        if (!order || order.id !== activeGasOrderIdRef.current) return;
+        setActiveGasOrderStatus(order.status);
+        activeGasOrderStatusRef.current = order.status;
+        const FINAL = new Set(['done','finished','cancelled']);
+        if (FINAL.has(order.status)) {
+          activeGasOrderIdRef.current    = null;
+          activeGasOrderStatusRef.current = 'pending';
+          localStorage.removeItem('diyala_active_gas_order');
+          setTimeout(()=>{ setActiveGasOrderId(null); setActiveGasOrderStatus('pending'); }, 3500);
+        }
+      } catch { /* */ }
+    });
+    es.onerror = ()=> es.close();
+    return ()=> es.close();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[]);
+
+  // ── Poll gas order status every 4 s ───────────────────────────────────────
+  useEffect(()=>{
+    if (!activeGasOrderId) return;
+    const poll = async ()=>{
+      try {
+        const res = await fetch(`/api/gas-orders/${activeGasOrderId}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        setActiveGasOrderStatus(data.status);
+        activeGasOrderStatusRef.current = data.status;
+        const FINAL = new Set(['done','finished','cancelled']);
+        if (FINAL.has(data.status)) {
+          activeGasOrderIdRef.current    = null;
+          activeGasOrderStatusRef.current = 'pending';
+          localStorage.removeItem('diyala_active_gas_order');
+          setTimeout(()=>{ setActiveGasOrderId(null); setActiveGasOrderStatus('pending'); }, 3500);
+        }
+      } catch { /* silent */ }
+    };
+    poll();
+    const iv = setInterval(poll, 4000);
+    return ()=> clearInterval(iv);
+  },[activeGasOrderId]);
 
   // ── Submit confirmed taxi order ───────────────────────────────────────────────
   const submitTaxiOrder = useCallback(async ()=>{
@@ -3250,6 +3340,64 @@ export function ClinicMap({
         </div>
       )}
 
+      {/* ── Active Gas Order: Status Bar ─────────────────────────────────────── */}
+      {activeGasOrderId && (
+        <div style={{
+          position:'absolute',top:0,left:0,right:0,zIndex:3450,
+          display:'flex',justifyContent:'center',padding:'10px 16px 0',
+          pointerEvents:'none',
+        }}>
+          <div style={{
+            pointerEvents:'auto',
+            background:'rgba(5,8,15,0.97)',
+            border:`1px solid ${
+              activeGasOrderStatus==='pending'  ? 'rgba(255,45,120,0.65)' :
+              activeGasOrderStatus==='accepted' ? 'rgba(0,245,212,0.7)'  :
+              activeGasOrderStatus==='done'     ? 'rgba(0,245,212,0.45)' :
+              'rgba(255,45,120,0.4)'
+            }`,
+            boxShadow:`0 0 28px ${
+              activeGasOrderStatus==='pending' ? 'rgba(255,45,120,0.22)' :
+              'rgba(0,212,255,0.18)'
+            }`,
+            padding:'10px 18px',direction:'rtl',
+            display:'flex',alignItems:'center',gap:'14px',
+            maxWidth:'520px',width:'100%',backdropFilter:'blur(12px)',
+          }}>
+            {/* Pulse dot */}
+            <div style={{
+              width:'10px',height:'10px',borderRadius:'50%',flexShrink:0,
+              background: activeGasOrderStatus==='pending' ? '#ff2d78' : '#00f5d4',
+              boxShadow:`0 0 10px ${activeGasOrderStatus==='pending'?'#ff2d78':'#00f5d4'}`,
+              animation: (activeGasOrderStatus==='done'||activeGasOrderStatus==='cancelled') ? 'none' : 'lf-ping 1.8s cubic-bezier(0,0,0.2,1) infinite',
+            }}/>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontFamily:'Orbitron,sans-serif',fontSize:'8px',color:'rgba(255,255,255,0.3)',letterSpacing:'0.15em',marginBottom:'2px'}}>
+                GAS ORDER #{activeGasOrderId}
+              </div>
+              <div style={{fontFamily:'Rajdhani,sans-serif',fontSize:'15px',fontWeight:700,color:'#e8f8f5',lineHeight:1.2}}>
+                {activeGasOrderStatus==='pending'   ? '⏳ في انتظار قبول الوكيل...'
+                :activeGasOrderStatus==='accepted'  ? '⛽ الوكيل في الطريق إليك!'
+                :activeGasOrderStatus==='done'      ? '✅ تم التوصيل — شكراً!'
+                :activeGasOrderStatus==='cancelled' ? '❌ تم إلغاء الطلب'
+                :null}
+              </div>
+            </div>
+            {/* Dismiss — only after final state */}
+            {(activeGasOrderStatus==='done'||activeGasOrderStatus==='cancelled') && (
+              <button
+                onClick={()=>{
+                  setActiveGasOrderId(null); setActiveGasOrderStatus('pending');
+                  activeGasOrderIdRef.current=null; activeGasOrderStatusRef.current='pending';
+                  localStorage.removeItem('diyala_active_gas_order');
+                }}
+                style={{background:'none',border:'none',color:'rgba(255,255,255,0.4)',cursor:'pointer',fontSize:'18px',padding:'2px 6px',flexShrink:0}}
+              >✕</button>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* ── Gas Order Form ────────────────────────────────────────────────────── */}
       {showGasForm && (
         <div style={{
@@ -4291,31 +4439,31 @@ export function ClinicMap({
         {/* ── GAS button ── */}
         <button
           onClick={()=>{
-            if (gasCategory) {
-              setShowMoreModal(false);
-              setShowTaxiPrompt(false);
-              openGasForm();
-            }
+            if (!gasCategory) return;
+            if (activeGasOrderId) return; // locked — active order in progress
+            setShowMoreModal(false);
+            setShowTaxiPrompt(false);
+            openGasForm();
           }}
           style={{
             flex:1,
             display:'flex', flexDirection:'column',
             alignItems:'center', justifyContent:'center', gap:'4px',
-            background: activeFilter === (gasCategory?.slug ?? '__none__')
-              ? 'rgba(255,45,120,0.18)'
+            background: activeGasOrderId
+              ? 'rgba(255,45,120,0.10)'
               : 'transparent',
             border:'none',
-            borderTop: activeFilter === (gasCategory?.slug ?? '__none__')
-              ? '3px solid #ff2d78'
+            borderTop: activeGasOrderId
+              ? '3px solid rgba(255,45,120,0.5)'
               : '3px solid transparent',
             color:'#ff2d78',
-            cursor: gasCategory ? 'pointer' : 'not-allowed',
+            cursor: (!gasCategory || !!activeGasOrderId) ? 'not-allowed' : 'pointer',
             opacity: gasCategory ? 1 : 0.35,
             transition:'all 0.2s',
             padding:0,
           }}
-          onMouseEnter={e=>{ if(gasCategory)(e.currentTarget as HTMLElement).style.background='rgba(255,45,120,0.14)'; }}
-          onMouseLeave={e=>{ (e.currentTarget as HTMLElement).style.background=activeFilter===(gasCategory?.slug??'__none__')?'rgba(255,45,120,0.18)':'transparent'; }}
+          onMouseEnter={e=>{ if(gasCategory && !activeGasOrderId)(e.currentTarget as HTMLElement).style.background='rgba(255,45,120,0.14)'; }}
+          onMouseLeave={e=>{ (e.currentTarget as HTMLElement).style.background=activeGasOrderId?'rgba(255,45,120,0.10)':'transparent'; }}
         >
           {/* Gas pump SVG icon */}
           <svg width="26" height="28" viewBox="0 0 40 48" fill="none">

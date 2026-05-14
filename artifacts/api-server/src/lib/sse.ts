@@ -41,6 +41,11 @@ export function broadcastSettingUpdate(key: string, value: string) {
   broadcast("setting_update", { key, value });
 }
 
+/** Fired when a gas order is created, accepted, or status-changed */
+export function broadcastGasOrderUpdate(order: Record<string, unknown>) {
+  broadcast("gas_order_update", { order });
+}
+
 export function sseClientCount() {
   return clients.size;
 }
