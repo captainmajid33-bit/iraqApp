@@ -178,7 +178,8 @@ router.patch("/locations/:id", async (req, res) => {
     console.log(`[PATCH /locations/${id}] success — new status: ${updated.status}`);
     const out = safe(updated);
     broadcastLocationUpdate(out);
-    res.status(200).json({ success: true, location: out });
+    // Return the location directly (same shape as POST) so r.id is always available
+    res.status(200).json(out);
 
   } catch (err: any) {
     console.error(`[PATCH /locations/${req.params.id}] DB update error:`, err);
