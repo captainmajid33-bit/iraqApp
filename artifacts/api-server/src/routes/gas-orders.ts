@@ -47,8 +47,6 @@ router.post("/gas-orders", async (req, res) => {
       userName:       order.userName,
       phone:          order.phone,
       destination:    order.locationAddress,
-      fromLat:        order.lat,
-      fromLng:        order.lng,
       toLat:          null,
       toLng:          null,
       estimatedPrice: null,

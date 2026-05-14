@@ -105,8 +105,6 @@ function gasOrderToOrderShape(o: typeof gasOrdersTable.$inferSelect, locationId?
     userName:       o.userName,
     phone:          o.phone,
     destination:    o.locationAddress,
-    fromLat:        o.lat,
-    fromLng:        o.lng,
     toLat:          null,
     toLng:          null,
     estimatedPrice: null,
