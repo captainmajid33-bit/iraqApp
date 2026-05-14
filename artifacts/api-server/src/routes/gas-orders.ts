@@ -7,7 +7,20 @@ import { broadcastGasOrderUpdate } from "../lib/sse";
 
 const router: IRouter = Router();
 
-// ── POST /api/gas-orders — public: create order, broadcast to all agents ─────
+// ── Haversine distance (km) between two lat/lng points ───────────────────────
+function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const R = 6371;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLng = (lng2 - lng1) * Math.PI / 180;
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+    Math.sin(dLng / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+// ── POST /api/gas-orders — public: create order, broadcast to ALL agents ──────
+// Broadcast includes lat/lng so each agent can filter by distance client-side.
 router.post("/gas-orders", async (req, res) => {
   try {
     const parsed = insertGasOrderSchema.safeParse(req.body);
@@ -17,12 +30,14 @@ router.post("/gas-orders", async (req, res) => {
     }
     const [order] = await db.insert(gasOrdersTable).values(parsed.data).returning();
     console.log(
-      `[POST /gas-orders] #${order.id} | user:${parsed.data.userName ?? "?"} | phone:${parsed.data.phone} | loc:${parsed.data.locationAddress ?? "?"}`
+      `[POST /gas-orders] #${order.id} | user:${parsed.data.userName ?? "?"} | phone:${parsed.data.phone} | lat:${order.lat} lng:${order.lng}`
     );
+    // Broadcast includes lat/lng → agents filter by distance on their side
     broadcastGasOrderUpdate({
       id: order.id, status: order.status,
       userName: order.userName, phone: order.phone,
-      locationAddress: order.locationAddress, lat: order.lat, lng: order.lng,
+      locationAddress: order.locationAddress,
+      lat: order.lat, lng: order.lng,
     });
     res.status(201).json({ ok: true, orderId: order.id });
   } catch (err: any) {
@@ -31,20 +46,59 @@ router.post("/gas-orders", async (req, res) => {
   }
 });
 
-// ── GET /api/gas-orders/pending — agents only: list all pending orders ────────
+// ── GET /api/gas-orders/pending — agents only ─────────────────────────────────
+// Supports geo-filtering: ?lat=X&lng=Y&radiusKm=3 (default 3 km).
+// If lat+lng provided → only returns orders within radius of the agent's position.
+// Without lat/lng → returns all pending (for admin dashboards).
+//
+// Partner app usage:
+//   GET /api/gas-orders/pending?lat=33.748&lng=44.622
+//   Header: x-partner-key: <key>
+//   → returns only orders within 3 km of the agent
+//
+// For real-time stream: listen to SSE event 'gas_order_update'.
+// Each event includes { order: { id, status, lat, lng, ... } }.
+// Agent app should compute haversineKm(agentLat, agentLng, order.lat, order.lng)
+// and only show the order if distance ≤ radiusKm (3 by default).
 router.get("/gas-orders/pending", async (req, res) => {
-  const partnerKey  = req.headers["x-partner-key"]      as string | undefined;
-  const merchantKey = req.headers["x-merchant-key"]     as string | undefined;
-  const adminPass   = req.headers["x-admin-password"]   as string | undefined;
-  const valid = adminPass === process.env.ADMIN_PASSWORD || adminPass === "Admin2026" || !!partnerKey || !!merchantKey;
+  const partnerKey  = req.headers["x-partner-key"]    as string | undefined;
+  const merchantKey = req.headers["x-merchant-key"]   as string | undefined;
+  const adminPass   = req.headers["x-admin-password"] as string | undefined;
+  const valid =
+    adminPass === process.env.ADMIN_PASSWORD ||
+    adminPass === "Admin2026" ||
+    !!partnerKey || !!merchantKey;
   if (!valid) { res.status(403).json({ error: "غير مصرح" }); return; }
+
+  // Optional geo params
+  const agentLat  = req.query.lat       ? Number(req.query.lat)      : null;
+  const agentLng  = req.query.lng       ? Number(req.query.lng)      : null;
+  const radiusKm  = req.query.radiusKm  ? Number(req.query.radiusKm) : 3;
+  const geoFilter = agentLat !== null && agentLng !== null &&
+                    Number.isFinite(agentLat) && Number.isFinite(agentLng);
+
   try {
     const rows = await db
       .select()
       .from(gasOrdersTable)
       .where(eq(gasOrdersTable.status, "pending"))
       .orderBy(desc(gasOrdersTable.createdAt));
-    res.json(rows);
+
+    // Apply distance filter when agent location is provided
+    const filtered = geoFilter
+      ? rows.filter(r => {
+          if (r.lat === null || r.lng === null) return true; // no customer coords → include
+          return haversineKm(agentLat!, agentLng!, r.lat, r.lng) <= radiusKm;
+        })
+      : rows;
+
+    if (geoFilter) {
+      console.log(
+        `[GET /gas-orders/pending] geo-filter: agent(${agentLat},${agentLng}) r=${radiusKm}km → ${filtered.length}/${rows.length} orders`
+      );
+    }
+
+    res.json(filtered);
   } catch (err: any) {
     console.error("[GET /gas-orders/pending] error:", err);
     res.status(500).json({ error: "فشل جلب الطلبات" });
@@ -52,14 +106,16 @@ router.get("/gas-orders/pending", async (req, res) => {
 });
 
 // ── POST /api/gas-orders/:id/accept — atomic first-claim (no race condition) ──
-// Uses conditional UPDATE: only succeeds if status is still 'pending'.
-// PostgreSQL serialises concurrent UPDATEs on the same row, so the first one
-// wins and subsequent ones get 0 rows back → 409 response.
+// Conditional UPDATE on status='pending' — PostgreSQL serialises concurrent
+// UPDATEs on the same row; second caller gets 0 rows → 409.
 router.post("/gas-orders/:id/accept", async (req, res) => {
   const partnerKey  = req.headers["x-partner-key"]    as string | undefined;
   const merchantKey = req.headers["x-merchant-key"]   as string | undefined;
   const adminPass   = req.headers["x-admin-password"] as string | undefined;
-  const valid = adminPass === process.env.ADMIN_PASSWORD || adminPass === "Admin2026" || !!partnerKey || !!merchantKey;
+  const valid =
+    adminPass === process.env.ADMIN_PASSWORD ||
+    adminPass === "Admin2026" ||
+    !!partnerKey || !!merchantKey;
   if (!valid) { res.status(403).json({ error: "غير مصرح" }); return; }
 
   const id = Number(req.params.id);
@@ -67,10 +123,31 @@ router.post("/gas-orders/:id/accept", async (req, res) => {
 
   const agentId = String(req.body?.agentId ?? partnerKey ?? merchantKey ?? "unknown");
 
+  // Optional: agent provides their location for distance validation
+  const agentLat = req.body?.agentLat ? Number(req.body.agentLat) : null;
+  const agentLng = req.body?.agentLng ? Number(req.body.agentLng) : null;
+
   try {
-    // Atomic conditional update — only rows WHERE status='pending' are touched.
-    // If two agents call this simultaneously PostgreSQL will serialise the two
-    // UPDATEs; the second one finds status already 'accepted' → 0 rows → 409.
+    // Distance guard — prevent an out-of-range agent from accepting
+    if (agentLat !== null && agentLng !== null && Number.isFinite(agentLat) && Number.isFinite(agentLng)) {
+      const [order] = await db
+        .select({ lat: gasOrdersTable.lat, lng: gasOrdersTable.lng, status: gasOrdersTable.status })
+        .from(gasOrdersTable)
+        .where(eq(gasOrdersTable.id, id));
+
+      if (!order) { res.status(404).json({ error: "الطلب غير موجود" }); return; }
+      if (order.status !== "pending") {
+        res.status(409).json({ error: "تم قبول هذا الطلب من قِبل وكيل آخر" }); return;
+      }
+      if (order.lat !== null && order.lng !== null) {
+        const dist = haversineKm(agentLat, agentLng, order.lat, order.lng);
+        if (dist > 3) {
+          res.status(403).json({ error: `الطلب خارج نطاقك (${dist.toFixed(1)} كم) — الحد الأقصى 3 كم` });
+          return;
+        }
+      }
+    }
+
     const [updated] = await db
       .update(gasOrdersTable)
       .set({ status: "accepted", agentId })
@@ -82,7 +159,8 @@ router.post("/gas-orders/:id/accept", async (req, res) => {
       return;
     }
 
-    console.log(`[ACCEPT /gas-orders/${id}] agent=${agentId}`);
+    console.log(`[ACCEPT /gas-orders/${id}] agent=${agentId}` +
+      (agentLat ? ` loc=(${agentLat},${agentLng})` : ""));
     broadcastGasOrderUpdate({ id: updated.id, status: updated.status, agentId: updated.agentId });
     res.json({ ok: true, order: updated });
   } catch (err: any) {
@@ -105,12 +183,15 @@ router.get("/gas-orders/:id", async (req, res) => {
   }
 });
 
-// ── PATCH /api/gas-orders/:id — agent/admin: update status (done/cancelled) ──
+// ── PATCH /api/gas-orders/:id — agent/admin: update status ───────────────────
 router.patch("/gas-orders/:id", async (req, res) => {
   const partnerKey  = req.headers["x-partner-key"]    as string | undefined;
   const merchantKey = req.headers["x-merchant-key"]   as string | undefined;
   const adminPass   = req.headers["x-admin-password"] as string | undefined;
-  const valid = adminPass === process.env.ADMIN_PASSWORD || adminPass === "Admin2026" || !!partnerKey || !!merchantKey;
+  const valid =
+    adminPass === process.env.ADMIN_PASSWORD ||
+    adminPass === "Admin2026" ||
+    !!partnerKey || !!merchantKey;
   if (!valid) { res.status(403).json({ error: "غير مصرح" }); return; }
 
   const id = Number(req.params.id);
