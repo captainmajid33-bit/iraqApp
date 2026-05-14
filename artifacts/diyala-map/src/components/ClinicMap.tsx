@@ -1248,9 +1248,33 @@ export function ClinicMap({
     setShowTaxiQuickForm(false);
     setTaxiLoading(true);
 
+    // ── helper: safe JSON fetch with non-JSON guard ────────────────────────────
+    const safeFetch = async (url: string, opts?: RequestInit) => {
+      const r = await fetch(url, opts);
+      const text = await r.text();
+      let json: unknown = null;
+      try { json = JSON.parse(text); } catch { /* not JSON */ }
+      return { ok: r.ok, status: r.status, json };
+    };
+
     try {
-      const res     = await fetch('/api/drivers-online');
-      const drivers: { locationId:number; driverName:string; phone:string; lat:number; lng:number; }[] = await res.json();
+      // ── 1. Get online drivers (retry once on 5xx / HTML wake-up) ────────────
+      let { ok: dOk, status: dStatus, json: dRaw } = await safeFetch('/api/drivers-online');
+      if (!dOk || !Array.isArray(dRaw)) {
+        // Replit deployment may be waking from sleep — wait and retry once
+        console.warn(`[dispatchTaxiNow] drivers-online status=${dStatus}, retrying in 2 s...`);
+        await new Promise(r => setTimeout(r, 2000));
+        ({ ok: dOk, status: dStatus, json: dRaw } = await safeFetch('/api/drivers-online'));
+      }
+      if (!dOk) {
+        setTaxiQuickError('السيرفر يستيقظ — انتظر لحظة وأعد المحاولة');
+        setShowTaxiQuickForm(true);
+        setTaxiLoading(false);
+        return;
+      }
+
+      type DriverRow = { locationId:number; driverName:string; phone:string; lat:number; lng:number; };
+      const drivers: DriverRow[] = Array.isArray(dRaw) ? (dRaw as DriverRow[]) : [];
 
       const available = drivers
         .map(d=>({ ...d, distKm: haversineDist(fromPt.lat, fromPt.lng, d.lat, d.lng) }))
@@ -1281,8 +1305,8 @@ export function ClinicMap({
       setLoopCurrentDriver(first.driverName);
       setLoopCurrentDriverDist(first.distKm);
 
-      // Post order to first (nearest) driver
-      const orderRes = await fetch('/api/orders', {
+      // ── 2. Post order to nearest driver ─────────────────────────────────────
+      const { ok: oOk, status: oStatus, json: oData } = await safeFetch('/api/orders', {
         method:  'POST',
         headers: {'Content-Type':'application/json'},
         body: JSON.stringify({
@@ -1300,8 +1324,10 @@ export function ClinicMap({
         }),
       });
 
-      if (orderRes.ok) {
-        const { orderId } = await orderRes.json();
+      console.log(`[dispatchTaxiNow] POST /api/orders → status=${oStatus}`, oData);
+
+      if (oOk) {
+        const orderId = (oData as any)?.orderId ?? null;
         setActiveOrderId(orderId);
         setActiveOrderStatus('pending');
         activeOrderIdRef.current    = orderId;
@@ -1311,12 +1337,19 @@ export function ClinicMap({
         localStorage.setItem('diyala_active_order', JSON.stringify({ orderId, driverPhone: first.phone, driverId: first.locationId }));
         setLoopActive(true);
         setLoopCountdown(120);
+      } else if (oStatus === 400) {
+        // Validation error — don't loop, show the actual error
+        const errMsg = (oData as any)?.error ?? 'بيانات الطلب غير صحيحة';
+        console.error('[dispatchTaxiNow] order 400:', oData);
+        setTaxiQuickError(errMsg);
+        setShowTaxiQuickForm(true);
       } else {
-        // First driver busy — jump into loop redirect
+        // Driver busy or other — try next in loop
         redirectToNextRef.current();
       }
-    } catch {
-      setTaxiQuickError('تعذّر الاتصال بالسيرفر');
+    } catch (err) {
+      console.error('[dispatchTaxiNow] network/parse error:', err);
+      setTaxiQuickError('لا يوجد اتصال بالإنترنت أو السيرفر لا يستجيب');
       setShowTaxiQuickForm(true);
     } finally {
       setTaxiLoading(false);
