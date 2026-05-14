@@ -2697,18 +2697,7 @@ export function ClinicMap({
               </button>
             )}
 
-            {/* Cancel / close tracking */}
-            <button
-              onClick={stopOrderTracking}
-              style={{
-                background:'none',border:'1px solid rgba(255,45,120,0.3)',
-                color:'rgba(255,45,120,0.6)',fontFamily:'Orbitron,sans-serif',
-                fontSize:'8px',letterSpacing:'0.1em',padding:'6px 10px',
-                cursor:'pointer',flexShrink:0,transition:'all 0.2s',
-              }}
-              onMouseEnter={e=>{(e.currentTarget as HTMLElement).style.background='rgba(255,45,120,0.1)';(e.currentTarget as HTMLElement).style.color='#ff2d78';}}
-              onMouseLeave={e=>{(e.currentTarget as HTMLElement).style.background='none';(e.currentTarget as HTMLElement).style.color='rgba(255,45,120,0.6)';}}
-            >✕</button>
+            {/* ✕ button intentionally removed — status bar closes only via delete/finish/cancel */}
           </div>
         </div>
       )}
