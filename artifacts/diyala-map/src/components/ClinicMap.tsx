@@ -562,6 +562,7 @@ export function ClinicMap({
   const [taxiDestSuggs,     setTaxiDestSuggs]     = useState<DestSugg[]>([]);
   const [taxiDestLoading,   setTaxiDestLoading]   = useState(false);
   const taxiDestTimerRef    = useRef<ReturnType<typeof setTimeout>|null>(null);
+  const taxiDestInputRef    = useRef<HTMLInputElement>(null);
   const [taxiFoundSnack,    setTaxiFoundSnack]    = useState<string|null>(null); // driver name when found
   const [taxiAutoConnect,   setTaxiAutoConnect]   = useState(false); // true → auto-submit when route ready
   const prevDriverPosRef    = useRef<{lat:number;lng:number}|null>(null);
@@ -1315,6 +1316,21 @@ export function ClinicMap({
       setTaxiLoading(false);
     }
   },[taxiUserName, taxiUserPhone, taxiQuickDest, taxiQuickFromPt, taxiQuickToPt, taxiQuickPrice]);
+
+  // ── Auto-fill name/phone from localStorage when quick form opens ──────────
+  useEffect(()=>{
+    if (!showTaxiQuickForm) return;
+    try {
+      const stored = localStorage.getItem('diyala_user');
+      if (stored) {
+        const { name, phone } = JSON.parse(stored);
+        if (name)  setTaxiUserName(name);
+        if (phone) setTaxiUserPhone(phone);
+      }
+    } catch {}
+    // Delay focus so the DOM is rendered
+    setTimeout(()=> taxiDestInputRef.current?.focus(), 120);
+  },[showTaxiQuickForm]);
 
   // ── Quick-route helpers ────────────────────────────────────────────────────
   const clearQuickRoute = useCallback(()=>{
@@ -2603,24 +2619,31 @@ export function ClinicMap({
               <div style={{fontFamily:'Rajdhani,sans-serif',fontSize:'20px',fontWeight:700,color:'#f5f0d0'}}>طلب تكسي</div>
             </div>
 
-            {/* Fields */}
+            {/* Fields — Read-only (auto-filled from saved profile) */}
             {([
-              { label:'الاسم', placeholder:'اسمك الكريم', value:taxiUserName,  setter:setTaxiUserName,  type:'text' },
-              { label:'الهاتف', placeholder:'رقم هاتفك',  value:taxiUserPhone, setter:setTaxiUserPhone, type:'tel'  },
+              { label:'الاسم', value:taxiUserName,  icon:'👤' },
+              { label:'الهاتف', value:taxiUserPhone, icon:'📞' },
             ] as const).map(f=>(
               <div key={f.label}>
-                <div style={{fontFamily:'Rajdhani,sans-serif',fontSize:'11px',color:'rgba(245,197,24,0.65)',marginBottom:'5px',letterSpacing:'0.06em'}}>{f.label}</div>
+                <div style={{display:'flex',alignItems:'center',gap:'5px',marginBottom:'5px'}}>
+                  <span style={{fontSize:'10px'}}>{f.icon}</span>
+                  <span style={{fontFamily:'Rajdhani,sans-serif',fontSize:'11px',color:'rgba(245,197,24,0.55)',letterSpacing:'0.06em'}}>{f.label}</span>
+                  <span style={{fontFamily:'Orbitron,sans-serif',fontSize:'7px',color:'rgba(0,245,212,0.5)',letterSpacing:'0.12em',marginRight:'auto'}}>محفوظ</span>
+                </div>
                 <input
-                  type={f.type}
+                  readOnly
+                  tabIndex={-1}
+                  inputMode="none"
                   value={f.value}
-                  placeholder={f.placeholder}
-                  onChange={e=>f.setter(e.target.value)}
+                  onFocus={e=>e.target.blur()}
                   style={{
                     width:'100%',boxSizing:'border-box',
-                    background:'rgba(245,197,24,0.06)',
-                    border:'1px solid rgba(245,197,24,0.3)',
-                    color:'#f5f0d0',fontFamily:'Rajdhani,sans-serif',fontSize:'15px',
+                    background:'rgba(245,197,24,0.03)',
+                    border:'1px solid rgba(245,197,24,0.15)',
+                    color:'rgba(245,240,208,0.6)',fontFamily:'Rajdhani,sans-serif',fontSize:'15px',
                     padding:'10px 12px',outline:'none',
+                    cursor:'default',userSelect:'none',
+                    WebkitUserSelect:'none',
                   }}
                 />
               </div>
@@ -2643,6 +2666,7 @@ export function ClinicMap({
               </div>
               <div style={{position:'relative'}}>
                 <input
+                  ref={taxiDestInputRef}
                   type="text"
                   value={taxiQuickDest}
                   placeholder="ابحث عن وجهتك..."
@@ -2650,10 +2674,11 @@ export function ClinicMap({
                   onKeyDown={e=>{ if(e.key==='Escape') setTaxiDestSuggs([]); }}
                   style={{
                     width:'100%',boxSizing:'border-box',
-                    background:'rgba(245,197,24,0.06)',
-                    border:'1px solid rgba(245,197,24,0.3)',
+                    background:'rgba(245,197,24,0.08)',
+                    border:'1.5px solid rgba(245,197,24,0.5)',
                     color:'#f5f0d0',fontFamily:'Rajdhani,sans-serif',fontSize:'15px',
                     padding:'10px 36px 10px 12px',outline:'none',
+                    boxShadow:'0 0 12px rgba(245,197,24,0.1)',
                   }}
                 />
                 {taxiDestLoading && (
