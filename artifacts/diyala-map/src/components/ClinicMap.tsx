@@ -63,24 +63,45 @@ function getSvgBody(kind: string, color: string): string | null {
 const OPEN_COLOR   = '#00f5d4';
 const CLOSED_COLOR = '#ff2d78';
 
-function makeIcon(kind: string, catMap: Map<string, Category>, isOpen: boolean, selected: boolean): L.DivIcon {
-  const color   = isOpen ? OPEN_COLOR : CLOSED_COLOR;
-  const emoji   = catMap.get(kind)?.icon ?? '📍';
-  const size    = selected ? 44 : 36;
-  const pulse   = isOpen && !selected;
-  const svgBody = getSvgBody(kind, color);
+function makeIcon(kind: string, catMap: Map<string, Category>, isOpen: boolean, selected: boolean, name = ''): L.DivIcon {
+  const color    = isOpen ? OPEN_COLOR : CLOSED_COLOR;
+  const emoji    = catMap.get(kind)?.icon ?? '📍';
+  const size     = selected ? 44 : 36;
+  const pulse    = isOpen && !selected;
+  const svgBody  = getSvgBody(kind, color);
+  const short    = name.length > 16 ? name.slice(0, 16) + '…' : name;
+
+  // Label text color: yellow-neon for open, soft pink for closed, white for selected
+  const labelClr = selected ? '#ffffff' : isOpen ? '#f5c518' : '#ffb3c6';
+  const txtGlow  = `0 0 7px ${color},0 0 14px ${color}88`;
+
+  // Label HTML: dark box + neon text + thin connector line
+  const labelHtml = short
+    ? `<div style="background:rgba(0,6,15,0.93);border:1px solid ${color}55;color:${labelClr};font-family:'Rajdhani',sans-serif;font-size:10px;font-weight:700;padding:2px 8px;white-space:nowrap;letter-spacing:0.04em;text-shadow:${txtGlow};box-shadow:0 0 8px ${color}28,inset 0 0 6px ${color}14;direction:rtl;text-align:center;max-width:128px;overflow:hidden;text-overflow:ellipsis;">${short}</div><div style="width:1.5px;height:5px;background:${color};margin:0 auto;opacity:0.65;"></div>`
+    : '';
+
+  // Container dimensions — wider when label is present so it centres nicely
+  const W       = short ? 134 : size;
+  const labelH  = short ? 25 : 0;
+  const totalH  = labelH + size;
+  const anchorX = W / 2;
+  const anchorY = labelH + size / 2;   // geographic pin at circle centre
 
   return L.divIcon({
     className: '',
-    html: `<div style="width:${size}px;height:${size}px;position:relative;display:flex;align-items:center;justify-content:center;">
-      ${pulse ? `<div style="position:absolute;inset:0;border-radius:50%;background:${color};opacity:0.18;animation:lf-ping 2s cubic-bezier(0,0,0.2,1) infinite;"></div>` : ''}
-      <div style="position:absolute;inset:0;border-radius:50%;border:2px solid ${color};box-shadow:0 0 ${selected?20:12}px ${color},0 0 ${selected?40:24}px ${color}88;"></div>
-      ${svgBody
-        ? `<svg width="15" height="15" viewBox="0 0 24 24" fill="none">${svgBody}</svg>`
-        : `<span style="font-size:${Math.round(size*0.4)}px;position:relative;z-index:1;line-height:1;user-select:none">${emoji}</span>`
-      }
+    html: `<div style="display:flex;flex-direction:column;align-items:center;width:${W}px;">
+      ${labelHtml}
+      <div style="width:${size}px;height:${size}px;position:relative;display:flex;align-items:center;justify-content:center;">
+        ${pulse ? `<div style="position:absolute;inset:0;border-radius:50%;background:${color};opacity:0.18;animation:lf-ping 2s cubic-bezier(0,0,0.2,1) infinite;"></div>` : ''}
+        <div style="position:absolute;inset:0;border-radius:50%;border:2px solid ${color};box-shadow:0 0 ${selected?20:12}px ${color},0 0 ${selected?40:24}px ${color}88;"></div>
+        ${svgBody
+          ? `<svg width="15" height="15" viewBox="0 0 24 24" fill="none">${svgBody}</svg>`
+          : `<span style="font-size:${Math.round(size*0.4)}px;position:relative;z-index:1;line-height:1;user-select:none">${emoji}</span>`
+        }
+      </div>
     </div>`,
-    iconSize: [size, size], iconAnchor: [size/2, size/2],
+    iconSize: [W, totalH],
+    iconAnchor: [anchorX, anchorY],
   });
 }
 
@@ -1262,7 +1283,7 @@ export function ClinicMap({
         const isOpen    = item.status==='مفتوح';
         const isSelected= selectedItem?.id===item.id;
         const popupClass= `map-popup cat-${item.kind}`;
-        const marker    = L.marker([item.lat,item.lng],{icon:makeIcon(item.kind,catMapRef.current,isOpen,isSelected)}).addTo(mapRef.current!);
+        const marker    = L.marker([item.lat,item.lng],{icon:makeIcon(item.kind,catMapRef.current,isOpen,isSelected,item.name)}).addTo(mapRef.current!);
         marker.bindPopup(L.popup({className:popupClass,offset:[0,-8],closeButton:true,autoClose:true,autoPan:true}).setContent(buildPopup(item)));
         marker.on('click',()=>{marker.openPopup();mapRef.current?.flyTo([item.lat,item.lng],15,{duration:0.8});});
         markersRef.current[item.id]=marker;
@@ -1278,7 +1299,7 @@ export function ClinicMap({
   // Update selected icon without full re-render
   useEffect(()=>{
     items.filter(i=>i.kind===activeFilter && i.status!=='معطّل').forEach(item=>{
-      markersRef.current[item.id]?.setIcon(makeIcon(item.kind,catMapRef.current,item.status==='مفتوح',selectedItem?.id===item.id));
+      markersRef.current[item.id]?.setIcon(makeIcon(item.kind,catMapRef.current,item.status==='مفتوح',selectedItem?.id===item.id,item.name));
     });
   },[selectedItem,items,activeFilter]);
 
