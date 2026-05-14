@@ -33,19 +33,31 @@ router.post("/taxi-ratings", async (req, res) => {
   }
 });
 
-// ── GET /api/taxi-ratings?driverId=X — fetch ratings for a driver ────────────
+// ── GET /api/taxi-ratings — fetch all (admin) or by driver ───────────────────
+// • No query param  → returns ALL ratings (admin overview, newest first)
+// • ?driverId=X     → returns ratings for a specific driver
 router.get("/taxi-ratings", async (req, res) => {
   try {
-    const driverId = Number(req.query.driverId);
-    if (!Number.isFinite(driverId)) {
-      res.status(400).json({ error: "driverId مطلوب" });
-      return;
+    const { desc: descOp } = await import("drizzle-orm");
+    let rows;
+    if (req.query.driverId !== undefined) {
+      const driverId = Number(req.query.driverId);
+      if (!Number.isFinite(driverId)) {
+        res.status(400).json({ error: "driverId غير صالح" });
+        return;
+      }
+      rows = await db
+        .select()
+        .from(taxiRatingsTable)
+        .where(eq(taxiRatingsTable.driverId, driverId))
+        .orderBy(descOp(taxiRatingsTable.createdAt));
+    } else {
+      rows = await db
+        .select()
+        .from(taxiRatingsTable)
+        .orderBy(descOp(taxiRatingsTable.createdAt));
     }
-    const ratings = await db
-      .select()
-      .from(taxiRatingsTable)
-      .where(eq(taxiRatingsTable.driverId, driverId));
-    res.json(ratings);
+    res.json(rows);
   } catch (err: any) {
     console.error("[GET /taxi-ratings] error:", err);
     res.status(500).json({ error: "فشل جلب التقييمات" });

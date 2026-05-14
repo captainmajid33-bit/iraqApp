@@ -674,10 +674,211 @@ function SettingsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
   );
 }
 
+// ── Taxi Ratings Tab ──────────────────────────────────────────────────────────
+interface Rating { id: number; orderId: number; driverId: number; customerName: string | null; ratingStars: number; notes: string | null; createdAt: string; }
+
+function StarsDisplay({ n, small }: { n: number; small?: boolean }) {
+  const sz = small ? "13px" : "16px";
+  return (
+    <span style={{ display: "inline-flex", gap: "1px" }}>
+      {Array.from({ length: 5 }).map((_, i) => (
+        <span key={i} style={{ fontSize: sz, color: i < n ? C.yellow : "rgba(255,255,255,0.12)", filter: i < n ? `drop-shadow(0 0 4px ${C.yellow}99)` : "none" }}>★</span>
+      ))}
+    </span>
+  );
+}
+
+function TaxiTab({ toast }: { toast: ReturnType<typeof useToast> }) {
+  const [ratings, setRatings]   = useState<Rating[]>([]);
+  const [drivers, setDrivers]   = useState<Record<number, string>>({});
+  const [loading, setLoading]   = useState(true);
+  const [starFilter, setStarFilter] = useState(0);   // 0 = all
+  const [search, setSearch]     = useState("");
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [rData, lData] = await Promise.all([
+        api.get("/api/taxi-ratings"),
+        api.get("/api/locations"),
+      ]);
+      setRatings(Array.isArray(rData) ? rData : []);
+      // Build driverId → name lookup from locations
+      if (Array.isArray(lData)) {
+        const map: Record<number, string> = {};
+        lData.forEach((l: any) => { map[l.id] = l.name; });
+        setDrivers(map);
+      }
+    } catch { toast.show("فشل تحميل التقييمات", false); }
+    finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  // ── Computed stats ─────────────────────────────────────────────────────────
+  const avg = ratings.length ? (ratings.reduce((s, r) => s + r.ratingStars, 0) / ratings.length) : 0;
+  const dist = [5, 4, 3, 2, 1].map(s => ({ star: s, count: ratings.filter(r => r.ratingStars === s).length }));
+
+  // ── Filtered rows ──────────────────────────────────────────────────────────
+  const rows = ratings.filter(r => {
+    if (starFilter && r.ratingStars !== starFilter) return false;
+    if (search) {
+      const q = search.toLowerCase();
+      const driverName = (drivers[r.driverId] ?? "").toLowerCase();
+      const customerName = (r.customerName ?? "").toLowerCase();
+      const notes = (r.notes ?? "").toLowerCase();
+      if (!driverName.includes(q) && !customerName.includes(q) && !notes.includes(q) && !String(r.orderId).includes(q)) return false;
+    }
+    return true;
+  });
+
+  const fmtDate = (iso: string) => {
+    const d = new Date(iso);
+    return `${d.toLocaleDateString("ar-IQ")} ${d.toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" })}`;
+  };
+
+  return (
+    <div>
+      {/* ── Section header ──────────────────────────────────────────────────── */}
+      <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "20px" }}>
+        <div style={{ width: "3px", height: "26px", background: C.yellow, boxShadow: neon(C.yellow) }} />
+        <div>
+          <div style={{ fontFamily: "Orbitron, sans-serif", fontSize: "12px", color: C.yellow, letterSpacing: "0.14em" }}>TAXI RATINGS · تقييمات التكسي</div>
+          <div style={{ fontFamily: "Rajdhani, sans-serif", fontSize: "12px", color: C.dim, marginTop: "2px" }}>
+            مراقبة أداء السائقين · رسائل وشكاوى الزبائن
+          </div>
+        </div>
+        <button onClick={load} style={{ marginRight: "auto", padding: "6px 14px", background: `${C.blue}10`, border: `1px solid ${C.blue}44`, color: C.blue, fontFamily: "Orbitron, sans-serif", fontSize: "9px", letterSpacing: "0.1em", cursor: "pointer", borderRadius: "3px" }}>
+          ↺ تحديث
+        </button>
+      </div>
+
+      {loading ? (
+        <div style={{ textAlign: "center", padding: "60px", color: C.dim, fontFamily: "Orbitron, sans-serif", fontSize: "11px", letterSpacing: "0.1em" }}>LOADING...</div>
+      ) : (
+        <>
+          {/* ── Stats cards ─────────────────────────────────────────────── */}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: "12px", marginBottom: "20px" }}>
+            {/* Total */}
+            <div style={{ background: C.surf2, border: `1px solid ${C.border}`, borderRadius: "4px", padding: "16px", textAlign: "center" }}>
+              <div style={{ fontFamily: "Orbitron, sans-serif", fontSize: "28px", color: C.purple, textShadow: neon(C.purple) }}>{ratings.length}</div>
+              <div style={{ fontFamily: "Rajdhani, sans-serif", fontSize: "12px", color: C.dim, marginTop: "4px" }}>إجمالي التقييمات</div>
+            </div>
+            {/* Avg */}
+            <div style={{ background: C.surf2, border: `1px solid ${C.yellow}44`, borderRadius: "4px", padding: "16px", textAlign: "center" }}>
+              <div style={{ fontFamily: "Orbitron, sans-serif", fontSize: "28px", color: C.yellow, textShadow: neon(C.yellow) }}>{avg.toFixed(1)}</div>
+              <div style={{ display: "flex", justifyContent: "center", marginTop: "2px" }}><StarsDisplay n={Math.round(avg)} small /></div>
+              <div style={{ fontFamily: "Rajdhani, sans-serif", fontSize: "12px", color: C.dim, marginTop: "4px" }}>متوسط التقييم</div>
+            </div>
+            {/* Distribution */}
+            <div style={{ background: C.surf2, border: `1px solid ${C.border}`, borderRadius: "4px", padding: "14px", gridColumn: "span 2" }}>
+              <div style={{ fontFamily: "Orbitron, sans-serif", fontSize: "9px", color: C.dim, letterSpacing: "0.12em", marginBottom: "10px" }}>توزيع النجوم</div>
+              {dist.map(({ star, count }) => {
+                const pct = ratings.length ? (count / ratings.length) * 100 : 0;
+                return (
+                  <div key={star} style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "5px", cursor: "pointer" }}
+                    onClick={() => setStarFilter(starFilter === star ? 0 : star)}>
+                    <span style={{ fontFamily: "Rajdhani, sans-serif", fontSize: "12px", color: starFilter === star ? C.yellow : C.dim, width: "16px", textAlign: "right" }}>{star}</span>
+                    <span style={{ color: C.yellow, fontSize: "11px" }}>★</span>
+                    <div style={{ flex: 1, height: "6px", background: "rgba(255,255,255,0.06)", borderRadius: "3px", overflow: "hidden" }}>
+                      <div style={{ height: "100%", width: `${pct}%`, background: starFilter === star ? C.yellow : `${C.yellow}77`, borderRadius: "3px", transition: "width 0.4s ease", boxShadow: starFilter === star ? neon(C.yellow, 4) : "none" }} />
+                    </div>
+                    <span style={{ fontFamily: "Orbitron, sans-serif", fontSize: "10px", color: C.dim, width: "28px" }}>{count}</span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* ── Filters ──────────────────────────────────────────────────── */}
+          <div style={{ display: "flex", gap: "10px", flexWrap: "wrap", marginBottom: "14px", alignItems: "center" }}>
+            <input value={search} onChange={e => setSearch(e.target.value)} placeholder="بحث بالسائق أو الزبون أو الملاحظات..."
+              style={{ ...FLD, maxWidth: "300px", flex: 1 }} onFocus={ff} onBlur={fb} />
+            <div style={{ display: "flex", gap: "6px" }}>
+              {[0, 5, 4, 3, 2, 1].map(s => (
+                <button key={s} onClick={() => setStarFilter(starFilter === s ? 0 : s)}
+                  style={{ padding: "5px 10px", background: starFilter === s ? `${C.yellow}22` : `${C.surface}`, border: `1px solid ${starFilter === s ? C.yellow : C.border}`, color: starFilter === s ? C.yellow : C.dim, fontFamily: "Orbitron, sans-serif", fontSize: "9px", cursor: "pointer", borderRadius: "3px", transition: "all 0.15s", boxShadow: starFilter === s ? neon(C.yellow, 5) : "none" }}>
+                  {s === 0 ? "الكل" : `${s}★`}
+                </button>
+              ))}
+            </div>
+            <span style={{ fontFamily: "Orbitron, sans-serif", fontSize: "10px", color: C.dim }}>{rows.length} سجل</span>
+          </div>
+
+          {/* ── Table ────────────────────────────────────────────────────── */}
+          <div style={{ overflowX: "auto", border: `1px solid ${C.border}`, borderRadius: "4px" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "Rajdhani, sans-serif" }}>
+              <thead>
+                <tr style={{ background: `${C.yellow}0a`, borderBottom: `1px solid ${C.border}` }}>
+                  {["# رقم الطلب", "السائق", "التقييم", "الزبون", "الملاحظات", "التاريخ والوقت"].map(h => (
+                    <th key={h} style={{ padding: "10px 14px", textAlign: "right", fontSize: "10px", color: C.yellow, fontFamily: "Orbitron, sans-serif", letterSpacing: "0.08em", whiteSpace: "nowrap" }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map(r => (
+                  <tr key={r.id}
+                    style={{ borderBottom: `1px solid rgba(123,47,247,0.08)` }}
+                    onMouseEnter={e => (e.currentTarget.style.background = `${C.yellow}06`)}
+                    onMouseLeave={e => (e.currentTarget.style.background = "transparent")}>
+
+                    {/* Order ID */}
+                    <td style={{ padding: "12px 14px", whiteSpace: "nowrap" }}>
+                      <span style={{ fontFamily: "Orbitron, sans-serif", fontSize: "11px", color: C.blue, textShadow: neon(C.blue, 5) }}>#{r.orderId}</span>
+                    </td>
+
+                    {/* Driver */}
+                    <td style={{ padding: "12px 14px", whiteSpace: "nowrap" }}>
+                      <div style={{ color: C.text, fontSize: "14px", fontWeight: 600 }}>{drivers[r.driverId] ?? `—`}</div>
+                      <div style={{ color: C.dim, fontFamily: "Orbitron, sans-serif", fontSize: "9px", letterSpacing: "0.08em" }}>ID: {r.driverId}</div>
+                    </td>
+
+                    {/* Stars */}
+                    <td style={{ padding: "12px 14px", whiteSpace: "nowrap" }}>
+                      <StarsDisplay n={r.ratingStars} />
+                      <div style={{ fontFamily: "Orbitron, sans-serif", fontSize: "10px", color: C.yellow, marginTop: "2px" }}>{r.ratingStars}/5</div>
+                    </td>
+
+                    {/* Customer */}
+                    <td style={{ padding: "12px 14px" }}>
+                      <span style={{ color: C.text, fontSize: "14px" }}>{r.customerName || <span style={{ color: C.dim, fontSize: "12px" }}>—</span>}</span>
+                    </td>
+
+                    {/* Notes */}
+                    <td style={{ padding: "12px 14px", maxWidth: "260px" }}>
+                      {r.notes
+                        ? <span style={{ color: "rgba(226,232,240,0.75)", fontSize: "13px", lineHeight: 1.5, display: "block" }}>{r.notes}</span>
+                        : <span style={{ color: C.dim, fontSize: "12px", fontStyle: "italic" }}>لا توجد ملاحظات</span>
+                      }
+                    </td>
+
+                    {/* Date */}
+                    <td style={{ padding: "12px 14px", whiteSpace: "nowrap" }}>
+                      <span style={{ fontFamily: "Rajdhani, sans-serif", fontSize: "13px", color: C.dim }}>{fmtDate(r.createdAt)}</span>
+                    </td>
+                  </tr>
+                ))}
+                {rows.length === 0 && (
+                  <tr>
+                    <td colSpan={6} style={{ padding: "48px", textAlign: "center" }}>
+                      <div style={{ fontFamily: "Orbitron, sans-serif", fontSize: "12px", color: C.dim, letterSpacing: "0.1em", marginBottom: "8px" }}>NO RATINGS YET</div>
+                      <div style={{ fontFamily: "Rajdhani, sans-serif", fontSize: "14px", color: `${C.dim}88` }}>لم تُسجَّل أي تقييمات حتى الآن</div>
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 // ── Admin Dashboard ───────────────────────────────────────────────────────────
 export function AdminDashboard() {
   const [, navigate] = useLocation();
-  const [tab, setTab] = useState<"merchants" | "map" | "categories" | "settings">("merchants");
+  const [tab, setTab] = useState<"merchants" | "map" | "categories" | "settings" | "taxi">("merchants");
   const [cats, setCats] = useState<Cat[]>([]);
   const [authChecked, setAuthChecked] = useState(false);
   const toast = useToast();
@@ -716,6 +917,7 @@ export function AdminDashboard() {
     { key: "merchants"  as const, en: "MERCHANTS",  ar: "التجار" },
     { key: "map"        as const, en: "MAP EDITOR",  ar: "الخريطة" },
     { key: "categories" as const, en: "CATEGORIES",  ar: "الفئات" },
+    { key: "taxi"       as const, en: "TAXI",        ar: "🚕 التكسي" },
     { key: "settings"   as const, en: "SETTINGS",    ar: "الإعدادات" },
   ];
 
@@ -763,6 +965,7 @@ export function AdminDashboard() {
         {tab === "merchants"  && <MerchantsTab cats={cats} toast={toast} />}
         {tab === "map"        && <MapEditorTab cats={cats} toast={toast} />}
         {tab === "categories" && <CategoriesTab cats={cats} onRefresh={loadCats} toast={toast} />}
+        {tab === "taxi"       && <TaxiTab toast={toast} />}
         {tab === "settings"   && <SettingsTab toast={toast} />}
       </main>
 
