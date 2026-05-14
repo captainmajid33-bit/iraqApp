@@ -160,6 +160,36 @@ router.patch("/orders/:id/driver-location", async (req, res) => {
   }
 });
 
+// ── PATCH /api/orders/:id/customer-cancel — public, customer cancels pending order ──
+// Only works when order is still 'pending' (not accepted/driving)
+router.patch("/orders/:id/customer-cancel", async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) { res.status(400).json({ error: "id غير صالح" }); return; }
+
+    const [order] = await db.select().from(ordersTable).where(eq(ordersTable.id, id));
+    if (!order) { res.status(404).json({ error: "الطلب غير موجود" }); return; }
+
+    // Only cancellable while still pending (driver hasn't accepted yet)
+    if (order.status !== 'pending') {
+      res.status(409).json({ error: "لا يمكن إلغاء طلب قيد التنفيذ" }); return;
+    }
+
+    const [updated] = await db
+      .update(ordersTable).set({ status: 'cancelled' })
+      .where(eq(ordersTable.id, id)).returning();
+
+    broadcastOrderUpdate({ id: updated.id, status: updated.status, locationId: updated.locationId });
+    await setDriverBusy(updated.locationId, false);
+
+    console.log(`[customer-cancel] order #${id} cancelled by customer`);
+    res.json({ ok: true });
+  } catch (err: any) {
+    console.error("[PATCH /orders/:id/customer-cancel] error:", err);
+    res.status(500).json({ error: "فشل إلغاء الطلب" });
+  }
+});
+
 // ── GET /api/orders — admin only ─────────────────────────────────────────────
 router.get("/orders", requireAdmin, async (req, res) => {
   try {

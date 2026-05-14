@@ -522,6 +522,18 @@ export function ClinicMap({
   // Thank-you snackbar shown after rating is submitted/skipped
   const [showThankYouSnack, setShowThankYouSnack] = useState(false);
 
+  // ── Driver Search Loop ────────────────────────────────────────────────────
+  const [loopCountdown,     setLoopCountdown]     = useState<number|null>(null); // seconds left
+  const [loopActive,        setLoopActive]        = useState(false);
+  const [loopCurrentDriver, setLoopCurrentDriver] = useState<string>('');        // name of current driver being tried
+  const loopIgnoredRef     = useRef<Set<number>>(new Set());          // locationIds already tried
+  const loopFromPtRef      = useRef<{lat:number;lng:number}|null>(null);
+  const loopToPtRef        = useRef<{lat:number;lng:number}|null>(null);
+  const loopUserNameRef    = useRef<string>('');
+  const loopUserPhoneRef   = useRef<string>('');
+  const loopEstPriceRef    = useRef<number>(0);
+  const redirectToNextRef  = useRef<()=>Promise<void>>(async()=>{});   // stable pointer, updated after def
+
   const activeOrderIdRef    = useRef<number|null>(null);
   const activeOrderStatusRef= useRef<string>('pending');            // mirrors activeOrderStatus for DOM handlers
   const seenSnackIdsRef     = useRef<Set<string|number>>(new Set()); // system msgs already snackbar'd
@@ -1024,6 +1036,16 @@ export function ClinicMap({
     if (mapRef.current) mapRef.current.getContainer().style.cursor = adminModeRef.current ? 'crosshair' : '';
   },[]);
 
+  // ── Clear search loop state (called from stopOrderTracking) ───────────────
+  const clearLoop = useCallback(()=>{
+    setLoopActive(false);
+    setLoopCountdown(null);
+    setLoopCurrentDriver('');
+    loopIgnoredRef.current.clear();
+    loopFromPtRef.current  = null;
+    loopToPtRef.current    = null;
+  },[]);
+
   // ── Confirm "from" point and advance to pick-to step ─────────────────────
   const confirmTaxiFrom = useCallback(()=>{
     if (!taxiFromPtRef.current) return;
@@ -1241,6 +1263,10 @@ export function ClinicMap({
     activeOrderIdRef.current    = null;
     activeOrderStatusRef.current = 'pending';
     localStorage.removeItem('diyala_active_order');
+    // Clear the search loop
+    setLoopActive(false); setLoopCountdown(null); setLoopCurrentDriver('');
+    loopIgnoredRef.current.clear();
+    loopFromPtRef.current = null; loopToPtRef.current = null;
   },[]);
 
   // ── Restore active order from localStorage on first load ──────────────────
@@ -1438,6 +1464,13 @@ export function ClinicMap({
     activeOrderStatusRef.current = data.status;
     if (data.status === 'accepted' || data.status === 'driving') {
       setShowChat(true); // auto-open chat when driver accepts
+      // Driver accepted → stop the search loop
+      setLoopActive(false); setLoopCountdown(null);
+    }
+    // Driver rejected → redirect to next available driver immediately
+    if (data.status === 'rejected') {
+      redirectToNextRef.current();
+      return;
     }
     // 'done' or 'finished' → hide chat and show rating dialog before clearing
     if (data.status === 'done' || data.status === 'finished' || data.status === 'cancelled') {
@@ -1542,6 +1575,17 @@ export function ClinicMap({
           setActiveDriverId(taxiDriverItem.id);
           // Persist order to localStorage so it survives page refresh
           localStorage.setItem('diyala_active_order', JSON.stringify({ orderId, driverPhone, driverId: taxiDriverItem.id }));
+          // ── Start the search loop countdown ─────────────────────────────
+          loopFromPtRef.current    = taxiFromPt;
+          loopToPtRef.current      = taxiToPt;
+          loopUserNameRef.current  = taxiUserName.trim();
+          loopUserPhoneRef.current = taxiUserPhone.trim();
+          loopEstPriceRef.current  = taxiEstPrice ?? 0;
+          loopIgnoredRef.current.clear();
+          loopIgnoredRef.current.add(taxiDriverItem.id);
+          setLoopCurrentDriver(taxiDriverItem.name);
+          setLoopActive(true);
+          setLoopCountdown(120);
         }
         setTimeout(()=>{ closeTaxiRouting(); }, 2600);
       } else {
@@ -1571,6 +1615,101 @@ export function ClinicMap({
     const t = setTimeout(()=> submitTaxiOrder(), 400);
     return ()=> clearTimeout(t);
   },[taxiAutoConnect, taxiStep, taxiRouteLoading, taxiToPt, taxiUserName, taxiUserPhone, submitTaxiOrder]);
+
+  // ── Redirect to next available driver (loop core) ────────────────────────
+  const redirectToNextDriver = useCallback(async ()=>{
+    // 1. Cancel current pending order on server (non-fatal if it fails)
+    const curOrderId = activeOrderIdRef.current;
+    if (curOrderId) {
+      try { await fetch(`/api/orders/${curOrderId}/customer-cancel`, { method:'PATCH' }); } catch { /* non-fatal */ }
+    }
+    // 2. Clear active order state (keep loop refs/context)
+    setActiveOrderId(null); setActiveOrderStatus('pending');
+    activeOrderIdRef.current = null; activeOrderStatusRef.current = 'pending';
+    localStorage.removeItem('diyala_active_order');
+
+    // 3. Find next uncontacted driver
+    const loc = loopFromPtRef.current;
+    if (!loc) { stopOrderTracking(); return; }
+
+    try {
+      const res     = await fetch('/api/drivers-online');
+      const drivers: { id:number; locationId:number; driverName:string; phone:string; lat:number; lng:number; updatedAt?:string|null }[] = await res.json();
+
+      const FIVE_MIN = 5 * 60 * 1000;
+      const now      = Date.now();
+      const fresh = drivers.filter(d => {
+        if (!d.updatedAt) return true;
+        return (now - new Date(d.updatedAt).getTime()) < FIVE_MIN;
+      }).filter(d => !loopIgnoredRef.current.has(d.locationId));
+
+      const withDist = fresh.map(d => ({ ...d, distKm: haversineDist(loc.lat, loc.lng, d.lat, d.lng) }));
+      const findNearest = (maxKm:number) => withDist.filter(d=>d.distKm<=maxKm).sort((a,b)=>a.distKm-b.distKm);
+      const nearby = findNearest(5).length>0 ? findNearest(5) : findNearest(10).length>0 ? findNearest(10) : findNearest(20);
+
+      if (nearby.length === 0) {
+        // All nearby drivers tried — give up
+        setLoopActive(false); setLoopCountdown(null); setLoopCurrentDriver('');
+        setTaxiNoDriverSnack(true);
+        setTimeout(()=> setTaxiNoDriverSnack(false), 7000);
+        stopOrderTracking();
+        return;
+      }
+
+      const next = nearby[0];
+      setLoopCurrentDriver(next.driverName);
+
+      // 4. POST new order to next driver
+      const fromPt = loopFromPtRef.current!;
+      const toPt   = loopToPtRef.current;
+      const orderRes = await fetch('/api/orders', {
+        method: 'POST',
+        headers: { 'Content-Type':'application/json' },
+        body: JSON.stringify({
+          locationId:     next.locationId,
+          userName:       loopUserNameRef.current,
+          phone:          loopUserPhoneRef.current,
+          destination:    toPt
+            ? `من (${fromPt.lat.toFixed(4)},${fromPt.lng.toFixed(4)}) إلى (${toPt.lat.toFixed(4)},${toPt.lng.toFixed(4)})`
+            : `(${fromPt.lat.toFixed(4)},${fromPt.lng.toFixed(4)})`,
+          fromLat: fromPt.lat, fromLng: fromPt.lng,
+          toLat:   toPt?.lat ?? fromPt.lat, toLng: toPt?.lng ?? fromPt.lng,
+          estimatedPrice: loopEstPriceRef.current,
+          lat: fromPt.lat, lng: fromPt.lng,
+        }),
+      });
+
+      if (orderRes.ok) {
+        const { orderId: newId } = await orderRes.json();
+        setActiveOrderId(newId); setActiveOrderStatus('pending');
+        activeOrderIdRef.current = newId; activeOrderStatusRef.current = 'pending';
+        setActiveDriverPhone(next.phone);
+        setActiveDriverId(next.locationId);
+        localStorage.setItem('diyala_active_order', JSON.stringify({ orderId:newId, driverPhone:next.phone, driverId:next.locationId }));
+        // Mark this driver as tried and restart 120 s countdown
+        loopIgnoredRef.current.add(next.locationId);
+        setLoopActive(true);
+        setLoopCountdown(120);
+      } else {
+        // Driver already busy / error — skip immediately
+        loopIgnoredRef.current.add(next.locationId);
+        redirectToNextRef.current();
+      }
+    } catch {
+      stopOrderTracking();
+    }
+  },[stopOrderTracking]);
+
+  // Keep redirectToNextRef always pointing at latest version
+  useEffect(()=>{ redirectToNextRef.current = redirectToNextDriver; },[redirectToNextDriver]);
+
+  // ── Countdown tick: decrement every second, trigger redirect at 0 ─────────
+  useEffect(()=>{
+    if (!loopActive || loopCountdown === null) return;
+    if (loopCountdown <= 0) { redirectToNextRef.current(); return; }
+    const t = setTimeout(()=> setLoopCountdown(c=> (c ?? 1) - 1), 1000);
+    return ()=> clearTimeout(t);
+  },[loopActive, loopCountdown]);
 
   // Sync markers whenever items / activeFilter / selectedItem changes
   useEffect(()=>{
@@ -2454,12 +2593,48 @@ export function ClinicMap({
                 ORDER #{activeOrderId}
               </div>
               <div style={{fontFamily:'Rajdhani,sans-serif',fontSize:'15px',fontWeight:700,color:'#e8f8f5',lineHeight:1.2}}>
-                {activeOrderStatus==='pending'    && 'في انتظار قبول السائق...'}
-                {activeOrderStatus==='accepted'   && '🚕 السائق في الطريق إليك'}
-                {activeOrderStatus==='driving'    && '🚕 السائق في الطريق إليك'}
-                {activeOrderStatus==='done'       && '✅ وصل السائق — شكراً!'}
-                {activeOrderStatus==='cancelled'  && '❌ تم إلغاء الطلب'}
+                {activeOrderStatus==='pending' && loopActive
+                  ? `🔍 نبحث عن أفضل سائق... ${loopCurrentDriver ? `(${loopCurrentDriver})` : ''}`
+                  : activeOrderStatus==='pending'   ? 'في انتظار قبول السائق...'
+                  : activeOrderStatus==='accepted'  ? '🚕 السائق في الطريق إليك'
+                  : activeOrderStatus==='driving'   ? '🚕 السائق في الطريق إليك'
+                  : activeOrderStatus==='done'      ? '✅ وصل السائق — شكراً!'
+                  : activeOrderStatus==='cancelled' ? '❌ تم إلغاء الطلب'
+                  : null}
               </div>
+
+              {/* ── Search loop countdown ── */}
+              {loopActive && loopCountdown !== null && activeOrderStatus === 'pending' && (
+                <div style={{marginTop:'5px',display:'flex',alignItems:'center',gap:'10px'}}>
+                  {/* Countdown ring */}
+                  <div style={{position:'relative',flexShrink:0,width:'36px',height:'36px'}}>
+                    <svg width="36" height="36" viewBox="0 0 36 36" style={{transform:'rotate(-90deg)'}}>
+                      <circle cx="18" cy="18" r="14" fill="none" stroke="rgba(245,197,24,0.15)" strokeWidth="3"/>
+                      <circle cx="18" cy="18" r="14" fill="none" stroke="#f5c518" strokeWidth="3"
+                        strokeDasharray={`${(loopCountdown/120)*88} 88`}
+                        strokeLinecap="round"
+                        style={{transition:'stroke-dasharray 1s linear'}}
+                      />
+                    </svg>
+                    <div style={{
+                      position:'absolute',inset:0,display:'flex',alignItems:'center',justifyContent:'center',
+                      fontFamily:'Orbitron,sans-serif',fontSize:'9px',fontWeight:700,
+                      color: loopCountdown <= 30 ? '#ff2d78' : '#f5c518',
+                    }}>
+                      {String(Math.floor(loopCountdown/60)).padStart(2,'0')}:{String(loopCountdown%60).padStart(2,'0')}
+                    </div>
+                  </div>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontFamily:'Rajdhani,sans-serif',fontSize:'11px',color:'rgba(245,197,24,0.7)',lineHeight:1.3}}>
+                      سيتم الانتقال للسائق التالي إذا لم يستجب
+                    </div>
+                    <div style={{fontFamily:'Orbitron,sans-serif',fontSize:'7px',color:'rgba(255,255,255,0.3)',letterSpacing:'0.1em',marginTop:'2px'}}>
+                      DRIVER SEARCH LOOP · ATTEMPT #{loopIgnoredRef.current.size}
+                    </div>
+                  </div>
+                </div>
+              )}
+
               {/* Distance + ETA row */}
               {(activeOrderStatus==='accepted'||activeOrderStatus==='driving') && driverDistKm !== null && (
                 <div style={{display:'flex',gap:'14px',marginTop:'4px'}}>
