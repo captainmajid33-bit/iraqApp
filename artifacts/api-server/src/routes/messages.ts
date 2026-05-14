@@ -29,7 +29,7 @@ function bridgeToPartner(orderId: number, sender: string, content: string): void
  * avoid duplicates.
  */
 async function fetchPartnerDriverMsgs(orderId: number): Promise<{
-  id: string; orderId: number; senderRole: string; content: string; createdAt: string;
+  id: string; orderId: number; senderRole: string; content: string; isSystemMsg: boolean; createdAt: string;
 }[]> {
   try {
     const res = await fetch(
@@ -41,11 +41,12 @@ async function fetchPartnerDriverMsgs(orderId: number): Promise<{
     return raw
       .filter(m => m.sender === "driver" || m.senderRole === "driver")
       .map(m => ({
-        id:         `partner_${m.id}`,          // prefix to avoid ID collision with our DB
-        orderId:    m.orderId ?? orderId,
-        senderRole: "driver",
-        content:    m.content ?? "",
-        createdAt:  m.createdAt ?? m.timestamp ?? new Date().toISOString(),
+        id:          `partner_${m.id}`,          // prefix to avoid ID collision with our DB
+        orderId:     m.orderId ?? orderId,
+        senderRole:  "driver",
+        content:     m.content ?? "",
+        isSystemMsg: !!(m.is_system_msg ?? m.isSystemMsg ?? false),
+        createdAt:   m.createdAt ?? m.timestamp ?? new Date().toISOString(),
       }));
   } catch {
     return [];                                   // partner hub unreachable — degrade gracefully

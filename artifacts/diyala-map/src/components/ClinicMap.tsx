@@ -456,6 +456,9 @@ export function ClinicMap({
   const [driverDistKm,      setDriverDistKm]      = useState<number|null>(null);
   const [driverEtaMin,      setDriverEtaMin]      = useState<number|null>(null);
   const [showChat,          setShowChat]          = useState(false);
+  // Snackbar shown when a system message arrives while chat is closed
+  const [sysMsgSnack,       setSysMsgSnack]       = useState<string|null>(null);
+  const sysMsgTimerRef      = useRef<ReturnType<typeof setTimeout>|null>(null);
 
   // ── Rating dialog (auto-opens when ride finishes) ─────────────────────────
   const [showRating,        setShowRating]        = useState(false);
@@ -465,6 +468,7 @@ export function ClinicMap({
   const ratingShownRef      = useRef<Set<number>>(new Set()); // prevent double-trigger
 
   const activeOrderIdRef    = useRef<number|null>(null);
+  const seenSnackIdsRef     = useRef<Set<string|number>>(new Set()); // system msgs already snackbar'd
   const prevDriverPosRef    = useRef<{lat:number;lng:number}|null>(null);
 
   // ── Online drivers (all open taxis visible on map) ────────────────────────
@@ -1176,6 +1180,33 @@ export function ClinicMap({
           phone:string; lat:number; lng:number; isOnline:boolean;
         }};
         if (driver) upsertOnlineDriverMarker(driver);
+      } catch { /* */ }
+    });
+    es.onerror = ()=> es.close();
+    return ()=> es.close();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[]);
+
+  // ── SSE listener for system messages (works even when chat panel is closed) ─
+  // Shows a Snackbar notification for any incoming message with isSystemMsg=true,
+  // as long as it belongs to the current active order and hasn't been shown yet.
+  useEffect(()=>{
+    const es = new EventSource('/api/events');
+    es.addEventListener('new_message', (e: MessageEvent)=>{
+      try {
+        const { message } = JSON.parse(e.data) as { message: {
+          id: number|string; orderId: number;
+          senderRole: string; content: string;
+          isSystemMsg?: boolean; createdAt: string;
+        }};
+        if (!message?.isSystemMsg) return;
+        if (message.orderId !== activeOrderIdRef.current) return;
+        if (seenSnackIdsRef.current.has(message.id)) return;
+        seenSnackIdsRef.current.add(message.id);
+        // Show the snackbar
+        setSysMsgSnack(message.content);
+        if (sysMsgTimerRef.current) clearTimeout(sysMsgTimerRef.current);
+        sysMsgTimerRef.current = setTimeout(()=> setSysMsgSnack(null), 7000);
       } catch { /* */ }
     });
     es.onerror = ()=> es.close();
@@ -2198,12 +2229,79 @@ export function ClinicMap({
         </div>
       )}
 
+      {/* ── System-message Snackbar (shown when chat is closed) ── */}
+      {sysMsgSnack && (
+        <div style={{
+          position:'absolute', top:'72px', left:'50%', transform:'translateX(-50%)',
+          zIndex:5000, direction:'rtl',
+          display:'flex', alignItems:'center', gap:'12px',
+          padding:'11px 18px',
+          background:'linear-gradient(135deg,rgba(245,197,24,0.14),rgba(255,150,0,0.1))',
+          border:'1px solid rgba(245,197,24,0.7)',
+          borderTop:'3px solid #f5c518',
+          boxShadow:'0 4px 40px rgba(245,197,24,0.3), 0 0 0 1px rgba(245,197,24,0.1)',
+          backdropFilter:'blur(16px)',
+          maxWidth:'min(380px,90vw)',
+          animation:'sys-snack-in 0.35s cubic-bezier(0.34,1.56,0.64,1)',
+        }}>
+          <style>{`
+            @keyframes sys-snack-in {
+              from { opacity:0; transform:translateX(-50%) translateY(-16px) scale(0.94); }
+              to   { opacity:1; transform:translateX(-50%) translateY(0) scale(1); }
+            }
+          `}</style>
+          {/* Bell icon */}
+          <div style={{
+            flexShrink:0, width:'32px', height:'32px',
+            border:'1px solid rgba(245,197,24,0.5)', borderRadius:'50%',
+            display:'flex', alignItems:'center', justifyContent:'center',
+            background:'rgba(245,197,24,0.12)',
+            boxShadow:'0 0 12px rgba(245,197,24,0.3)',
+          }}>
+            <span style={{fontSize:'15px', lineHeight:1}}>🔔</span>
+          </div>
+          {/* Text */}
+          <div style={{flex:1, minWidth:0}}>
+            <div style={{fontFamily:'Orbitron,sans-serif',fontSize:'8px',color:'rgba(245,197,24,0.7)',letterSpacing:'0.18em',marginBottom:'3px'}}>
+              تنبيه · SYSTEM ALERT
+            </div>
+            <div style={{fontFamily:'Rajdhani,sans-serif',fontSize:'14px',fontWeight:600,color:'#ffe08a',lineHeight:1.3}}>
+              {sysMsgSnack}
+            </div>
+          </div>
+          {/* Open chat button */}
+          <button onClick={()=>{ setShowChat(true); setSysMsgSnack(null); if(sysMsgTimerRef.current) clearTimeout(sysMsgTimerRef.current); }}
+            style={{
+              flexShrink:0, padding:'6px 11px',
+              background:'rgba(245,197,24,0.2)', border:'1px solid rgba(245,197,24,0.6)',
+              color:'#f5c518', fontFamily:'Orbitron,sans-serif',
+              fontSize:'8px', letterSpacing:'0.1em', cursor:'pointer',
+              whiteSpace:'nowrap',
+            }}>
+            فتح الدردشة
+          </button>
+          {/* Dismiss */}
+          <button onClick={()=>{ setSysMsgSnack(null); if(sysMsgTimerRef.current) clearTimeout(sysMsgTimerRef.current); }}
+            style={{flexShrink:0,background:'none',border:'none',color:'rgba(245,197,24,0.5)',fontSize:'14px',cursor:'pointer',padding:'2px 4px',lineHeight:1}}>
+            ✕
+          </button>
+        </div>
+      )}
+
       {/* ── Chat Overlay ── */}
       {showChat && activeOrderId && activeOrderStatus !== 'done' && activeOrderStatus !== 'finished' && activeOrderStatus !== 'cancelled' && (
         <ChatOverlay
           orderId={activeOrderId}
           driverPhone={activeDriverPhone}
           onClose={()=>setShowChat(false)}
+          onSystemMsg={(content)=>{
+            if (!showChat) {
+              // Chat is closed — show snackbar
+              if (sysMsgTimerRef.current) clearTimeout(sysMsgTimerRef.current);
+              setSysMsgSnack(content);
+              sysMsgTimerRef.current = setTimeout(()=> setSysMsgSnack(null), 7000);
+            }
+          }}
         />
       )}
 
