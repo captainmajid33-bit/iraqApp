@@ -90,6 +90,8 @@ router.put("/drivers-online/:locationId", async (req, res) => {
       })
       .returning();
 
+    const origin = req.headers["origin"] || req.headers["referer"] || "unknown";
+    console.log(`[PUT /drivers-online] ✅ driver ${locationId} (${driverName}) online | origin=${origin} | lat=${lat} lng=${lng}`);
     broadcastDriverUpdate(row as Record<string, unknown>);
     res.json({ ok: true, driver: row });
   } catch (err: any) {

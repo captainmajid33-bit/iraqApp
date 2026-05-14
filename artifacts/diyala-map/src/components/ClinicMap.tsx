@@ -1258,16 +1258,22 @@ export function ClinicMap({
     };
 
     try {
-      // ── 1. Get online drivers (retry once on 5xx / HTML wake-up) ────────────
-      let { ok: dOk, status: dStatus, json: dRaw } = await safeFetch('/api/drivers-online');
-      if (!dOk || !Array.isArray(dRaw)) {
-        // Replit deployment may be waking from sleep — wait and retry once
-        console.warn(`[dispatchTaxiNow] drivers-online status=${dStatus}, retrying in 2 s...`);
-        await new Promise(r => setTimeout(r, 2000));
-        ({ ok: dOk, status: dStatus, json: dRaw } = await safeFetch('/api/drivers-online'));
+      // ── 1. Get online drivers — up to 3 attempts (handles network flaps + cold-start) ──
+      let dOk = false, dStatus = 0, dRaw: unknown = null;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const r = await safeFetch('/api/drivers-online');
+          dOk = r.ok; dStatus = r.status; dRaw = r.json;
+          if (dOk && Array.isArray(dRaw)) break;           // success
+          console.warn(`[dispatch] attempt ${attempt+1}: status=${dStatus} json=${JSON.stringify(dRaw)?.slice(0,60)}`);
+        } catch (netErr) {
+          console.warn(`[dispatch] attempt ${attempt+1} network error:`, netErr);
+          dOk = false;
+        }
+        if (attempt < 2) await new Promise(r => setTimeout(r, 1800));
       }
-      if (!dOk) {
-        setTaxiQuickError('السيرفر يستيقظ — انتظر لحظة وأعد المحاولة');
+      if (!dOk && !Array.isArray(dRaw)) {
+        setTaxiQuickError('السيرفر لا يستجيب — أعد المحاولة بعد لحظة');
         setShowTaxiQuickForm(true);
         setTaxiLoading(false);
         return;
