@@ -10,6 +10,15 @@ export function removeSseClient(res: Response) {
   clients.delete(res);
 }
 
+/** Send a single SSE event to ONE specific client (used for on-connect replays) */
+export function sendToClient(res: Response, eventName: string, payload: Record<string, unknown>) {
+  try {
+    res.write(`event: ${eventName}\ndata: ${JSON.stringify(payload)}\n\n`);
+  } catch {
+    clients.delete(res);
+  }
+}
+
 function broadcast(eventName: string, payload: Record<string, unknown>) {
   const raw = `event: ${eventName}\ndata: ${JSON.stringify(payload)}\n\n`;
   for (const res of clients) {

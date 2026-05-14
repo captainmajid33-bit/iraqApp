@@ -3,7 +3,10 @@ import cors, { type CorsOptions } from "cors";
 import pinoHttp from "pino-http";
 import router from "./routes";
 import { logger } from "./lib/logger";
-import { addSseClient, removeSseClient } from "./lib/sse";
+import { addSseClient, removeSseClient, sendToClient } from "./lib/sse";
+import { db } from "@workspace/db";
+import { gasOrdersTable } from "@workspace/db";
+import { eq, desc } from "drizzle-orm";
 
 const app: Express = express();
 
@@ -69,7 +72,7 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // ── Server-Sent Events endpoint — real-time map updates ───────────────────────
-app.get("/api/events", (req, res) => {
+app.get("/api/events", async (req, res) => {
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache, no-transform");
   res.setHeader("Connection", "keep-alive");
@@ -79,6 +82,36 @@ app.get("/api/events", (req, res) => {
   res.write(":connected\n\n");
 
   addSseClient(res);
+
+  // ── Replay all pending gas orders to this new client immediately ────────────
+  // This ensures the partner app receives historical pending orders on
+  // (re)connect — without depending on GPS availability or a separate REST call.
+  try {
+    const pending = await db
+      .select()
+      .from(gasOrdersTable)
+      .where(eq(gasOrdersTable.status, "pending"))
+      .orderBy(desc(gasOrdersTable.createdAt));
+
+    for (const order of pending) {
+      sendToClient(res, "gas_order_update", {
+        order: {
+          id: order.id,
+          status: order.status,
+          userName: order.userName,
+          phone: order.phone,
+          locationAddress: order.locationAddress,
+          lat: order.lat,
+          lng: order.lng,
+        },
+      });
+    }
+    if (pending.length > 0) {
+      console.log(`[SSE connect] replayed ${pending.length} pending gas order(s) to new client`);
+    }
+  } catch (err) {
+    console.warn("[SSE connect] failed to replay pending gas orders:", err);
+  }
 
   const hb = setInterval(() => {
     try { res.write(":heartbeat\n\n"); } catch { clearInterval(hb); }
