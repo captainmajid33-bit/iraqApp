@@ -12,8 +12,11 @@ interface Msg {
 interface ChatOverlayProps {
   orderId: number;
   driverPhone?: string;
-  onClose: () => void;
-  /** Called whenever a system message (is_system_msg=true) arrives for the first time */
+  /** Called when user presses the minimize (−) button — hides UI, keeps session alive */
+  onMinimize: () => void;
+  /** Called when user confirms "حذف المحادثة نهائياً" — ends session fully */
+  onDeleteChat: () => void;
+  /** Called whenever a system message arrives for the first time */
   onSystemMsg?: (content: string) => void;
 }
 
@@ -29,14 +32,9 @@ function sortByTime(msgs: Msg[]): Msg[] {
 // ── System Alert Bubble ────────────────────────────────────────────────────────
 function SystemAlertBubble({ msg }: { msg: Msg }) {
   return (
-    <div style={{
-      display: 'flex',
-      justifyContent: 'center',
-      padding: '2px 0',
-    }}>
+    <div style={{ display: 'flex', justifyContent: 'center', padding: '2px 0' }}>
       <div style={{
-        position: 'relative',
-        width: '100%',
+        position: 'relative', width: '100%',
         background: 'linear-gradient(135deg, rgba(245,197,24,0.08) 0%, rgba(255,150,0,0.12) 100%)',
         border: '1px solid rgba(245,197,24,0.55)',
         borderRight: '3px solid #f5c518',
@@ -44,57 +42,33 @@ function SystemAlertBubble({ msg }: { msg: Msg }) {
         boxShadow: '0 0 18px rgba(245,197,24,0.18), inset 0 0 30px rgba(245,197,24,0.04)',
         overflow: 'hidden',
       }}>
-        {/* Animated scan line */}
         <div style={{
-          position: 'absolute',
-          top: 0, left: 0, right: 0,
-          height: '1px',
+          position: 'absolute', top: 0, left: 0, right: 0, height: '1px',
           background: 'linear-gradient(90deg, transparent, rgba(245,197,24,0.6), transparent)',
           animation: 'sys-scan 2.4s linear infinite',
         }} />
-        {/* Header row */}
-        <div style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: '6px',
-          marginBottom: '5px',
-        }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '5px' }}>
           <div style={{
             width: '6px', height: '6px', borderRadius: '50%',
-            background: '#f5c518',
-            boxShadow: '0 0 8px #f5c518',
-            animation: 'sys-blink 1.2s ease-in-out infinite',
-            flexShrink: 0,
+            background: '#f5c518', boxShadow: '0 0 8px #f5c518',
+            animation: 'sys-blink 1.2s ease-in-out infinite', flexShrink: 0,
           }} />
           <span style={{
-            fontFamily: 'Orbitron, sans-serif',
-            fontSize: '8px',
-            color: '#f5c518',
-            letterSpacing: '0.2em',
+            fontFamily: 'Orbitron, sans-serif', fontSize: '8px',
+            color: '#f5c518', letterSpacing: '0.2em',
             textShadow: '0 0 10px rgba(245,197,24,0.6)',
-          }}>
-            ⚠ تنبيه · SYSTEM ALERT
-          </span>
+          }}>⚠ تنبيه · SYSTEM ALERT</span>
         </div>
-        {/* Content */}
         <div style={{
-          fontFamily: 'Rajdhani, sans-serif',
-          fontSize: '14px',
-          fontWeight: 600,
-          color: '#ffe08a',
-          lineHeight: 1.4,
-          textShadow: '0 0 12px rgba(245,197,24,0.3)',
-          wordBreak: 'break-word',
+          fontFamily: 'Rajdhani, sans-serif', fontSize: '14px', fontWeight: 600,
+          color: '#ffe08a', lineHeight: 1.4,
+          textShadow: '0 0 12px rgba(245,197,24,0.3)', wordBreak: 'break-word',
         }}>
           {msg.content}
         </div>
-        {/* Timestamp */}
         <div style={{
-          fontFamily: 'Rajdhani, sans-serif',
-          fontSize: '9px',
-          color: 'rgba(245,197,24,0.45)',
-          marginTop: '5px',
-          letterSpacing: '0.06em',
+          fontFamily: 'Rajdhani, sans-serif', fontSize: '9px',
+          color: 'rgba(245,197,24,0.45)', marginTop: '5px', letterSpacing: '0.06em',
         }}>
           {new Date(msg.createdAt).toLocaleTimeString('ar-IQ', { hour: '2-digit', minute: '2-digit' })}
         </div>
@@ -103,30 +77,27 @@ function SystemAlertBubble({ msg }: { msg: Msg }) {
   );
 }
 
-export function ChatOverlay({ orderId, driverPhone, onClose, onSystemMsg }: ChatOverlayProps) {
-  const [messages, setMessages] = useState<Msg[]>([]);
-  const [input,    setInput]    = useState('');
-  const [sending,  setSending]  = useState(false);
-  const [sseOk,    setSseOk]    = useState(false);
-  const bottomRef    = useRef<HTMLDivElement>(null);
-  const pollRef      = useRef<ReturnType<typeof setInterval> | null>(null);
-  // Track system msg IDs we've already fired onSystemMsg for (avoid re-firing on poll)
-  const seenSysRef   = useRef<Set<number | string>>(new Set());
+export function ChatOverlay({ orderId, driverPhone, onMinimize, onDeleteChat, onSystemMsg }: ChatOverlayProps) {
+  const [messages,     setMessages]     = useState<Msg[]>([]);
+  const [input,        setInput]        = useState('');
+  const [sending,      setSending]      = useState(false);
+  const [sseOk,        setSseOk]        = useState(false);
+  const [confirmDelete,setConfirmDelete] = useState(false);
+  const bottomRef  = useRef<HTMLDivElement>(null);
+  const pollRef    = useRef<ReturnType<typeof setInterval> | null>(null);
+  const seenSysRef = useRef<Set<number | string>>(new Set());
 
-  // ── Merge helper: dedup + sort + fire onSystemMsg for new system msgs ─────
+  // ── Merge helper ──────────────────────────────────────────────────────────
   const mergeMessages = useCallback((incoming: Msg[]) => {
     setMessages(prev => {
       const existingIds = new Set(prev.map(m => m.id));
       const newMsgs = incoming.filter(m => !existingIds.has(m.id));
-
-      // Fire onSystemMsg for any brand-new system messages
       newMsgs.forEach(m => {
         if (m.isSystemMsg && !seenSysRef.current.has(m.id)) {
           seenSysRef.current.add(m.id);
           onSystemMsg?.(m.content);
         }
       });
-
       if (newMsgs.length === 0) return prev;
       return sortByTime([...prev, ...newMsgs]);
     });
@@ -149,7 +120,6 @@ export function ChatOverlay({ orderId, driverPhone, onClose, onSystemMsg }: Chat
       const res = await fetch(MSG_PATH(orderId));
       if (!res.ok) return;
       const data: Msg[] = await res.json();
-      // On first fetch, populate seenSysRef so we don't re-fire for old msgs
       if (seenSysRef.current.size === 0) {
         data.forEach(m => { if (m.isSystemMsg) seenSysRef.current.add(m.id); });
         setMessages(sortByTime(data));
@@ -159,14 +129,14 @@ export function ChatOverlay({ orderId, driverPhone, onClose, onSystemMsg }: Chat
     } catch { /* silent */ }
   }, [orderId, mergeMessages]);
 
-  // ── Initial load + polling fallback (every 2 s) ───────────────────────────
+  // ── Initial load + polling (every 2 s) ───────────────────────────────────
   useEffect(() => {
     fetchMessages();
     pollRef.current = setInterval(fetchMessages, 2000);
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [fetchMessages]);
 
-  // ── SSE real-time listener with auto-reconnect + exponential back-off ─────
+  // ── SSE real-time listener ────────────────────────────────────────────────
   useEffect(() => {
     let es: EventSource | null = null;
     let retryDelay = 1000;
@@ -176,40 +146,26 @@ export function ChatOverlay({ orderId, driverPhone, onClose, onSystemMsg }: Chat
     const connect = () => {
       if (destroyed) return;
       es = new EventSource(`${API}/events`);
-
-      es.onopen = () => {
-        retryDelay = 1000;
-        setSseOk(true);
-      };
-
+      es.onopen = () => { retryDelay = 1000; setSseOk(true); };
       es.addEventListener('new_message', (e: MessageEvent) => {
         try {
           const { message } = JSON.parse(e.data) as { message: Msg };
           if (message.orderId !== orderId) return;
           mergeMessage(message);
-        } catch { /* malformed event */ }
+        } catch { /* malformed */ }
       });
-
       es.onerror = () => {
-        es?.close();
-        setSseOk(false);
+        es?.close(); setSseOk(false);
         if (destroyed) return;
-        retryTimer = setTimeout(() => {
-          retryDelay = Math.min(retryDelay * 2, 16_000);
-          connect();
-        }, retryDelay);
+        retryTimer = setTimeout(() => { retryDelay = Math.min(retryDelay * 2, 16_000); connect(); }, retryDelay);
       };
     };
 
     connect();
-    return () => {
-      destroyed = true;
-      if (retryTimer) clearTimeout(retryTimer);
-      es?.close();
-    };
+    return () => { destroyed = true; if (retryTimer) clearTimeout(retryTimer); es?.close(); };
   }, [orderId, mergeMessage]);
 
-  // ── Auto-scroll to bottom on new messages ─────────────────────────────────
+  // ── Auto-scroll ───────────────────────────────────────────────────────────
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
@@ -221,14 +177,11 @@ export function ChatOverlay({ orderId, driverPhone, onClose, onSystemMsg }: Chat
     setSending(true);
     try {
       const res = await fetch(MSG_PATH(orderId), {
-        method:  'POST',
+        method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ senderRole: 'customer', content: text }),
+        body: JSON.stringify({ senderRole: 'customer', content: text }),
       });
-      if (res.ok) {
-        setInput('');
-        fetchMessages();
-      }
+      if (res.ok) { setInput(''); fetchMessages(); }
     } catch { /* silent */ }
     finally { setSending(false); }
   }, [input, sending, orderId, fetchMessages]);
@@ -239,7 +192,6 @@ export function ChatOverlay({ orderId, driverPhone, onClose, onSystemMsg }: Chat
 
   return (
     <>
-      {/* Keyframes injected once */}
       <style>{`
         @keyframes sys-scan {
           0%   { transform: translateX(-100%); }
@@ -262,20 +214,19 @@ export function ChatOverlay({ orderId, driverPhone, onClose, onSystemMsg }: Chat
         maxHeight: '420px',
         direction: 'rtl',
       }}>
+
         {/* ── Header ── */}
         <div style={{
           padding: '10px 14px', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
           borderBottom: '1px solid rgba(123,47,247,0.2)',
-          background: 'rgba(123,47,247,0.08)',
-          flexShrink: 0,
+          background: 'rgba(123,47,247,0.08)', flexShrink: 0,
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
             <div style={{
               width: '8px', height: '8px', borderRadius: '50%',
               background: sseOk ? '#00f5d4' : '#f5c518',
               boxShadow: sseOk ? '0 0 8px #00f5d4' : '0 0 8px #f5c518',
-              animation: 'lf-ping 2s cubic-bezier(0,0,0.2,1) infinite',
-              flexShrink: 0,
+              animation: 'lf-ping 2s cubic-bezier(0,0,0.2,1) infinite', flexShrink: 0,
             }} />
             <div>
               <div style={{ fontFamily: 'Orbitron,sans-serif', fontSize: '9px', color: '#7b2ff7', letterSpacing: '0.18em' }}>
@@ -288,30 +239,20 @@ export function ChatOverlay({ orderId, driverPhone, onClose, onSystemMsg }: Chat
           </div>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+            {/* Call button */}
             {driverPhone && (
               <a
                 href={`tel:${driverPhone}`}
                 title={`اتصل بالسائق: ${driverPhone}`}
                 style={{
-                  display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-                  gap: '4px',
-                  background: 'rgba(0,245,212,0.12)',
-                  border: '1px solid rgba(0,245,212,0.5)',
-                  color: '#00f5d4',
-                  fontFamily: 'Orbitron,sans-serif', fontSize: '8px', letterSpacing: '0.1em',
-                  padding: '4px 9px',
-                  textDecoration: 'none',
-                  cursor: 'pointer',
-                  transition: 'all 0.2s',
+                  display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: '4px',
+                  background: 'rgba(0,245,212,0.12)', border: '1px solid rgba(0,245,212,0.5)',
+                  color: '#00f5d4', fontFamily: 'Orbitron,sans-serif', fontSize: '8px',
+                  letterSpacing: '0.1em', padding: '4px 9px', textDecoration: 'none',
+                  cursor: 'pointer', transition: 'all 0.2s',
                 }}
-                onMouseEnter={e => {
-                  (e.currentTarget as HTMLElement).style.background = 'rgba(0,245,212,0.22)';
-                  (e.currentTarget as HTMLElement).style.boxShadow = '0 0 12px rgba(0,245,212,0.3)';
-                }}
-                onMouseLeave={e => {
-                  (e.currentTarget as HTMLElement).style.background = 'rgba(0,245,212,0.12)';
-                  (e.currentTarget as HTMLElement).style.boxShadow = 'none';
-                }}
+                onMouseEnter={e => { (e.currentTarget as HTMLElement).style.background = 'rgba(0,245,212,0.22)'; (e.currentTarget as HTMLElement).style.boxShadow = '0 0 12px rgba(0,245,212,0.3)'; }}
+                onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = 'rgba(0,245,212,0.12)'; (e.currentTarget as HTMLElement).style.boxShadow = 'none'; }}
               >
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07A19.5 19.5 0 0 1 4.69 13a19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 3.6 2h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L7.91 9.91a16 16 0 0 0 6.08 6.08l1.48-.93a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92z"/>
@@ -319,25 +260,73 @@ export function ChatOverlay({ orderId, driverPhone, onClose, onSystemMsg }: Chat
                 اتصال
               </a>
             )}
+
+            {/* Minimize button (−) — hides overlay, session stays alive */}
             <button
-              onClick={onClose}
+              onClick={onMinimize}
+              title="تصغير الدردشة"
+              style={{
+                background: 'none', border: '1px solid rgba(123,47,247,0.4)',
+                color: 'rgba(180,150,255,0.9)', fontFamily: 'Orbitron,sans-serif',
+                fontSize: '14px', lineHeight: 1, padding: '3px 9px',
+                cursor: 'pointer', transition: 'all 0.2s',
+              }}
+              onMouseEnter={e => { (e.currentTarget as HTMLElement).style.background = 'rgba(123,47,247,0.15)'; }}
+              onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = 'none'; }}
+            >−</button>
+
+            {/* Delete button (trash) — opens confirm banner */}
+            <button
+              onClick={() => setConfirmDelete(true)}
+              title="حذف المحادثة نهائياً"
               style={{
                 background: 'none', border: '1px solid rgba(255,45,120,0.3)',
                 color: 'rgba(255,45,120,0.7)', fontFamily: 'Orbitron,sans-serif',
-                fontSize: '8px', letterSpacing: '0.1em', padding: '4px 8px',
+                fontSize: '9px', letterSpacing: '0.08em', padding: '4px 8px',
                 cursor: 'pointer', transition: 'all 0.2s',
               }}
               onMouseEnter={e => { (e.currentTarget as HTMLElement).style.background = 'rgba(255,45,120,0.12)'; (e.currentTarget as HTMLElement).style.color = '#ff2d78'; }}
               onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = 'none'; (e.currentTarget as HTMLElement).style.color = 'rgba(255,45,120,0.7)'; }}
-            >إغلاق</button>
+            >🗑</button>
           </div>
         </div>
+
+        {/* ── Delete Confirmation Banner ── */}
+        {confirmDelete && (
+          <div style={{
+            padding: '10px 14px', flexShrink: 0,
+            background: 'rgba(255,45,120,0.1)',
+            borderBottom: '1px solid rgba(255,45,120,0.35)',
+            display: 'flex', alignItems: 'center', gap: '10px', direction: 'rtl',
+          }}>
+            <span style={{ fontFamily: 'Rajdhani,sans-serif', fontSize: '13px', color: '#ffa0c0', flex: 1 }}>
+              إنهاء الجلسة نهائياً؟ لن تتمكن من استعادة المحادثة.
+            </span>
+            <button
+              onClick={onDeleteChat}
+              style={{
+                padding: '5px 12px', background: 'rgba(255,45,120,0.2)',
+                border: '1px solid #ff2d78', color: '#ff2d78',
+                fontFamily: 'Orbitron,sans-serif', fontSize: '8px',
+                letterSpacing: '0.1em', cursor: 'pointer',
+              }}
+            >تأكيد</button>
+            <button
+              onClick={() => setConfirmDelete(false)}
+              style={{
+                padding: '5px 10px', background: 'none',
+                border: '1px solid rgba(255,255,255,0.15)', color: 'rgba(255,255,255,0.5)',
+                fontFamily: 'Orbitron,sans-serif', fontSize: '8px',
+                letterSpacing: '0.1em', cursor: 'pointer',
+              }}
+            >إلغاء</button>
+          </div>
+        )}
 
         {/* ── Messages list ── */}
         <div style={{
           flex: 1, overflowY: 'auto', padding: '12px 14px',
-          display: 'flex', flexDirection: 'column', gap: '8px',
-          minHeight: '160px',
+          display: 'flex', flexDirection: 'column', gap: '8px', minHeight: '160px',
         }}>
           {messages.length === 0 && (
             <div style={{
@@ -349,46 +338,24 @@ export function ChatOverlay({ orderId, driverPhone, onClose, onSystemMsg }: Chat
             </div>
           )}
           {messages.map(msg => {
-            // ── System message ─────────────────────────────────────────────
-            if (msg.isSystemMsg) {
-              return <SystemAlertBubble key={msg.id} msg={msg} />;
-            }
-
-            // ── Regular message ────────────────────────────────────────────
+            if (msg.isSystemMsg) return <SystemAlertBubble key={msg.id} msg={msg} />;
             const isCustomer = msg.senderRole === 'customer';
             return (
-              <div key={msg.id} style={{
-                display: 'flex',
-                justifyContent: isCustomer ? 'flex-start' : 'flex-end',
-              }}>
+              <div key={msg.id} style={{ display: 'flex', justifyContent: isCustomer ? 'flex-start' : 'flex-end' }}>
                 <div style={{
                   maxWidth: '78%',
-                  background: isCustomer
-                    ? 'rgba(123,47,247,0.15)'
-                    : 'rgba(0,212,255,0.1)',
+                  background: isCustomer ? 'rgba(123,47,247,0.15)' : 'rgba(0,212,255,0.1)',
                   border: `1px solid ${isCustomer ? 'rgba(123,47,247,0.4)' : 'rgba(0,212,255,0.35)'}`,
                   padding: '7px 11px',
-                  boxShadow: isCustomer
-                    ? '0 0 12px rgba(123,47,247,0.15)'
-                    : '0 0 12px rgba(0,212,255,0.1)',
+                  boxShadow: isCustomer ? '0 0 12px rgba(123,47,247,0.15)' : '0 0 12px rgba(0,212,255,0.1)',
                 }}>
-                  <div style={{
-                    fontFamily: 'Orbitron,sans-serif', fontSize: '7px',
-                    color: isCustomer ? 'rgba(123,47,247,0.7)' : 'rgba(0,212,255,0.7)',
-                    letterSpacing: '0.12em', marginBottom: '4px',
-                  }}>
+                  <div style={{ fontFamily: 'Orbitron,sans-serif', fontSize: '7px', color: isCustomer ? 'rgba(123,47,247,0.7)' : 'rgba(0,212,255,0.7)', letterSpacing: '0.12em', marginBottom: '4px' }}>
                     {isCustomer ? 'أنت' : '🚕 السائق'}
                   </div>
-                  <div style={{
-                    fontFamily: 'Rajdhani,sans-serif', fontSize: '14px',
-                    color: '#e8f8f5', lineHeight: 1.4, wordBreak: 'break-word',
-                  }}>
+                  <div style={{ fontFamily: 'Rajdhani,sans-serif', fontSize: '14px', color: '#e8f8f5', lineHeight: 1.4, wordBreak: 'break-word' }}>
                     {msg.content}
                   </div>
-                  <div style={{
-                    fontFamily: 'Rajdhani,sans-serif', fontSize: '10px',
-                    color: 'rgba(255,255,255,0.25)', marginTop: '4px', textAlign: 'left',
-                  }}>
+                  <div style={{ fontFamily: 'Rajdhani,sans-serif', fontSize: '10px', color: 'rgba(255,255,255,0.25)', marginTop: '4px', textAlign: 'left' }}>
                     {new Date(msg.createdAt).toLocaleTimeString('ar-IQ', { hour: '2-digit', minute: '2-digit' })}
                   </div>
                 </div>
@@ -413,12 +380,9 @@ export function ChatOverlay({ orderId, driverPhone, onClose, onSystemMsg }: Chat
             disabled={sending}
             style={{
               flex: 1,
-              background: 'rgba(123,47,247,0.08)',
-              border: '1px solid rgba(123,47,247,0.3)',
-              color: '#e8f8f5',
-              fontFamily: 'Rajdhani,sans-serif', fontSize: '14px',
-              padding: '8px 11px', outline: 'none',
-              transition: 'border-color 0.2s',
+              background: 'rgba(123,47,247,0.08)', border: '1px solid rgba(123,47,247,0.3)',
+              color: '#e8f8f5', fontFamily: 'Rajdhani,sans-serif', fontSize: '14px',
+              padding: '8px 11px', outline: 'none', transition: 'border-color 0.2s',
             }}
             onFocus={e => (e.currentTarget.style.borderColor = '#7b2ff7')}
             onBlur={e => (e.currentTarget.style.borderColor = 'rgba(123,47,247,0.3)')}
@@ -429,8 +393,7 @@ export function ChatOverlay({ orderId, driverPhone, onClose, onSystemMsg }: Chat
             style={{
               padding: '8px 14px',
               background: (!input.trim() || sending) ? 'rgba(123,47,247,0.05)' : 'rgba(123,47,247,0.2)',
-              border: '1px solid #7b2ff7',
-              color: '#c77dff',
+              border: '1px solid #7b2ff7', color: '#c77dff',
               fontFamily: 'Orbitron,sans-serif', fontSize: '9px', letterSpacing: '0.1em',
               cursor: (!input.trim() || sending) ? 'not-allowed' : 'pointer',
               transition: 'all 0.2s', flexShrink: 0,

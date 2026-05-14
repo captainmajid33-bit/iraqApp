@@ -785,6 +785,7 @@ export function ClinicMap({
     const style=document.createElement('style');
     style.textContent=`
       @keyframes lf-ping{75%,100%{transform:scale(2.5);opacity:0;}}
+      @keyframes lf-ping-subtle{0%,100%{box-shadow:0 0 22px rgba(123,47,247,0.55),0 0 8px rgba(123,47,247,0.3);}50%{box-shadow:0 0 36px rgba(123,47,247,0.85),0 0 16px rgba(123,47,247,0.5);}}
       @keyframes lf-spin{to{transform:rotate(360deg);}}
       @keyframes mission-pulse{0%,100%{transform:scale(1);opacity:1;}50%{transform:scale(1.15);opacity:0.8;}}
       @keyframes traffic-flow{0%{stroke-dashoffset:30;}100%{stroke-dashoffset:0;}}
@@ -2668,15 +2669,40 @@ export function ClinicMap({
         </div>
       )}
 
+      {/* ── Floating Chat Icon (shown when chat is minimized and trip is active) ── */}
+      {activeOrderId && !showChat && ['pending','accepted','driving'].includes(activeOrderStatus) && (
+        <button
+          onClick={()=> setShowChat(true)}
+          title="فتح الدردشة"
+          style={{
+            position:'absolute', bottom:'90px', left:'16px', zIndex:4001,
+            width:'54px', height:'54px', borderRadius:'50%',
+            background:'rgba(5,8,15,0.97)',
+            border:'2px solid #7b2ff7',
+            boxShadow:'0 0 22px rgba(123,47,247,0.55), 0 0 8px rgba(123,47,247,0.3)',
+            cursor:'pointer', display:'flex', flexDirection:'column',
+            alignItems:'center', justifyContent:'center', gap:'1px',
+            animation:'lf-ping-subtle 2.5s cubic-bezier(0,0,0.2,1) infinite',
+            padding:0,
+          }}
+        >
+          <span style={{fontSize:'22px', lineHeight:1}}>💬</span>
+          <span style={{
+            fontFamily:'Orbitron,sans-serif', fontSize:'6px',
+            color:'#c77dff', letterSpacing:'0.05em',
+          }}>CHAT</span>
+        </button>
+      )}
+
       {/* ── Chat Overlay ── */}
       {showChat && activeOrderId && activeOrderStatus !== 'done' && activeOrderStatus !== 'finished' && activeOrderStatus !== 'cancelled' && (
         <ChatOverlay
           orderId={activeOrderId}
           driverPhone={activeDriverPhone}
-          onClose={()=>setShowChat(false)}
+          onMinimize={()=> setShowChat(false)}
+          onDeleteChat={()=>{ setShowChat(false); stopOrderTracking(); }}
           onSystemMsg={(content)=>{
             if (!showChat) {
-              // Chat is closed — show snackbar
               if (sysMsgTimerRef.current) clearTimeout(sysMsgTimerRef.current);
               setSysMsgSnack(content);
               sysMsgTimerRef.current = setTimeout(()=> setSysMsgSnack(null), 7000);
