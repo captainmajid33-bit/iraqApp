@@ -1,7 +1,7 @@
 import { Router, type IRouter } from "express";
 import { db } from "@workspace/db";
 import { ordersTable, insertOrderSchema, locationsTable, driversOnlineTable, messagesTable, insertMessageSchema } from "@workspace/db";
-import { eq, desc, asc } from "drizzle-orm";
+import { eq, desc, asc, inArray, and, ne } from "drizzle-orm";
 import { requireAdmin } from "./admin";
 import { broadcastOrderUpdate, broadcastDriverUpdate, broadcastNewMessage } from "../lib/sse";
 
@@ -67,6 +67,25 @@ router.post("/orders", async (req, res) => {
     }
 
     const driverLabel = loc?.name ?? onlineRow?.driverName ?? `driver#${locationId}`;
+
+    // ── Auto-cancel stale pending/accepted orders for this driver ─────────────
+    // Prevents the partner app from seeing old ghost orders and showing "في رحلة"
+    // when a new order arrives. Any order that wasn't properly closed gets cancelled here.
+    const stale = await db
+      .update(ordersTable)
+      .set({ status: 'cancelled' })
+      .where(and(
+        eq(ordersTable.locationId, locationId),
+        inArray(ordersTable.status, ['pending', 'accepted', 'driving']),
+      ))
+      .returning({ id: ordersTable.id, locationId: ordersTable.locationId });
+
+    for (const s of stale) {
+      broadcastOrderUpdate({ id: s.id, status: 'cancelled', locationId: s.locationId });
+      console.log(`[POST /orders] auto-cancelled stale order #${s.id} for driver ${locationId}`);
+    }
+    // Also ensure driver is not stuck as busy before new order
+    await setDriverBusy(locationId, false);
 
     // ── Insert order ──────────────────────────────────────────────────────────
     const [order] = await db
