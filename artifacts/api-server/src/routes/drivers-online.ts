@@ -1,7 +1,7 @@
 import { Router, type IRouter } from "express";
 import { db } from "@workspace/db";
 import { driversOnlineTable, locationsTable } from "@workspace/db";
-import { eq, and } from "drizzle-orm";
+import { eq, and, or } from "drizzle-orm";
 import { broadcastDriverUpdate } from "../lib/sse";
 
 const router: IRouter = Router();
@@ -40,7 +40,11 @@ router.get("/drivers-online", async (_req, res) => {
         and(
           eq(driversOnlineTable.isOnline, true),
           eq(driversOnlineTable.isBusy,   false),
-          eq(locationsTable.status,        "مفتوح"),
+          // Accept both Arabic "مفتوح" and English "open" — partner app may send either
+          or(
+            eq(locationsTable.status, "مفتوح"),
+            eq(locationsTable.status, "open"),
+          ),
         )
       );
 

@@ -532,10 +532,11 @@ export function ClinicMap({
   const [taxiAutoSearching, setTaxiAutoSearching] = useState(false);
   const [taxiNoDriverSnack, setTaxiNoDriverSnack] = useState(false);
   const [taxiFoundSnack,    setTaxiFoundSnack]    = useState<string|null>(null); // driver name when found
+  const [taxiAutoConnect,   setTaxiAutoConnect]   = useState(false); // true → auto-submit when route ready
   const prevDriverPosRef    = useRef<{lat:number;lng:number}|null>(null);
 
   // ── Online drivers (all open taxis visible on map) ────────────────────────
-  type OnlineDriver = { id:number; locationId:number; driverName:string; phone:string; lat:number; lng:number; isOnline:boolean };
+  type OnlineDriver = { id:number; locationId:number; driverName:string; phone:string; lat:number; lng:number; isOnline:boolean; updatedAt?:string|null };
   const onlineDriverMarkersRef = useRef<Map<number, L.Marker>>(new Map());
 
   // Leaflet object refs for taxi routing visuals
@@ -1012,6 +1013,7 @@ export function ClinicMap({
     setTaxiDistKm(null);     setTaxiEstPrice(null);
     setTaxiError(null);      setTaxiSuccess(false);
     setTaxiDestName('');     setTaxiFromPlaced(false);
+    setTaxiAutoConnect(false);
     taxiStepRef.current   = 'idle';
     poiMarkersRef.current.forEach(m=>m.remove());
     poiMarkersRef.current = [];
@@ -1043,6 +1045,7 @@ export function ClinicMap({
     setTaxiError(null);      setTaxiSuccess(false);
     setTaxiDestName('');     setTaxiFromPlaced(false);
     setTaxiFoundSnack(null); setTaxiNoDriverSnack(false);
+    setTaxiAutoConnect(false);
     taxiStepRef.current   = 'idle';
     taxiFromPtRef.current = null;
     if (mapRef.current) mapRef.current.getContainer().style.cursor = '';
@@ -1059,11 +1062,23 @@ export function ClinicMap({
         const res     = await fetch('/api/drivers-online');
         const drivers: OnlineDriver[] = await res.json();
 
-        const MAX_KM  = 10;
-        const nearby  = drivers
-          .map(d => ({ ...d, distKm: haversineDist(loc.lat, loc.lng, d.lat, d.lng) }))
-          .filter(d  => d.distKm <= MAX_KM)
-          .sort((a, b) => a.distKm - b.distKm);
+        // ── Timestamp filter: only drivers active in last 5 minutes ──────────
+        const FIVE_MIN = 5 * 60 * 1000;
+        const now      = Date.now();
+        const fresh    = drivers.filter(d => {
+          if (!d.updatedAt) return true; // no timestamp → assume fresh (old client)
+          return (now - new Date(d.updatedAt).getTime()) < FIVE_MIN;
+        });
+
+        // ── Progressive radius: try 5 km → 10 km → 20 km ────────────────────
+        const withDist = fresh.map(d => ({ ...d, distKm: haversineDist(loc.lat, loc.lng, d.lat, d.lng) }));
+        const findNearest = (maxKm: number) =>
+          withDist.filter(d => d.distKm <= maxKm).sort((a,b) => a.distKm - b.distKm);
+
+        const nearby =
+          findNearest(5).length  > 0 ? findNearest(5)  :
+          findNearest(10).length > 0 ? findNearest(10) :
+          findNearest(20);
 
         setTaxiAutoSearching(false);
 
@@ -1124,6 +1139,9 @@ export function ClinicMap({
         // ── Jump directly to destination selection (skip pick-from) ──────────
         setTaxiStep('pick-to');
         taxiStepRef.current = 'pick-to';
+
+        // ── Activate auto-connect: submit order automatically when route ready ─
+        setTaxiAutoConnect(true);
 
         // ── Show "found" banner ───────────────────────────────────────────────
         setTaxiFoundSnack(nearest.driverName);
@@ -1533,6 +1551,23 @@ export function ClinicMap({
       setTaxiLoading(false);
     }
   },[taxiDriverItem, taxiFromPt, taxiToPt, taxiUserName, taxiUserPhone, taxiEstPrice, closeTaxiRouting]);
+
+  // ── Auto-connect: submit order automatically once route is drawn ──────────
+  // Fires when: auto-search found a driver (taxiAutoConnect=true)
+  //             AND user tapped destination (taxiStep='confirm')
+  //             AND OSRM route finished loading (!taxiRouteLoading)
+  //             AND we have user credentials from localStorage
+  useEffect(()=>{
+    if (!taxiAutoConnect) return;
+    if (taxiStep !== 'confirm') return;
+    if (taxiRouteLoading) return;
+    if (!taxiToPt) return;
+    // Only auto-submit if user info is available from localStorage
+    if (!taxiUserName.trim() || !taxiUserPhone.trim()) return;
+    // Short delay so the route line is visible before submission
+    const t = setTimeout(()=> submitTaxiOrder(), 400);
+    return ()=> clearTimeout(t);
+  },[taxiAutoConnect, taxiStep, taxiRouteLoading, taxiToPt, taxiUserName, taxiUserPhone, submitTaxiOrder]);
 
   // Sync markers whenever items / activeFilter / selectedItem changes
   useEffect(()=>{
