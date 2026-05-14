@@ -533,6 +533,8 @@ export function ClinicMap({
   const loopUserPhoneRef   = useRef<string>('');
   const loopEstPriceRef    = useRef<number>(0);
   const redirectToNextRef  = useRef<()=>Promise<void>>(async()=>{});   // stable pointer, updated after def
+  const [loopCurrentDriverDist, setLoopCurrentDriverDist] = useState<number|null>(null); // km to the driver currently being tried
+  const loopInitDistRef    = useRef<number|null>(null);   // distance to first auto-found driver
 
   const activeOrderIdRef    = useRef<number|null>(null);
   const activeOrderStatusRef= useRef<string>('pending');            // mirrors activeOrderStatus for DOM handlers
@@ -550,7 +552,7 @@ export function ClinicMap({
   const prevDriverPosRef    = useRef<{lat:number;lng:number}|null>(null);
 
   // ── Online drivers (all open taxis visible on map) ────────────────────────
-  type OnlineDriver = { id:number; locationId:number; driverName:string; phone:string; lat:number; lng:number; isOnline:boolean; updatedAt?:string|null };
+  type OnlineDriver = { id:number; locationId:number; driverName:string; phone:string; lat:number; lng:number; isOnline:boolean; isBusy?:boolean; updatedAt?:string|null };
   const onlineDriverMarkersRef = useRef<Map<number, L.Marker>>(new Map());
 
   // Leaflet object refs for taxi routing visuals
@@ -1114,6 +1116,7 @@ export function ClinicMap({
         }
 
         const nearest = nearby[0];
+        loopInitDistRef.current = nearest.distKm; // saved for loop start in submitTaxiOrder
 
         // ── Construct a synthetic MapItem from the driver record ─────────────
         const synthetic: MapItem = {
@@ -1264,7 +1267,7 @@ export function ClinicMap({
     activeOrderStatusRef.current = 'pending';
     localStorage.removeItem('diyala_active_order');
     // Clear the search loop
-    setLoopActive(false); setLoopCountdown(null); setLoopCurrentDriver('');
+    setLoopActive(false); setLoopCountdown(null); setLoopCurrentDriver(''); setLoopCurrentDriverDist(null);
     loopIgnoredRef.current.clear();
     loopFromPtRef.current = null; loopToPtRef.current = null;
   },[]);
@@ -1584,6 +1587,7 @@ export function ClinicMap({
           loopIgnoredRef.current.clear();
           loopIgnoredRef.current.add(taxiDriverItem.id);
           setLoopCurrentDriver(taxiDriverItem.name);
+          setLoopCurrentDriverDist(loopInitDistRef.current); // dist saved by autoFindDriver (null if manual pick)
           setLoopActive(true);
           setLoopCountdown(120);
         }
@@ -1633,31 +1637,28 @@ export function ClinicMap({
     if (!loc) { stopOrderTracking(); return; }
 
     try {
+      // API already filters isOnline=true & isBusy=false & status='open' at DB level
       const res     = await fetch('/api/drivers-online');
-      const drivers: { id:number; locationId:number; driverName:string; phone:string; lat:number; lng:number; updatedAt?:string|null }[] = await res.json();
+      const drivers: OnlineDriver[] = await res.json();
 
-      const FIVE_MIN = 5 * 60 * 1000;
-      const now      = Date.now();
-      const fresh = drivers.filter(d => {
-        if (!d.updatedAt) return true;
-        return (now - new Date(d.updatedAt).getTime()) < FIVE_MIN;
-      }).filter(d => !loopIgnoredRef.current.has(d.locationId));
+      // Exclude already-tried drivers, then sort ALL remaining by distance (ascending)
+      const available = drivers
+        .filter(d => !loopIgnoredRef.current.has(d.locationId))
+        .map(d => ({ ...d, distKm: haversineDist(loc.lat, loc.lng, d.lat, d.lng) }))
+        .sort((a, b) => a.distKm - b.distKm);
 
-      const withDist = fresh.map(d => ({ ...d, distKm: haversineDist(loc.lat, loc.lng, d.lat, d.lng) }));
-      const findNearest = (maxKm:number) => withDist.filter(d=>d.distKm<=maxKm).sort((a,b)=>a.distKm-b.distKm);
-      const nearby = findNearest(5).length>0 ? findNearest(5) : findNearest(10).length>0 ? findNearest(10) : findNearest(20);
-
-      if (nearby.length === 0) {
-        // All nearby drivers tried — give up
-        setLoopActive(false); setLoopCountdown(null); setLoopCurrentDriver('');
+      if (available.length === 0) {
+        // All available drivers tried — give up
+        setLoopActive(false); setLoopCountdown(null); setLoopCurrentDriver(''); setLoopCurrentDriverDist(null);
         setTaxiNoDriverSnack(true);
         setTimeout(()=> setTaxiNoDriverSnack(false), 7000);
         stopOrderTracking();
         return;
       }
 
-      const next = nearby[0];
+      const next = available[0]; // nearest uncontacted driver
       setLoopCurrentDriver(next.driverName);
+      setLoopCurrentDriverDist(next.distKm);
 
       // 4. POST new order to next driver
       const fromPt = loopFromPtRef.current!;
@@ -2594,7 +2595,7 @@ export function ClinicMap({
               </div>
               <div style={{fontFamily:'Rajdhani,sans-serif',fontSize:'15px',fontWeight:700,color:'#e8f8f5',lineHeight:1.2}}>
                 {activeOrderStatus==='pending' && loopActive
-                  ? `🔍 نبحث عن أفضل سائق... ${loopCurrentDriver ? `(${loopCurrentDriver})` : ''}`
+                  ? `جاري الاتصال بأقرب سائق متاح...`
                   : activeOrderStatus==='pending'   ? 'في انتظار قبول السائق...'
                   : activeOrderStatus==='accepted'  ? '🚕 السائق في الطريق إليك'
                   : activeOrderStatus==='driving'   ? '🚕 السائق في الطريق إليك'
@@ -2625,11 +2626,22 @@ export function ClinicMap({
                     </div>
                   </div>
                   <div style={{flex:1,minWidth:0}}>
+                    {/* Driver name + distance */}
+                    {loopCurrentDriver && (
+                      <div style={{fontFamily:'Rajdhani,sans-serif',fontSize:'13px',fontWeight:700,color:'#00d4ff',lineHeight:1.2,marginBottom:'2px'}}>
+                        🚕 {loopCurrentDriver}
+                        {loopCurrentDriverDist !== null && (
+                          <span style={{fontWeight:400,fontSize:'11px',color:'rgba(0,212,255,0.7)',marginRight:'6px'}}>
+                            {' '}· {loopCurrentDriverDist.toFixed(2)} كم
+                          </span>
+                        )}
+                      </div>
+                    )}
                     <div style={{fontFamily:'Rajdhani,sans-serif',fontSize:'11px',color:'rgba(245,197,24,0.7)',lineHeight:1.3}}>
                       سيتم الانتقال للسائق التالي إذا لم يستجب
                     </div>
                     <div style={{fontFamily:'Orbitron,sans-serif',fontSize:'7px',color:'rgba(255,255,255,0.3)',letterSpacing:'0.1em',marginTop:'2px'}}>
-                      DRIVER SEARCH LOOP · ATTEMPT #{loopIgnoredRef.current.size}
+                      DRIVER SEARCH LOOP · ATTEMPT #{loopIgnoredRef.current.size} OF {loopIgnoredRef.current.size + 1}+
                     </div>
                   </div>
                 </div>
