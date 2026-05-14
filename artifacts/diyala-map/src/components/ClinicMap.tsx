@@ -255,6 +255,7 @@ export function ClinicMap({
   const routeLineRef     = useRef<L.Polyline|null>(null);
   const poiRouteGlowRef  = useRef<L.Polyline|null>(null);
   const poiRouteLineRef  = useRef<L.Polyline|null>(null);
+  const fetchPOIsImmRef  = useRef<(()=>void)|null>(null); // immediate POI fetch trigger
   const catStyleRef    = useRef<HTMLStyleElement|null>(null);
   const poiLayerRef    = useRef<L.LayerGroup|null>(null);
   // User location tracking
@@ -910,33 +911,33 @@ export function ClinicMap({
       .addTo(mapRef.current)
       .bindPopup(L.popup({className:'map-popup mission-popup',closeButton:false,autoPan:true,offset:[0,-10]}).setContent(missionEl));
 
-    // ── OSM Global POI overlay (double-buffered, debounced — zero flicker) ───
-    // Two layer groups: one visible, one being built. Swap atomically.
+    // ── OSM Global POI overlay — sticky accumulation (markers never clear on pan/zoom) ───
     const poiLayerA = L.layerGroup().addTo(mapRef.current);
-    const poiLayerB = L.layerGroup();
-    let activePoi   = poiLayerA as L.LayerGroup;
-    poiLayerRef.current = activePoi;
+    poiLayerRef.current = poiLayerA;
+
+    // Persistent dedup state — survives panning/zooming for the whole session
+    const placedPoiIds   = new Set<number>();                        // OSM node IDs
+    const placedPositions: { lat: number; lon: number }[] = [];     // collision grid
 
     // POI route lines — stored in component refs so cancel button can reach them
     let poiAbort: AbortController|null = null;
     let lastBoundsKey = '';
     let poiTimer: ReturnType<typeof setTimeout>|null = null;
 
-    // Build markers into a target layer — zoom-filtered, collision-pruned, 30% smaller icons
-    const buildPoiMarkers = (elements: any[], target: L.LayerGroup, zoom: number) => {
+    // Build markers — adds only NEW (unseen) elements; never clears existing ones
+    const buildPoiMarkers = (elements: any[], zoom: number) => {
       // Priority threshold based on zoom
       const maxPriority = zoom >= 16 ? 3 : zoom >= 14 ? 2 : 1;
 
-      // Collision grid: min distance in degrees between two markers
-      // (proportional to zoom level so nearby icons don't pile up)
+      // Collision grid min-distance scales with zoom
       const minDistDeg = zoom >= 16 ? 0.0006 : zoom >= 14 ? 0.0018 : 0.004;
-      const placed: { lat: number; lon: number }[] = [];
 
       const tooClose = (lat: number, lon: number): boolean =>
-        placed.some(p => Math.abs(p.lat - lat) < minDistDeg && Math.abs(p.lon - lon) < minDistDeg);
+        placedPositions.some(p => Math.abs(p.lat - lat) < minDistDeg && Math.abs(p.lon - lon) < minDistDeg);
 
       elements.slice(0, 400).forEach((el: any) => {
-        if (typeof el.lat !== 'number') return;
+        if (typeof el.lat !== 'number' || !el.id) return;
+        if (placedPoiIds.has(el.id as number)) return;   // already on map — skip
         const amenityKey = el.tags?.amenity ?? el.tags?.leisure ?? '';
         const priority = getAmenityPriority(amenityKey);
         if (priority > maxPriority) return;              // zoom-based density filter
@@ -946,7 +947,8 @@ export function ClinicMap({
         const name = (el.tags?.['name:ar'] ?? el.tags?.name ?? '').trim();
         if (!name) return;
 
-        placed.push({ lat: el.lat, lon: el.lon });
+        placedPoiIds.add(el.id as number);
+        placedPositions.push({ lat: el.lat, lon: el.lon });
 
         const marker = L.marker([el.lat, el.lon], {
           icon: L.divIcon({
@@ -1019,18 +1021,17 @@ export function ClinicMap({
             .setLatLng([el.lat, el.lon]).setContent(popupEl).openOn(map);
         });
 
-        marker.addTo(target);
+        marker.addTo(poiLayerA);
       });
     };
 
-    // Actual fetch + atomic swap
+    // Actual fetch — merges new markers into the sticky layer (never clears)
     const doFetchPOIs = async () => {
       const map = mapRef.current; if (!map) return;
       const zoom = map.getZoom();
-      if (zoom < 12) return; // keep last set visible below threshold
+      if (zoom < 12) return;
 
       const b   = map.getBounds();
-      // Coarser key (2dp ≈ 1 km) so tiny pans don't re-fetch
       const key = `${b.getSouth().toFixed(2)},${b.getWest().toFixed(2)},${b.getNorth().toFixed(2)},${b.getEast().toFixed(2)}`;
       if (key === lastBoundsKey) return;
       lastBoundsKey = key;
@@ -1049,33 +1050,28 @@ export function ClinicMap({
         if (!res.ok) return;
         const data = await res.json();
         if (!mapRef.current) return;
-
-        // Build into the INACTIVE layer first (zero flash)
-        const buildLayer = activePoi === poiLayerA ? poiLayerB : poiLayerA;
-        buildLayer.clearLayers();
-        buildPoiMarkers(data.elements ?? [], buildLayer, zoom);
-
-        // Atomic swap: add new → remove old
-        buildLayer.addTo(mapRef.current);
-        activePoi.remove();
-        activePoi = buildLayer;
-        poiLayerRef.current = activePoi;
+        // Merge new elements — only adds markers not already on map
+        buildPoiMarkers(data.elements ?? [], zoom);
       } catch (_) { /* aborted or network error — silent */ }
     };
 
-    // Debounced wrapper — 500 ms after last moveend/zoomend
+    // Expose immediate fetch so GPS button can call it without debounce
+    fetchPOIsImmRef.current = doFetchPOIs;
+
+    // Debounced wrapper — 400 ms after last moveend/zoomend
     const fetchPOIs = () => {
       if (poiTimer) clearTimeout(poiTimer);
-      poiTimer = setTimeout(doFetchPOIs, 500);
+      poiTimer = setTimeout(doFetchPOIs, 400);
     };
 
     mapRef.current.on('moveend zoomend', fetchPOIs);
-    setTimeout(fetchPOIs, 600);
+    // Fetch immediately on load (no delay — tiles load in parallel)
+    doFetchPOIs();
 
     return ()=>{
       poiAbort?.abort();
       if (poiTimer) clearTimeout(poiTimer);
-      poiLayerA.remove(); poiLayerB.remove(); poiLayerRef.current = null;
+      poiLayerA.remove(); poiLayerRef.current = null;
       poiRouteGlowRef.current?.remove(); poiRouteGlowRef.current = null;
       poiRouteLineRef.current?.remove(); poiRouteLineRef.current = null;
       missionMarkerRef.current?.remove(); missionMarkerRef.current=null;
@@ -2723,8 +2719,9 @@ export function ClinicMap({
         <button
           onClick={()=>{
             if (isTracking && userLocation) {
-              // Already tracking — re-center on user
+              // Re-center on user + trigger immediate POI fetch for new viewport
               mapRef.current?.flyTo([userLocation.lat, userLocation.lng], 16, {animate:true, duration:1.5});
+              setTimeout(()=>fetchPOIsImmRef.current?.(), 150);
             } else {
               locateUser();
             }
@@ -3865,24 +3862,6 @@ export function ClinicMap({
         </div>
       )}
 
-      {/* ── Legend ── */}
-      {categories.length > 0 && (
-        <div style={{position:'absolute',bottom:'96px',left:'92px',zIndex:1000,background:'rgba(5,8,15,0.88)',border:'1px solid rgba(255,255,255,0.07)',padding:'10px 14px',backdropFilter:'blur(10px)',minWidth:'150px'}}>
-          <div style={{fontFamily:'Orbitron,sans-serif',fontSize:'9px',color:'rgba(255,255,255,0.3)',letterSpacing:'0.15em',marginBottom:'8px'}}>LEGEND</div>
-          {categories.map(cat=>(
-            <div key={cat.slug} style={{display:'flex',alignItems:'center',gap:'8px',marginBottom:'5px',cursor:'pointer'}} onClick={()=>onFilterChange(cat.slug)}>
-              <div style={{width:'8px',height:'8px',borderRadius:'50%',background:cat.color,boxShadow:`0 0 6px ${cat.color}`,flexShrink:0}}/>
-              <span style={{fontFamily:'Rajdhani,sans-serif',fontSize:'12px',color:activeFilter===cat.slug?cat.color:'rgba(255,255,255,0.55)',transition:'color 0.2s'}}>
-                {cat.icon} {cat.labelAr}
-              </span>
-            </div>
-          ))}
-          <div style={{display:'flex',alignItems:'center',gap:'8px',marginTop:'6px',paddingTop:'6px',borderTop:'1px solid rgba(255,255,255,0.07)'}}>
-            <div style={{width:'8px',height:'8px',borderRadius:'50%',background:'#f5c518',boxShadow:'0 0 6px #f5c518',flexShrink:0}}/>
-            <span style={{fontFamily:'Rajdhani,sans-serif',fontSize:'12px',color:'rgba(255,255,255,0.45)'}}>موقعك / المسار</span>
-          </div>
-        </div>
-      )}
 
       {/* ══════════════════════════════════════════════════════════════════════
           ── Selected Place Panel (slides up above bottom bar) ─────────────
