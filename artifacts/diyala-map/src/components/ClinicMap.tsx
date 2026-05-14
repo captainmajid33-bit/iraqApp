@@ -1311,26 +1311,35 @@ export function ClinicMap({
       setLoopCurrentDriver(first.driverName);
       setLoopCurrentDriverDist(first.distKm);
 
-      // ── 2. Post order to nearest driver ─────────────────────────────────────
-      const { ok: oOk, status: oStatus, json: oData } = await safeFetch('/api/orders', {
-        method:  'POST',
-        headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({
-          locationId:     first.locationId,
-          userName:       name,
-          phone:          phone,
-          destination:    dest,
-          fromLat:        fromPt.lat,
-          fromLng:        fromPt.lng,
-          toLat:          toPt.lat,
-          toLng:          toPt.lng,
-          estimatedPrice: estPrice,
-          lat:            fromPt.lat,
-          lng:            fromPt.lng,
-        }),
+      // ── 2. Post order to nearest driver (retry up to 3 times on network error) ─
+      const orderBody = JSON.stringify({
+        locationId:     first.locationId,
+        userName:       name,
+        phone:          phone,
+        destination:    dest,
+        fromLat:        fromPt.lat,
+        fromLng:        fromPt.lng,
+        toLat:          toPt.lat,
+        toLng:          toPt.lng,
+        estimatedPrice: estPrice,
+        lat:            fromPt.lat,
+        lng:            fromPt.lng,
       });
-
-      console.log(`[dispatchTaxiNow] POST /api/orders → status=${oStatus}`, oData);
+      let oOk = false, oStatus = 0, oData: unknown = null;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const r = await safeFetch('/api/orders', {
+            method: 'POST', headers: {'Content-Type':'application/json'}, body: orderBody,
+          });
+          oOk = r.ok; oStatus = r.status; oData = r.json;
+          console.log(`[dispatchTaxiNow] POST attempt ${attempt+1} → status=${oStatus}`, oData);
+          if (oOk || oStatus === 400 || oStatus === 409) break; // success or definitive error
+        } catch (netErr) {
+          console.warn(`[dispatchTaxiNow] POST attempt ${attempt+1} network error:`, netErr);
+          oStatus = 0;
+        }
+        if (attempt < 2) await new Promise(r => setTimeout(r, 1500));
+      }
 
       if (oOk) {
         const orderId = (oData as any)?.orderId ?? null;
@@ -1353,9 +1362,15 @@ export function ClinicMap({
         // Driver busy or other — try next in loop
         redirectToNextRef.current();
       }
-    } catch (err) {
-      console.error('[dispatchTaxiNow] network/parse error:', err);
-      setTaxiQuickError('لا يوجد اتصال بالإنترنت أو السيرفر لا يستجيب');
+    } catch (err: any) {
+      console.error('[dispatchTaxiNow] error:', err?.name, err?.message, err);
+      const isNetworkError = err instanceof TypeError;
+      const detail = err?.message ? ` (${err.message})` : '';
+      setTaxiQuickError(
+        isNetworkError
+          ? `خطأ شبكة — تأكد من الاتصال وأعد المحاولة${detail}`
+          : `خطأ: ${err?.message ?? 'غير معروف'}`
+      );
       setShowTaxiQuickForm(true);
     } finally {
       setTaxiLoading(false);
