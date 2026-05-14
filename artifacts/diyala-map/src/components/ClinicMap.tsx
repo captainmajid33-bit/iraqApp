@@ -153,6 +153,32 @@ function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): nu
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
 }
 
+// ── Overpass / Taxi POI helpers ───────────────────────────────────────────────
+function getAmenityStyle(amenity: string): { emoji: string; color: string } {
+  if (/hospital|clinic|health/.test(amenity))       return { emoji:'🏥', color:'#ff2d78' };
+  if (/university|college|school|library/.test(amenity)) return { emoji:'🎓', color:'#00d4ff' };
+  if (/restaurant|fast_food|cafe|food_court/.test(amenity)) return { emoji:'🍽', color:'#00f5d4' };
+  if (/mosque|church|place_of_worship/.test(amenity)) return { emoji:'🕌', color:'#c77dff' };
+  if (/fuel|gas_station/.test(amenity))             return { emoji:'⛽', color:'#f5c518' };
+  if (/pharmacy|drugstore/.test(amenity))           return { emoji:'💊', color:'#00f5d4' };
+  if (/police|fire_station/.test(amenity))          return { emoji:'🚔', color:'#00d4ff' };
+  if (/bank|atm/.test(amenity))                     return { emoji:'🏦', color:'#f5c518' };
+  if (/supermarket|marketplace|mall/.test(amenity)) return { emoji:'🛒', color:'#f5c518' };
+  if (/hotel|lodging/.test(amenity))                return { emoji:'🏨', color:'#7b2ff7' };
+  if (/cinema|theatre/.test(amenity))               return { emoji:'🎬', color:'#ff2d78' };
+  return { emoji:'📍', color:'#00d4ff' };
+}
+
+function poiNeonHtml(emoji: string, label: string, color: string): string {
+  const short = label.length > 18 ? label.slice(0, 18) + '…' : label;
+  return `<div style="display:flex;flex-direction:column;align-items:center;cursor:pointer;filter:drop-shadow(0 0 7px ${color}80);">
+    <div style="background:rgba(0,8,18,0.96);border:2px solid ${color};color:${color};font-family:'Rajdhani',sans-serif;font-size:10px;font-weight:700;padding:2px 7px;white-space:nowrap;max-width:150px;overflow:hidden;text-overflow:ellipsis;letter-spacing:0.03em;box-shadow:0 0 8px ${color}44;">${short}</div>
+    <div style="width:2px;height:5px;background:${color};"></div>
+    <div style="width:28px;height:28px;background:${color}18;border:2px solid ${color};border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:14px;box-shadow:0 0 10px ${color}55;">${emoji}</div>
+    <div style="width:2px;height:4px;background:linear-gradient(to bottom,${color},transparent);"></div>
+  </div>`;
+}
+
 // ── Neon place-pin (Nominatim / POI selection) ────────────────────────────────
 function placePinHtml(label: string): string {
   const short = label.length > 26 ? label.slice(0,26)+'…' : label;
@@ -236,6 +262,7 @@ export function ClinicMap({
       setTaxiFromPt(null); setTaxiToPt(null);
       setTaxiDistKm(null); setTaxiEstPrice(null);
       setTaxiError(null);   setTaxiSuccess(false);
+      setTaxiDestName('');
       taxiStepRef.current   = 'pick-from';
       taxiFromPtRef.current = null;
       if (mapRef.current) mapRef.current.getContainer().style.cursor = 'crosshair';
@@ -383,6 +410,9 @@ export function ClinicMap({
   const [taxiRouteLoading, setTaxiRouteLoading] = useState(false); // OSRM fetch in progress
   const [taxiError,        setTaxiError]        = useState<string|null>(null);
   const [taxiSuccess,      setTaxiSuccess]      = useState(false);
+  const [taxiDestName,     setTaxiDestName]     = useState('');   // POI name chosen as dest
+  const [poiLoading,       setPoiLoading]       = useState(false);
+  const poiMarkersRef = useRef<L.Marker[]>([]);
 
   // ── Active order tracking (after submit) ─────────────────────────────────
   const [activeOrderId,     setActiveOrderId]     = useState<number|null>(null);
@@ -870,10 +900,75 @@ export function ClinicMap({
     setTaxiFromPt(null);     setTaxiToPt(null);
     setTaxiDistKm(null);     setTaxiEstPrice(null);
     setTaxiError(null);      setTaxiSuccess(false);
+    setTaxiDestName('');
     taxiStepRef.current   = 'idle';
+    poiMarkersRef.current.forEach(m=>m.remove());
+    poiMarkersRef.current = [];
     taxiFromPtRef.current = null;
     if (mapRef.current) mapRef.current.getContainer().style.cursor = adminModeRef.current ? 'crosshair' : '';
   },[]);
+
+  // ── Contextual POIs: fetch Overpass when taxi enters pick-to step ─────────
+  useEffect(()=>{
+    poiMarkersRef.current.forEach(m=>m.remove());
+    poiMarkersRef.current = [];
+    setPoiLoading(false);
+
+    if (taxiStep !== 'pick-to' || !mapRef.current) return;
+
+    // Zoom in to street level so POIs are clearly visible
+    const lat = userLocation?.lat ?? 33.7451;
+    const lon = userLocation?.lng ?? 44.6488;
+    if (mapRef.current.getZoom() < 14) {
+      mapRef.current.flyTo([lat, lon], 14, { animate:true, duration:1.1 });
+    }
+
+    // Fetch real POIs from Overpass within 12 km radius
+    const query =
+      `[out:json][timeout:18];` +
+      `node["amenity"~"hospital|clinic|university|school|college|restaurant|fast_food|cafe|` +
+      `fuel|mosque|pharmacy|police|bank|atm|supermarket|marketplace|hotel|cinema|library"]` +
+      `(around:12000,${lat},${lon});out 60;`;
+
+    const ctrl = new AbortController();
+    const tid  = setTimeout(()=>ctrl.abort(), 18000);
+    setPoiLoading(true);
+
+    fetch('https://overpass-api.de/api/interpreter', { method:'POST', body:query, signal:ctrl.signal })
+      .then(r=>r.json())
+      .then(data=>{
+        clearTimeout(tid);
+        if (taxiStepRef.current !== 'pick-to' || !mapRef.current) return;
+        const elements: any[] = (data.elements ?? []).slice(0, 60);
+        elements.forEach(el=>{
+          if (!el.lat || !el.lon) return;
+          const name = ((el.tags?.['name:ar'] || el.tags?.name || '') as string).trim();
+          if (!name) return;
+          const { emoji, color } = getAmenityStyle(el.tags?.amenity ?? '');
+          const m = L.marker([el.lat, el.lon],{
+            icon: L.divIcon({ className:'', html:poiNeonHtml(emoji, name, color), iconSize:[36,52], iconAnchor:[18,52] }),
+            zIndexOffset: 350,
+          });
+          m.on('click', ()=>{
+            if (taxiStepRef.current !== 'pick-to') return;
+            setTaxiDestName(name);
+            taxiPickPointRef.current?.(el.lat, el.lon);
+          });
+          m.addTo(mapRef.current!);
+          poiMarkersRef.current.push(m);
+        });
+      })
+      .catch(()=>clearTimeout(tid))
+      .finally(()=>setPoiLoading(false));
+
+    return ()=>{
+      clearTimeout(tid);
+      try { ctrl.abort(); } catch { /* */ }
+      poiMarkersRef.current.forEach(m=>m.remove());
+      poiMarkersRef.current = [];
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[taxiStep, userLocation]);
 
   // ── Stop active order tracking (driver arrived / cancelled) ───────────────
   const stopOrderTracking = useCallback(()=>{
@@ -1770,15 +1865,37 @@ export function ClinicMap({
             }}>
               {taxiStep==='pick-from'?'A':'B'}
             </div>
-            <div style={{flex:1}}>
+            <div style={{flex:1,minWidth:0}}>
               <div style={{fontFamily:'Orbitron,sans-serif',fontSize:'8px',color:'rgba(255,255,255,0.35)',letterSpacing:'0.15em',marginBottom:'3px'}}>
                 {taxiStep==='pick-from'?'STEP 1 / 2':'STEP 2 / 2'} · {taxiDriverItem.name}
               </div>
-              <div style={{fontFamily:'Rajdhani,sans-serif',fontSize:'16px',fontWeight:700,color:'#e8f8f5'}}>
-                {taxiStep==='pick-from'
-                  ? 'انقر على نقطة انطلاقك في الخريطة'
-                  : 'انقر على وجهتك في الخريطة'}
-              </div>
+              {taxiStep==='pick-from' ? (
+                <div style={{fontFamily:'Rajdhani,sans-serif',fontSize:'16px',fontWeight:700,color:'#00f5d4'}}>
+                  انقر على نقطة انطلاقك في الخريطة
+                </div>
+              ) : taxiDestName ? (
+                /* Destination chosen — show name */
+                <div style={{display:'flex',alignItems:'center',gap:'6px'}}>
+                  <div style={{fontFamily:'Orbitron,sans-serif',fontSize:'7px',color:'rgba(255,45,120,0.6)',letterSpacing:'0.12em',flexShrink:0}}>DEST</div>
+                  <div style={{fontFamily:'Rajdhani,sans-serif',fontSize:'15px',fontWeight:700,color:'#ff2d78',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
+                    {taxiDestName}
+                  </div>
+                </div>
+              ) : poiLoading ? (
+                /* Loading POIs */
+                <div style={{display:'flex',alignItems:'center',gap:'8px'}}>
+                  <svg width="14" height="14" viewBox="0 0 28 28" fill="none" style={{animation:'lf-spin 0.9s linear infinite',flexShrink:0}}>
+                    <circle cx="14" cy="14" r="10" stroke="#ff2d78" strokeWidth="2.5" strokeDasharray="22 14" strokeLinecap="round"/>
+                  </svg>
+                  <span style={{fontFamily:'Rajdhani,sans-serif',fontSize:'14px',color:'rgba(255,45,120,0.7)'}}>
+                    جاري تحميل المعالم...
+                  </span>
+                </div>
+              ) : (
+                <div style={{fontFamily:'Rajdhani,sans-serif',fontSize:'15px',fontWeight:700,color:'#ff2d78'}}>
+                  اضغط على معلم أو موقع في الخريطة
+                </div>
+              )}
             </div>
             <button
               onClick={closeTaxiRouting}
