@@ -1895,7 +1895,15 @@ export function ClinicMap({
 
   // ── Stop active order tracking (driver arrived / cancelled) ───────────────
   const stopOrderTracking = useCallback(()=>{
+    // Remove driver marker
     driverMarkerRef.current?.remove(); driverMarkerRef.current = null;
+    // Remove taxi route polylines and markers
+    taxiGlowLineRef.current?.remove();   taxiGlowLineRef.current   = null;
+    taxiRouteLineRef.current?.remove();  taxiRouteLineRef.current  = null;
+    taxiQuickPolyRef.current?.remove();  taxiQuickPolyRef.current  = null;
+    taxiFromMarkerRef.current?.remove(); taxiFromMarkerRef.current = null;
+    taxiToMarkerRef.current?.remove();   taxiToMarkerRef.current   = null;
+    // Reset state
     setActiveOrderId(null);    setActiveOrderStatus('pending');
     setDriverLat(null);        setDriverLng(null);
     setDriverDistKm(null);     setDriverEtaMin(null);
@@ -2216,12 +2224,16 @@ export function ClinicMap({
         activeGasOrderStatusRef.current = order.status;
         const FINAL = new Set(['done','finished','cancelled']);
         if (FINAL.has(order.status)) {
-          activeGasOrderIdRef.current    = null;
+          activeGasOrderIdRef.current     = null;
           activeGasOrderStatusRef.current = 'pending';
           localStorage.removeItem('diyala_active_gas_order');
           setShowGasChat(false);
           setGasUnread(false);
-          setTimeout(()=>{ setActiveGasOrderId(null); setActiveGasOrderStatus('pending'); }, 3500);
+          // Show success/cancel message briefly then auto-reset UI
+          setTimeout(()=>{
+            setActiveGasOrderId(null);
+            setActiveGasOrderStatus('pending');
+          }, order.status === 'cancelled' ? 800 : 1500);
         }
       } catch { /* */ }
     });
@@ -2251,10 +2263,15 @@ export function ClinicMap({
         activeGasOrderStatusRef.current = data.status;
         const FINAL = new Set(['done','finished','cancelled']);
         if (FINAL.has(data.status)) {
-          activeGasOrderIdRef.current    = null;
+          activeGasOrderIdRef.current     = null;
           activeGasOrderStatusRef.current = 'pending';
           localStorage.removeItem('diyala_active_gas_order');
-          setTimeout(()=>{ setActiveGasOrderId(null); setActiveGasOrderStatus('pending'); }, 3500);
+          setShowGasChat(false);
+          setGasUnread(false);
+          setTimeout(()=>{
+            setActiveGasOrderId(null);
+            setActiveGasOrderStatus('pending');
+          }, data.status === 'cancelled' ? 800 : 1500);
         }
       } catch { /* silent */ }
     };
