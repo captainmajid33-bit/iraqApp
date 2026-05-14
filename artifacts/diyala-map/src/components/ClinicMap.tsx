@@ -251,8 +251,10 @@ export function ClinicMap({
   const markersRef   = useRef<{[id:number]:L.Marker}>({});
   const userMarkerRef  = useRef<L.Marker|null>(null);
   const userCircleRef  = useRef<L.Circle|null>(null);
-  const routeGlowRef   = useRef<L.Polyline|null>(null);
-  const routeLineRef   = useRef<L.Polyline|null>(null);
+  const routeGlowRef     = useRef<L.Polyline|null>(null);
+  const routeLineRef     = useRef<L.Polyline|null>(null);
+  const poiRouteGlowRef  = useRef<L.Polyline|null>(null);
+  const poiRouteLineRef  = useRef<L.Polyline|null>(null);
   const catStyleRef    = useRef<HTMLStyleElement|null>(null);
   const poiLayerRef    = useRef<L.LayerGroup|null>(null);
   // User location tracking
@@ -460,6 +462,7 @@ export function ClinicMap({
   const [locateError,setLocateError]   = useState<string|null>(null);
   const [routeLoading,setRouteLoading] = useState(false);
   const [routeInfo,setRouteInfo]       = useState<{distanceKm:number;durationMin:number}|null>(null);
+  const [hasPoiRoute,setHasPoiRoute]   = useState(false);
   const [showMoreModal,  setShowMoreModal]  = useState(false);
   const [searchQuery,    setSearchQuery]    = useState('');
   const [showTraffic,    setShowTraffic]    = useState(false);
@@ -914,9 +917,7 @@ export function ClinicMap({
     let activePoi   = poiLayerA as L.LayerGroup;
     poiLayerRef.current = activePoi;
 
-    // POI route lines (separate from the main app route)
-    let poiRouteGlow: L.Polyline|null = null;
-    let poiRouteLine: L.Polyline|null = null;
+    // POI route lines — stored in component refs so cancel button can reach them
     let poiAbort: AbortController|null = null;
     let lastBoundsKey = '';
     let poiTimer: ReturnType<typeof setTimeout>|null = null;
@@ -978,15 +979,16 @@ export function ClinicMap({
           navBtn.addEventListener('click', async () => {
             map.closePopup();
             if (!userLoc) return;
-            poiRouteGlow?.remove(); poiRouteGlow = null;
-            poiRouteLine?.remove(); poiRouteLine = null;
+            poiRouteGlowRef.current?.remove(); poiRouteGlowRef.current = null;
+            poiRouteLineRef.current?.remove(); poiRouteLineRef.current = null;
             try {
               const osrmUrl = `https://router.project-osrm.org/route/v1/driving/${userLoc.lng},${userLoc.lat};${el.lon},${el.lat}?overview=full&geometries=geojson`;
               const rData = await (await fetch(osrmUrl)).json();
               const route = rData.routes?.[0]; if (!route) return;
               const coords: [number,number][] = route.geometry.coordinates.map(([ln,la]: [number,number]) => [la, ln]);
-              poiRouteGlow = L.polyline(coords,{color,weight:14,opacity:0.18,lineCap:'round',lineJoin:'round'}).addTo(map);
-              poiRouteLine = L.polyline(coords,{color,weight:3.5,opacity:1,lineCap:'round',lineJoin:'round',dashArray:'10 6'}).addTo(map);
+              poiRouteGlowRef.current = L.polyline(coords,{color,weight:14,opacity:0.18,lineCap:'round',lineJoin:'round'}).addTo(map);
+              poiRouteLineRef.current = L.polyline(coords,{color,weight:3.5,opacity:1,lineCap:'round',lineJoin:'round',dashArray:'10 6'}).addTo(map);
+              setHasPoiRoute(true);
               const distKm = route.distance/1000, durMin = route.duration/60;
               const distTxt = distKm<1 ? `${(distKm*1000).toFixed(0)} م` : `${distKm.toFixed(1)} كم`;
               const durTxt  = durMin<60 ? `${Math.round(durMin)} دقيقة` : `${(durMin/60).toFixed(1)} ساعة`;
@@ -1074,6 +1076,8 @@ export function ClinicMap({
       poiAbort?.abort();
       if (poiTimer) clearTimeout(poiTimer);
       poiLayerA.remove(); poiLayerB.remove(); poiLayerRef.current = null;
+      poiRouteGlowRef.current?.remove(); poiRouteGlowRef.current = null;
+      poiRouteLineRef.current?.remove(); poiRouteLineRef.current = null;
       missionMarkerRef.current?.remove(); missionMarkerRef.current=null;
       trafficLayersRef.current.forEach(l=>l.remove()); trafficLayersRef.current=[];
       mapRef.current?.remove(); mapRef.current=null;
@@ -2319,7 +2323,25 @@ export function ClinicMap({
     drawRoute(mapRef.current,userLocation,routeTarget,setRouteInfo,setRouteLoading,routeGlowRef,routeLineRef);
   },[routeTarget,userLocation,clearRouteVisuals]);
 
-  const handleCancelRoute = () => { clearRouteVisuals(); onClearRoute(); };
+  const handleCancelRoute = useCallback(() => {
+    // 1. Clear clinic/doctor route
+    clearRouteVisuals();
+    onClearRoute();
+    // 2. Clear POI route (global overlay)
+    poiRouteGlowRef.current?.remove(); poiRouteGlowRef.current = null;
+    poiRouteLineRef.current?.remove(); poiRouteLineRef.current = null;
+    setHasPoiRoute(false);
+    // 3. Clear Nominatim place route
+    placeGlowRef.current?.remove(); placeGlowRef.current = null;
+    placeLineRef.current?.remove(); placeLineRef.current = null;
+    // 4. Close any open popup
+    mapRef.current?.closePopup();
+    // 5. Fly back to user location
+    const loc = userLocationRef.current;
+    if (loc && mapRef.current) {
+      mapRef.current.flyTo([loc.lat, loc.lng], 15, { animate: true, duration: 1.2 });
+    }
+  }, [clearRouteVisuals, onClearRoute]);
 
   // ── Render ────────────────────────────────────────────────────────────────
   return (
@@ -2644,13 +2666,32 @@ export function ClinicMap({
         </div>
       )}
 
-      {/* ── Cancel Route ── */}
-      {(routeTarget || routeInfo) && (
-        <button onClick={handleCancelRoute}
-          style={{position:'absolute',top:'12px',right:'12px',zIndex:1000,padding:'9px 16px',background:'rgba(255,45,120,0.12)',border:'1px solid #ff2d78',color:'#ff2d78',fontFamily:'Orbitron,sans-serif',fontSize:'10px',letterSpacing:'0.1em',cursor:'pointer',display:'flex',alignItems:'center',gap:'8px',boxShadow:'0 0 16px rgba(255,45,120,0.3)',backdropFilter:'blur(10px)',transition:'all 0.2s'}}
-          onMouseEnter={e=>{(e.currentTarget as HTMLElement).style.background='rgba(255,45,120,0.25)';}}
-          onMouseLeave={e=>{(e.currentTarget as HTMLElement).style.background='rgba(255,45,120,0.12)';}}>
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none"><path d="M18 6L6 18M6 6l12 12" stroke="#ff2d78" strokeWidth="2.5" strokeLinecap="round"/></svg>
+      {/* ── Cancel Route — visible whenever ANY route is active ── */}
+      {(routeTarget || routeInfo || hasPoiRoute) && (
+        <button
+          onClick={handleCancelRoute}
+          onMouseEnter={e => { (e.currentTarget as HTMLElement).style.cssText += 'background:rgba(255,45,120,0.28);box-shadow:0 0 24px rgba(255,45,120,0.55);'; }}
+          onMouseLeave={e => { (e.currentTarget as HTMLElement).style.cssText += 'background:rgba(255,45,120,0.13);box-shadow:0 0 18px rgba(255,45,120,0.35);'; }}
+          style={{
+            position:'absolute', top:'12px', right:'12px', zIndex:1200,
+            display:'flex', alignItems:'center', gap:'8px',
+            padding:'10px 18px',
+            background:'rgba(255,45,120,0.13)',
+            border:'1.5px solid #ff2d78',
+            color:'#ff2d78',
+            fontFamily:'Orbitron,sans-serif',
+            fontSize:'10px',
+            fontWeight:'700',
+            letterSpacing:'0.12em',
+            cursor:'pointer',
+            boxShadow:'0 0 18px rgba(255,45,120,0.35), inset 0 1px 0 rgba(255,255,255,0.06)',
+            backdropFilter:'blur(12px)',
+            transition:'background 0.18s, box-shadow 0.18s',
+          } as React.CSSProperties}
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none">
+            <path d="M18 6L6 18M6 6l12 12" stroke="#ff2d78" strokeWidth="2.5" strokeLinecap="round"/>
+          </svg>
           إلغاء المسار
         </button>
       )}
