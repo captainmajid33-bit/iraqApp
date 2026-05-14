@@ -441,48 +441,104 @@ function MapEditorTab({ cats, toast }: { cats: Cat[]; toast: ReturnType<typeof u
 
 // ── Categories Tab ────────────────────────────────────────────────────────────
 function CategoriesTab({ cats, onRefresh, toast }: { cats: Cat[]; onRefresh: () => void; toast: ReturnType<typeof useToast> }) {
-  const [form, setForm] = useState({ slug: "", labelAr: "", labelEn: "", color: "#7b2ff7", icon: "📍" });
-  const [busy, setBusy] = useState(false);
+  const BLANK = { slug: "", labelAr: "", labelEn: "", color: "#7b2ff7", icon: "📍" };
+  const [form,     setForm]     = useState(BLANK);
+  const [editId,   setEditId]   = useState<number | null>(null);
+  const [busy,     setBusy]     = useState(false);
+  const formRef = useRef<HTMLDivElement>(null);
   const s = (k: string) => (e: any) => setForm(f => ({ ...f, [k]: e.target.value }));
 
-  const handleAdd = async () => {
-    if (!form.slug.trim() || !form.labelAr.trim()) { return; }
+  const startEdit = (cat: Cat) => {
+    setForm({ slug: cat.slug, labelAr: cat.labelAr, labelEn: cat.labelEn, color: cat.color, icon: cat.icon });
+    setEditId(cat.id);
+    setTimeout(() => formRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 80);
+  };
+
+  const cancelEdit = () => { setForm(BLANK); setEditId(null); };
+
+  const handleSave = async () => {
+    if (!form.slug.trim() || !form.labelAr.trim()) return;
     setBusy(true);
-    const r = await api.post("/api/categories", form);
-    setBusy(false);
-    if (r.id) { toast.show("تمت إضافة الفئة"); setForm({ slug: "", labelAr: "", labelEn: "", color: "#7b2ff7", icon: "📍" }); onRefresh(); }
-    else toast.show(r.error ?? "فشلت الإضافة", false);
+    if (editId !== null) {
+      const r = await api.patch(`/api/categories/${editId}`, form);
+      setBusy(false);
+      if (r.id) { toast.show("تم تحديث الفئة بنجاح"); cancelEdit(); onRefresh(); }
+      else toast.show(r.error ?? "فشل التحديث", false);
+    } else {
+      const r = await api.post("/api/categories", form);
+      setBusy(false);
+      if (r.id) { toast.show("تمت إضافة الفئة"); setForm(BLANK); onRefresh(); }
+      else toast.show(r.error ?? "فشلت الإضافة", false);
+    }
   };
 
   const handleDel = async (id: number, label: string) => {
     if (!confirm(`حذف "${label}"؟`)) return;
+    if (editId === id) cancelEdit();
     await api.delete(`/api/categories/${id}`);
     toast.show("تم الحذف"); onRefresh();
   };
+
+  const isEdit = editId !== null;
+  const accentColor = isEdit ? C.yellow : C.purple;
 
   return (
     <div style={{ maxWidth: "660px" }}>
       <div style={{ marginBottom: "28px" }}>
         <div style={{ fontFamily: "Orbitron, sans-serif", fontSize: "10px", color: C.blue, letterSpacing: "0.12em", marginBottom: "12px" }}>الفئات الحالية</div>
         <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
-          {cats.map(cat => (
-            <div key={cat.id} style={{ display: "flex", alignItems: "center", gap: "14px", padding: "12px 16px", background: C.surf2, border: `1px solid ${cat.color}33`, borderRadius: "4px" }}>
-              <span style={{ fontSize: "22px" }}>{cat.icon}</span>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ color: C.text, fontFamily: "Rajdhani, sans-serif", fontSize: "15px", fontWeight: 600 }}>{cat.labelAr}</div>
-                <div style={{ color: C.dim, fontFamily: "Orbitron, sans-serif", fontSize: "10px", letterSpacing: "0.08em" }}>{cat.slug} · {cat.labelEn}</div>
+          {cats.map(cat => {
+            const isActive = editId === cat.id;
+            return (
+              <div key={cat.id} style={{
+                display: "flex", alignItems: "center", gap: "14px",
+                padding: "12px 16px", background: C.surf2,
+                border: `1px solid ${isActive ? cat.color + "88" : cat.color + "33"}`,
+                borderRadius: "4px",
+                boxShadow: isActive ? `0 0 14px ${cat.color}22` : "none",
+                transition: "all 0.2s",
+              }}>
+                <span style={{ fontSize: "22px" }}>{cat.icon}</span>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ color: C.text, fontFamily: "Rajdhani, sans-serif", fontSize: "15px", fontWeight: 600 }}>{cat.labelAr}</div>
+                  <div style={{ color: C.dim, fontFamily: "Orbitron, sans-serif", fontSize: "10px", letterSpacing: "0.08em" }}>{cat.slug} · {cat.labelEn}</div>
+                </div>
+                <div style={{ width: "16px", height: "16px", borderRadius: "50%", background: cat.color, boxShadow: neon(cat.color, 8), flexShrink: 0 }} />
+                <button
+                  onClick={() => isActive ? cancelEdit() : startEdit(cat)}
+                  style={{
+                    padding: "5px 12px",
+                    background: isActive ? `${C.yellow}18` : `${C.blue}10`,
+                    border: `1px solid ${isActive ? C.yellow + "88" : C.blue + "44"}`,
+                    color: isActive ? C.yellow : C.blue,
+                    fontSize: "12px", cursor: "pointer", borderRadius: "2px",
+                    fontFamily: "Rajdhani, sans-serif", whiteSpace: "nowrap", transition: "all 0.2s",
+                  }}
+                >{isActive ? "إلغاء" : "تعديل"}</button>
+                <button
+                  onClick={() => handleDel(cat.id, cat.labelAr)}
+                  style={{ padding: "5px 12px", background: `${C.red}10`, border: `1px solid ${C.red}44`, color: C.red, fontSize: "12px", cursor: "pointer", borderRadius: "2px", fontFamily: "Rajdhani, sans-serif", whiteSpace: "nowrap" }}
+                >حذف</button>
               </div>
-              <div style={{ width: "16px", height: "16px", borderRadius: "50%", background: cat.color, boxShadow: neon(cat.color, 8), flexShrink: 0 }} />
-              <button onClick={() => handleDel(cat.id, cat.labelAr)} style={{ padding: "5px 12px", background: `${C.red}10`, border: `1px solid ${C.red}44`, color: C.red, fontSize: "12px", cursor: "pointer", borderRadius: "2px", fontFamily: "Rajdhani, sans-serif", whiteSpace: "nowrap" }}>حذف</button>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </div>
 
-      <div style={{ background: C.surf2, border: `1px solid ${C.border}`, borderRadius: "4px", padding: "20px" }}>
-        <div style={{ fontFamily: "Orbitron, sans-serif", fontSize: "10px", color: C.purple, letterSpacing: "0.12em", marginBottom: "16px" }}>+ إضافة فئة جديدة</div>
+      <div ref={formRef} style={{ background: C.surf2, border: `1.5px solid ${accentColor}44`, borderRadius: "4px", padding: "20px", transition: "border-color 0.3s", boxShadow: isEdit ? `0 0 24px ${accentColor}18` : "none" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "16px" }}>
+          <div style={{ fontFamily: "Orbitron, sans-serif", fontSize: "10px", color: accentColor, letterSpacing: "0.12em" }}>
+            {isEdit ? `✏ تعديل الفئة: ${form.labelAr || "..."}` : "+ إضافة فئة جديدة"}
+          </div>
+          {isEdit && (
+            <button onClick={cancelEdit} style={{ background: "none", border: `1px solid ${C.red}44`, color: C.red, fontSize: "11px", padding: "3px 10px", cursor: "pointer", borderRadius: "2px", fontFamily: "Rajdhani, sans-serif" }}>✕ إلغاء التعديل</button>
+          )}
+        </div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px", marginBottom: "10px" }}>
-          <div><label style={LBL}>المعرّف (slug) *</label><input style={FLD} value={form.slug} onChange={s("slug")} placeholder="taxi" onFocus={ff} onBlur={fb} /></div>
+          <div>
+            <label style={LBL}>المعرّف (slug) *</label>
+            <input style={{ ...FLD, ...(isEdit ? { background: `${C.yellow}08`, borderColor: `${C.yellow}44` } : {}) }} value={form.slug} onChange={s("slug")} placeholder="taxi" onFocus={ff} onBlur={fb} readOnly={isEdit} />
+          </div>
           <div><label style={LBL}>الاسم بالعربي *</label><input style={FLD} value={form.labelAr} onChange={s("labelAr")} placeholder="تكسي" onFocus={ff} onBlur={fb} /></div>
           <div><label style={LBL}>الاسم بالإنجليزي</label><input style={FLD} value={form.labelEn} onChange={s("labelEn")} placeholder="Taxi" onFocus={ff} onBlur={fb} /></div>
           <div><label style={LBL}>الأيقونة (emoji)</label><input style={FLD} value={form.icon} onChange={s("icon")} placeholder="🚕" onFocus={ff} onBlur={fb} /></div>
@@ -492,9 +548,14 @@ function CategoriesTab({ cats, onRefresh, toast }: { cats: Cat[]; onRefresh: () 
           <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
             <input type="color" value={form.color} onChange={s("color")} style={{ width: "44px", height: "36px", padding: "2px", background: "transparent", border: `1px solid ${C.border}`, cursor: "pointer", borderRadius: "3px" }} />
             <span style={{ fontFamily: "monospace", fontSize: "13px", color: form.color }}>{form.color}</span>
+            <div style={{ width: "20px", height: "20px", borderRadius: "50%", background: form.color, boxShadow: neon(form.color, 10), marginLeft: "4px" }} />
           </div>
         </div>
-        <Btn label={busy ? "جاري الحفظ..." : "إضافة الفئة"} color={C.purple} onClick={handleAdd} />
+        <Btn
+          label={busy ? "جاري الحفظ..." : isEdit ? "💾 حفظ التعديلات" : "إضافة الفئة"}
+          color={accentColor}
+          onClick={handleSave}
+        />
       </div>
     </div>
   );
