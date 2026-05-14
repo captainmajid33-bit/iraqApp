@@ -519,6 +519,8 @@ export function ClinicMap({
   const [ratingDriverId,    setRatingDriverId]    = useState<number>(0);
   const [ratingCustomerName,setRatingCustomerName]= useState<string>('');
   const ratingShownRef      = useRef<Set<number>>(new Set()); // prevent double-trigger
+  // Thank-you snackbar shown after rating is submitted/skipped
+  const [showThankYouSnack, setShowThankYouSnack] = useState(false);
 
   const activeOrderIdRef    = useRef<number|null>(null);
   const activeOrderStatusRef= useRef<string>('pending');            // mirrors activeOrderStatus for DOM handlers
@@ -2700,7 +2702,19 @@ export function ClinicMap({
           orderId={activeOrderId}
           driverPhone={activeDriverPhone}
           onMinimize={()=> setShowChat(false)}
-          onDeleteChat={()=>{ setShowChat(false); stopOrderTracking(); }}
+          onDeleteChat={()=>{
+            setShowChat(false);
+            // Show rating dialog before full reset
+            if (activeOrderId) {
+              const savedName = (()=>{ try{ return JSON.parse(localStorage.getItem('diyala_user')?? 'null')?.name ?? ''; }catch{ return ''; }})();
+              setRatingOrderId(activeOrderId);
+              setRatingDriverId(activeDriverId || 0);
+              setRatingCustomerName(taxiUserName.trim() || savedName);
+              setShowRating(true);
+            } else {
+              stopOrderTracking();
+            }
+          }}
           onSystemMsg={(content)=>{
             if (!showChat) {
               if (sysMsgTimerRef.current) clearTimeout(sysMsgTimerRef.current);
@@ -2719,9 +2733,41 @@ export function ClinicMap({
           customerName={ratingCustomerName}
           onClose={()=>{
             setShowRating(false);
+            // Show thank-you snack then full cleanup
+            setShowThankYouSnack(true);
+            setTimeout(()=> setShowThankYouSnack(false), 4500);
             stopOrderTracking();
           }}
         />
+      )}
+
+      {/* ── Thank-you Snackbar (shown after rating submitted/skipped) ── */}
+      {showThankYouSnack && (
+        <div style={{
+          position:'fixed', bottom:'30px', left:'50%', transform:'translateX(-50%)',
+          zIndex:9500, direction:'rtl',
+          display:'flex', alignItems:'center', gap:'14px',
+          padding:'14px 22px',
+          background:'linear-gradient(135deg,rgba(0,245,212,0.12),rgba(5,8,15,0.97))',
+          border:'1px solid rgba(0,245,212,0.5)',
+          borderTop:'3px solid #00f5d4',
+          boxShadow:'0 -4px 40px rgba(0,245,212,0.25), 0 4px 40px rgba(0,0,0,0.6)',
+          backdropFilter:'blur(20px)',
+          maxWidth:'min(420px,92vw)',
+          animation:'sys-snack-in 0.4s cubic-bezier(0.34,1.56,0.64,1)',
+        }}>
+          <div style={{fontSize:'28px', lineHeight:1, flexShrink:0}}>⭐</div>
+          <div style={{flex:1, minWidth:0}}>
+            <div style={{
+              fontFamily:'Orbitron,sans-serif', fontSize:'8px',
+              color:'rgba(0,245,212,0.7)', letterSpacing:'0.2em', marginBottom:'4px',
+            }}>شكراً · THANK YOU</div>
+            <div style={{
+              fontFamily:'Rajdhani,sans-serif', fontSize:'15px',
+              fontWeight:700, color:'#a8fff5', lineHeight:1.4,
+            }}>شكراً لتقييمك — نتمنى لك يوماً سعيداً! 🌟</div>
+          </div>
+        </div>
       )}
 
       {/* ── Legend ── */}
