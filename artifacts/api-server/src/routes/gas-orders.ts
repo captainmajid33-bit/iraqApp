@@ -127,6 +127,44 @@ router.get("/gas-orders/pending", async (req, res) => {
   }
 });
 
+// ── POST /api/gas-orders/:id/cancel — PUBLIC: customer cancels their own order ─
+// No auth required — orderId itself serves as the access token.
+// Only works when status is still 'pending' (not accepted/done).
+router.post("/gas-orders/:id/cancel", async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) { res.status(400).json({ error: "id غير صالح" }); return; }
+
+  try {
+    const [order] = await db
+      .select({ status: gasOrdersTable.status })
+      .from(gasOrdersTable)
+      .where(eq(gasOrdersTable.id, id));
+
+    if (!order) { res.status(404).json({ error: "الطلب غير موجود" }); return; }
+
+    // Allow cancel only while pending (not already accepted / done)
+    const CANCELLABLE = new Set(["pending", "accepted"]);
+    if (!CANCELLABLE.has(order.status)) {
+      res.status(409).json({ error: "لا يمكن إلغاء هذا الطلب في وضعه الحالي" }); return;
+    }
+
+    const [updated] = await db
+      .update(gasOrdersTable)
+      .set({ status: "cancelled" })
+      .where(eq(gasOrdersTable.id, id))
+      .returning();
+
+    if (!updated) { res.status(404).json({ error: "الطلب غير موجود" }); return; }
+
+    console.log(`[CANCEL /gas-orders/${id}] customer cancelled`);
+    broadcastGasOrderUpdate({ id: updated.id, status: updated.status, agentId: updated.agentId });
+    res.json({ ok: true });
+  } catch (err: any) {
+    console.error(`[CANCEL /gas-orders/${id}] error:`, err);
+    res.status(500).json({ error: "فشل إلغاء الطلب", detail: err?.message });
+  }
+});
+
 // ── POST /api/gas-orders/:id/accept — atomic first-claim (no race condition) ──
 // Conditional UPDATE on status='pending' — PostgreSQL serialises concurrent
 // UPDATEs on the same row; second caller gets 0 rows → 409.

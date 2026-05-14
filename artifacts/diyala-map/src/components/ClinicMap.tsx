@@ -1479,18 +1479,16 @@ export function ClinicMap({
   const cancelGasOrder = useCallback(async ()=>{
     const id = activeGasOrderIdRef.current;
     if (!id) return;
-    try {
-      await fetch(`/api/gas-orders/${id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: 'cancelled' }),
-      });
-    } catch { /* ignore network errors — reset UI anyway */ }
+    // Optimistically clear UI first so user sees instant feedback
     setActiveGasOrderId(null);
     setActiveGasOrderStatus('pending');
     activeGasOrderIdRef.current     = null;
     activeGasOrderStatusRef.current = 'pending';
     localStorage.removeItem('diyala_active_gas_order');
+    try {
+      // Public cancel endpoint — no auth header needed
+      await fetch(`/api/gas-orders/${id}/cancel`, { method: 'POST' });
+    } catch { /* ignore network errors — UI already cleared */ }
   }, []);
 
   // ── Quick-dispatch: pre-fill name/phone from localStorage when form opens ──
@@ -3394,11 +3392,11 @@ export function ClinicMap({
                 GAS ORDER #{activeGasOrderId}
               </div>
               <div style={{fontFamily:'Rajdhani,sans-serif',fontSize:'15px',fontWeight:700,color:'#e8f8f5',lineHeight:1.2}}>
-                {activeGasOrderStatus==='pending'   ? '⏳ في انتظار قبول الوكيل...'
-                :activeGasOrderStatus==='accepted'  ? '⛽ الوكيل في الطريق إليك!'
-                :activeGasOrderStatus==='done'      ? '✅ تم التوصيل — شكراً!'
-                :activeGasOrderStatus==='cancelled' ? '❌ تم إلغاء الطلب'
-                :null}
+                {activeGasOrderStatus==='pending'                              ? '⏳ في انتظار قبول الوكيل...'
+                :activeGasOrderStatus==='accepted'                             ? '⛽ الوكيل في الطريق إليك!'
+                :(activeGasOrderStatus==='done'||activeGasOrderStatus==='finished') ? '✅ تم التوصيل — شكراً!'
+                :activeGasOrderStatus==='cancelled'                            ? '❌ تم إلغاء الطلب'
+                :`⏳ ${activeGasOrderStatus}`}
               </div>
             </div>
             {/* Cancel — only while pending or accepted */}
@@ -3416,7 +3414,7 @@ export function ClinicMap({
               >إلغاء</button>
             )}
             {/* Dismiss — only after final state */}
-            {(activeGasOrderStatus==='done'||activeGasOrderStatus==='cancelled') && (
+            {(activeGasOrderStatus==='done'||activeGasOrderStatus==='finished'||activeGasOrderStatus==='cancelled') && (
               <button
                 onClick={()=>{
                   setActiveGasOrderId(null); setActiveGasOrderStatus('pending');
@@ -3460,35 +3458,67 @@ export function ClinicMap({
               <div style={{fontFamily:'Rajdhani,sans-serif',fontSize:'20px',fontWeight:700,color:'#f5f0d0'}}>طلب توصيل غاز</div>
             </div>
 
-            {/* Read-only name + phone */}
-            {([
-              { label:'الاسم',  value:taxiUserName,  icon:'👤' },
-              { label:'الهاتف', value:taxiUserPhone, icon:'📞' },
-            ] as const).map(f=>(
-              <div key={f.label}>
-                <div style={{display:'flex',alignItems:'center',gap:'5px',marginBottom:'5px'}}>
-                  <span style={{fontSize:'10px'}}>{f.icon}</span>
-                  <span style={{fontFamily:'Rajdhani,sans-serif',fontSize:'11px',color:'rgba(255,45,120,0.55)',letterSpacing:'0.06em'}}>{f.label}</span>
-                  <span style={{fontFamily:'Orbitron,sans-serif',fontSize:'7px',color:'rgba(0,245,212,0.5)',letterSpacing:'0.12em',marginRight:'auto'}}>محفوظ</span>
-                </div>
-                <input
-                  readOnly
-                  tabIndex={-1}
-                  inputMode="none"
-                  value={f.value}
-                  onFocus={e=>e.target.blur()}
-                  style={{
-                    width:'100%',boxSizing:'border-box',
-                    background:'rgba(255,45,120,0.03)',
-                    border:'1px solid rgba(255,45,120,0.15)',
-                    color:'rgba(245,240,208,0.6)',fontFamily:'Rajdhani,sans-serif',fontSize:'15px',
-                    padding:'10px 12px',outline:'none',
-                    cursor:'default',userSelect:'none',
-                    WebkitUserSelect:'none',
-                  }}
-                />
+            {/* Name + phone — editable if empty, read-only if saved from profile */}
+            <div>
+              <div style={{display:'flex',alignItems:'center',gap:'5px',marginBottom:'5px'}}>
+                <span style={{fontSize:'10px'}}>👤</span>
+                <span style={{fontFamily:'Rajdhani,sans-serif',fontSize:'11px',color:'rgba(255,45,120,0.55)',letterSpacing:'0.06em'}}>الاسم</span>
+                <span style={{fontFamily:'Orbitron,sans-serif',fontSize:'7px',color:taxiUserName?'rgba(0,245,212,0.5)':'rgba(255,45,120,0.4)',letterSpacing:'0.12em',marginRight:'auto'}}>
+                  {taxiUserName ? 'محفوظ' : 'مطلوب'}
+                </span>
               </div>
-            ))}
+              <input
+                readOnly={!!taxiUserName}
+                tabIndex={taxiUserName ? -1 : 0}
+                inputMode={taxiUserName ? 'none' : 'text'}
+                value={taxiUserName}
+                onChange={e=>{ if(!taxiUserName) setTaxiUserName(e.target.value); }}
+                onFocus={e=>{ if(taxiUserName) e.target.blur(); }}
+                placeholder={taxiUserName ? '' : 'اكتب اسمك...'}
+                dir="rtl"
+                style={{
+                  width:'100%',boxSizing:'border-box',
+                  background: taxiUserName ? 'rgba(255,45,120,0.03)' : 'rgba(255,45,120,0.08)',
+                  border:`1px solid ${taxiUserName?'rgba(255,45,120,0.15)':'rgba(255,45,120,0.5)'}`,
+                  color: taxiUserName ? 'rgba(245,240,208,0.6)' : '#f5f0d0',
+                  fontFamily:'Rajdhani,sans-serif',fontSize:'15px',
+                  padding:'10px 12px',outline:'none',
+                  cursor: taxiUserName ? 'default' : 'text',
+                  userSelect: taxiUserName ? 'none' : 'auto',
+                  WebkitUserSelect: taxiUserName ? 'none' : 'auto',
+                }}
+              />
+            </div>
+            <div>
+              <div style={{display:'flex',alignItems:'center',gap:'5px',marginBottom:'5px'}}>
+                <span style={{fontSize:'10px'}}>📞</span>
+                <span style={{fontFamily:'Rajdhani,sans-serif',fontSize:'11px',color:'rgba(255,45,120,0.55)',letterSpacing:'0.06em'}}>الهاتف</span>
+                <span style={{fontFamily:'Orbitron,sans-serif',fontSize:'7px',color:taxiUserPhone?'rgba(0,245,212,0.5)':'rgba(255,45,120,0.4)',letterSpacing:'0.12em',marginRight:'auto'}}>
+                  {taxiUserPhone ? 'محفوظ' : 'مطلوب'}
+                </span>
+              </div>
+              <input
+                readOnly={!!taxiUserPhone}
+                tabIndex={taxiUserPhone ? -1 : 0}
+                inputMode={taxiUserPhone ? 'none' : 'tel'}
+                value={taxiUserPhone}
+                onChange={e=>{ if(!taxiUserPhone) setTaxiUserPhone(e.target.value); }}
+                onFocus={e=>{ if(taxiUserPhone) e.target.blur(); }}
+                placeholder={taxiUserPhone ? '' : '07XX XXX XXXX'}
+                dir="ltr"
+                style={{
+                  width:'100%',boxSizing:'border-box',
+                  background: taxiUserPhone ? 'rgba(255,45,120,0.03)' : 'rgba(255,45,120,0.08)',
+                  border:`1px solid ${taxiUserPhone?'rgba(255,45,120,0.15)':'rgba(255,45,120,0.5)'}`,
+                  color: taxiUserPhone ? 'rgba(245,240,208,0.6)' : '#f5f0d0',
+                  fontFamily:'Rajdhani,sans-serif',fontSize:'15px',
+                  padding:'10px 12px',outline:'none',
+                  cursor: taxiUserPhone ? 'default' : 'text',
+                  userSelect: taxiUserPhone ? 'none' : 'auto',
+                  WebkitUserSelect: taxiUserPhone ? 'none' : 'auto',
+                }}
+              />
+            </div>
 
             {/* Auto-detected location */}
             <div>
