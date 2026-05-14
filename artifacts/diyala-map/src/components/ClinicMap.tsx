@@ -5,6 +5,14 @@ import { MapItem, Category } from '@/data/types';
 import { ChatOverlay } from './ChatOverlay';
 import { RatingDialog } from './RatingDialog';
 
+// ── Haversine distance (km) between two lat/lng points ────────────────────
+function haversineDist(lat1:number,lng1:number,lat2:number,lng2:number):number {
+  const R=6371, toRad=(d:number)=>d*Math.PI/180;
+  const dLat=toRad(lat2-lat1), dLng=toRad(lng2-lng1);
+  const a=Math.sin(dLat/2)**2+Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLng/2)**2;
+  return R*2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a));
+}
+
 interface ClinicMapProps {
   items: MapItem[];
   categories: Category[];
@@ -520,6 +528,10 @@ export function ClinicMap({
   const blockTaxiTimerRef   = useRef<ReturnType<typeof setTimeout>|null>(null);
   // true while A-marker is placed and awaiting user drag/confirm in pick-from step
   const [taxiFromPlaced,    setTaxiFromPlaced]    = useState(false);
+  // Auto-find nearest driver states
+  const [taxiAutoSearching, setTaxiAutoSearching] = useState(false);
+  const [taxiNoDriverSnack, setTaxiNoDriverSnack] = useState(false);
+  const [taxiFoundSnack,    setTaxiFoundSnack]    = useState<string|null>(null); // driver name when found
   const prevDriverPosRef    = useRef<{lat:number;lng:number}|null>(null);
 
   // ── Online drivers (all open taxis visible on map) ────────────────────────
@@ -1014,6 +1026,125 @@ export function ClinicMap({
     taxiStepRef.current = 'pick-to';
     if (mapRef.current) mapRef.current.getContainer().style.cursor = '';
   },[]);
+
+  // ── Auto-find nearest available driver (Haversine, ≤10 km) ──────────────
+  const autoFindDriver = useCallback(async ()=>{
+    if (!taxiCategory) return;
+
+    // ── Full taxi state reset ────────────────────────────────────────────────
+    taxiRouteLineRef.current?.remove();  taxiRouteLineRef.current  = null;
+    taxiGlowLineRef.current?.remove();   taxiGlowLineRef.current   = null;
+    taxiFromMarkerRef.current?.remove(); taxiFromMarkerRef.current = null;
+    taxiToMarkerRef.current?.remove();   taxiToMarkerRef.current   = null;
+    poiMarkersRef.current.forEach(m=>m.remove()); poiMarkersRef.current = [];
+    setTaxiDriverItem(null); setTaxiStep('idle');
+    setTaxiFromPt(null);     setTaxiToPt(null);
+    setTaxiDistKm(null);     setTaxiEstPrice(null);
+    setTaxiError(null);      setTaxiSuccess(false);
+    setTaxiDestName('');     setTaxiFromPlaced(false);
+    setTaxiFoundSnack(null); setTaxiNoDriverSnack(false);
+    taxiStepRef.current   = 'idle';
+    taxiFromPtRef.current = null;
+    if (mapRef.current) mapRef.current.getContainer().style.cursor = '';
+
+    // ── Show taxi layer on map ───────────────────────────────────────────────
+    onFilterChange(taxiCategory.slug);
+    setShowMoreModal(false);
+    setShowTaxiPrompt(false);
+
+    // ── Core search — runs once GPS is available ─────────────────────────────
+    const doSearch = async (loc: {lat:number; lng:number}) => {
+      setTaxiAutoSearching(true);
+      try {
+        const res     = await fetch('/api/drivers-online');
+        const drivers: OnlineDriver[] = await res.json();
+
+        const MAX_KM  = 10;
+        const nearby  = drivers
+          .map(d => ({ ...d, distKm: haversineDist(loc.lat, loc.lng, d.lat, d.lng) }))
+          .filter(d  => d.distKm <= MAX_KM)
+          .sort((a, b) => a.distKm - b.distKm);
+
+        setTaxiAutoSearching(false);
+
+        if (nearby.length === 0) {
+          setTaxiNoDriverSnack(true);
+          setTimeout(()=> setTaxiNoDriverSnack(false), 6000);
+          return;
+        }
+
+        const nearest = nearby[0];
+
+        // ── Construct a synthetic MapItem from the driver record ─────────────
+        const synthetic: MapItem = {
+          id:       nearest.locationId,
+          kind:     taxiCategory.slug,
+          category: taxiCategory.slug,
+          name:     nearest.driverName,
+          details:  '',
+          address:  '',
+          phone:    nearest.phone,
+          hours:    '',
+          status:   'مفتوح',
+          lat:      nearest.lat,
+          lng:      nearest.lng,
+        };
+
+        // Restore saved user info
+        try {
+          const saved = JSON.parse(localStorage.getItem('diyala_user') ?? 'null');
+          setTaxiUserName(saved?.name  ?? '');
+          setTaxiUserPhone(saved?.phone ?? '');
+        } catch { setTaxiUserName(''); setTaxiUserPhone(''); }
+
+        // ── Set driver + from-point (GPS) ────────────────────────────────────
+        setTaxiDriverItem(synthetic);
+        const fromPt = { lat: loc.lat, lng: loc.lng };
+        setTaxiFromPt(fromPt);
+        taxiFromPtRef.current = fromPt;
+        setTaxiFromPlaced(true);
+
+        // ── Place draggable A marker at GPS ──────────────────────────────────
+        if (mapRef.current) {
+          const m = L.marker([loc.lat, loc.lng], {
+            icon: L.divIcon({className:'', html:taxiPinHtml('#00f5d4','A'), iconSize:[34,42], iconAnchor:[17,42]}),
+            zIndexOffset: 1000,
+            draggable: true,
+          }).addTo(mapRef.current);
+          m.on('dragend', ()=>{
+            const pos = m.getLatLng();
+            const pt  = { lat: pos.lat, lng: pos.lng };
+            setTaxiFromPt(pt);
+            taxiFromPtRef.current = pt;
+          });
+          taxiFromMarkerRef.current = m;
+          mapRef.current.flyTo([loc.lat, loc.lng], 17, { animate:true, duration:1.0 });
+        }
+
+        // ── Jump directly to destination selection (skip pick-from) ──────────
+        setTaxiStep('pick-to');
+        taxiStepRef.current = 'pick-to';
+
+        // ── Show "found" banner ───────────────────────────────────────────────
+        setTaxiFoundSnack(nearest.driverName);
+        setTimeout(()=> setTaxiFoundSnack(null), 7000);
+
+      } catch {
+        setTaxiAutoSearching(false);
+        setTaxiNoDriverSnack(true);
+        setTimeout(()=> setTaxiNoDriverSnack(false), 6000);
+      }
+    };
+
+    const loc = userLocationRef.current;
+    if (loc) {
+      doSearch(loc);
+    } else {
+      // GPS not yet available — start locating, then search on first fix
+      setTaxiAutoSearching(true);
+      locateUserRef.current?.((newLoc)=> doSearch(newLoc));
+    }
+  },[taxiCategory, onFilterChange]);
 
   // ── Contextual POIs: fetch Overpass when taxi enters pick-to step ─────────
   // Depends only on taxiStep (NOT userLocation) so GPS updates don't re-trigger
@@ -2018,6 +2149,20 @@ export function ClinicMap({
               {taxiStep==='pick-from'?'A':'B'}
             </div>
             <div style={{flex:1,minWidth:0}}>
+              {/* "Found driver" badge shown during pick-to after auto-search */}
+              {taxiStep==='pick-to' && taxiFoundSnack && (
+                <div style={{
+                  display:'inline-flex',alignItems:'center',gap:'5px',
+                  marginBottom:'4px',padding:'3px 9px',
+                  background:'rgba(0,245,212,0.12)',border:'1px solid rgba(0,245,212,0.45)',
+                  boxShadow:'0 0 10px rgba(0,245,212,0.18)',
+                }}>
+                  <span style={{fontSize:'11px'}}>✅</span>
+                  <span style={{fontFamily:'Rajdhani,sans-serif',fontSize:'11.5px',fontWeight:700,color:'#00f5d4'}}>
+                    تم العثور على أقرب سائق لك، حدد وجهتك الآن
+                  </span>
+                </div>
+              )}
               <div style={{fontFamily:'Orbitron,sans-serif',fontSize:'8px',color:'rgba(255,255,255,0.35)',letterSpacing:'0.15em',marginBottom:'3px'}}>
                 {taxiStep==='pick-from'?'STEP 1 / 2':'STEP 2 / 2'} · {taxiDriverItem.name}
               </div>
@@ -2386,6 +2531,69 @@ export function ClinicMap({
         </div>
       )}
 
+      {/* ── Auto-search Loading Banner ── */}
+      {taxiAutoSearching && (
+        <div style={{
+          position:'absolute', top:'14px', left:'50%', transform:'translateX(-50%)',
+          zIndex:5002, direction:'rtl',
+          display:'flex', alignItems:'center', gap:'12px',
+          padding:'12px 20px',
+          background:'rgba(5,8,15,0.97)',
+          border:'2px solid rgba(123,47,247,0.7)',
+          boxShadow:'0 0 30px rgba(123,47,247,0.3)',
+          backdropFilter:'blur(16px)',
+          maxWidth:'min(380px,90vw)',
+        }}>
+          <svg width="18" height="18" viewBox="0 0 28 28" fill="none" style={{animation:'lf-spin 0.9s linear infinite',flexShrink:0}}>
+            <circle cx="14" cy="14" r="10" stroke="#7b2ff7" strokeWidth="2.5" strokeDasharray="22 14" strokeLinecap="round"/>
+          </svg>
+          <div>
+            <div style={{fontFamily:'Orbitron,sans-serif',fontSize:'7.5px',color:'rgba(123,47,247,0.8)',letterSpacing:'0.18em',marginBottom:'2px'}}>
+              SEARCHING · جاري البحث
+            </div>
+            <div style={{fontFamily:'Rajdhani,sans-serif',fontSize:'14px',fontWeight:600,color:'#c4b5fd'}}>
+              جاري البحث عن أقرب سائق متاح...
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── No-driver Snackbar ── */}
+      {taxiNoDriverSnack && (
+        <div style={{
+          position:'absolute', top:'72px', left:'50%', transform:'translateX(-50%)',
+          zIndex:5002, direction:'rtl',
+          display:'flex', alignItems:'center', gap:'12px',
+          padding:'11px 18px',
+          background:'linear-gradient(135deg,rgba(255,45,120,0.15),rgba(5,8,15,0.97))',
+          border:'1px solid rgba(255,45,120,0.7)',
+          borderTop:'3px solid #ff2d78',
+          boxShadow:'0 4px 40px rgba(255,45,120,0.3)',
+          backdropFilter:'blur(16px)',
+          maxWidth:'min(420px,92vw)',
+          animation:'sys-snack-in 0.35s cubic-bezier(0.34,1.56,0.64,1)',
+        }}>
+          <div style={{
+            flexShrink:0,width:'34px',height:'34px',border:'1px solid rgba(255,45,120,0.5)',borderRadius:'50%',
+            display:'flex',alignItems:'center',justifyContent:'center',
+            background:'rgba(255,45,120,0.12)',boxShadow:'0 0 12px rgba(255,45,120,0.3)',
+            fontSize:'17px',lineHeight:1,
+          }}>😔</div>
+          <div style={{flex:1,minWidth:0}}>
+            <div style={{fontFamily:'Orbitron,sans-serif',fontSize:'7.5px',color:'rgba(255,45,120,0.8)',letterSpacing:'0.18em',marginBottom:'3px'}}>
+              لا يوجد سائقون · NO DRIVERS
+            </div>
+            <div style={{fontFamily:'Rajdhani,sans-serif',fontSize:'14px',fontWeight:600,color:'#ffa0c0',lineHeight:1.35}}>
+              نعتذر، لا يوجد سائقون متاحون حالياً في منطقتك
+            </div>
+          </div>
+          <button onClick={()=> setTaxiNoDriverSnack(false)}
+            style={{flexShrink:0,background:'none',border:'none',color:'rgba(255,45,120,0.5)',fontSize:'15px',cursor:'pointer',padding:'2px 4px',lineHeight:1}}>
+            ✕
+          </button>
+        </div>
+      )}
+
       {/* ── Block-taxi Snackbar (shown when user tries to order while having active trip) ── */}
       {blockTaxiMsg && (
         <div style={{
@@ -2585,13 +2793,7 @@ export function ClinicMap({
 
             {/* Book Taxi button */}
             <button
-              onClick={()=>{
-                if (taxiCategory) {
-                  onFilterChange(taxiCategory.slug);
-                  setShowMoreModal(false);
-                  setShowTaxiPrompt(true);
-                }
-              }}
+              onClick={()=>{ autoFindDriver(); }}
               disabled={!taxiCategory}
               style={{
                 flex:1,padding:'12px 8px',
@@ -2633,15 +2835,8 @@ export function ClinicMap({
           return (
         <button
           onClick={()=>{
-            if (taxiCategory) {
-              onFilterChange(taxiCategory.slug);
-              setShowMoreModal(false);
-              if (hasTripActive) {
-                showBlockTaxiMsg();
-                return;
-              }
-              setShowTaxiPrompt(true);
-            }
+            if (hasTripActive) { showBlockTaxiMsg(); return; }
+            autoFindDriver();
           }}
           style={{
             flex:1,
