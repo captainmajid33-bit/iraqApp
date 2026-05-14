@@ -1089,18 +1089,26 @@ export function ClinicMap({
         const res     = await fetch('/api/drivers-online');
         const drivers: OnlineDriver[] = await res.json();
 
-        // ── Timestamp filter: only drivers active in last 5 minutes ──────────
-        const FIVE_MIN = 5 * 60 * 1000;
-        const now      = Date.now();
-        const fresh    = drivers.filter(d => {
-          if (!d.updatedAt) return true; // no timestamp → assume fresh (old client)
-          return (now - new Date(d.updatedAt).getTime()) < FIVE_MIN;
-        });
+        // DEBUG ── log every driver returned by the API ──────────────────────
+        console.log(`[autoFindDriver] API returned ${drivers.length} driver(s)`, drivers.map(d=>({
+          name: d.driverName, locationId: d.locationId,
+          isOnline: d.isOnline, isBusy: d.isBusy,
+          updatedAt: d.updatedAt,
+          distKm: +haversineDist(loc.lat, loc.lng, d.lat, d.lng).toFixed(3),
+          userLat: loc.lat, userLng: loc.lng, driverLat: d.lat, driverLng: d.lng,
+        })));
 
-        // ── Fixed 2 km radius, sorted nearest-first ──────────────────────────
-        const nearby = fresh
-          .map(d => ({ ...d, distKm: haversineDist(loc.lat, loc.lng, d.lat, d.lng) }))
-          .filter(d => d.distKm <= 2)
+        // ── NOTE: updatedAt filter REMOVED — API already guarantees isOnline=true ──
+        // Stationary drivers are still valid even if they haven't sent a GPS ping recently.
+
+        // ── Fixed radius, sorted nearest-first ───────────────────────────────
+        const SEARCH_RADIUS_KM = 10; // ⚠ TESTING: temporarily 10 km (was 2 km)
+        const withDist = drivers
+          .map(d => ({ ...d, distKm: haversineDist(loc.lat, loc.lng, d.lat, d.lng) }));
+        console.log(`[autoFindDriver] after distance calc — within ${SEARCH_RADIUS_KM} km:`,
+          withDist.filter(d => d.distKm <= SEARCH_RADIUS_KM).map(d=>({name:d.driverName, distKm:+d.distKm.toFixed(3)})));
+        const nearby = withDist
+          .filter(d => d.distKm <= SEARCH_RADIUS_KM)
           .sort((a, b) => a.distKm - b.distKm);
 
         setTaxiAutoSearching(false);
@@ -1637,12 +1645,23 @@ export function ClinicMap({
       const res     = await fetch('/api/drivers-online');
       const drivers: OnlineDriver[] = await res.json();
 
-      // Exclude already-tried drivers, filter to 2 km radius, sort nearest-first
+      const SEARCH_RADIUS_KM = 10; // ⚠ TESTING: temporarily 10 km (was 2 km)
+
+      // DEBUG ── log loop redirect search ────────────────────────────────────
+      console.log(`[redirectToNext] API returned ${drivers.length} driver(s), ignored: [${[...loopIgnoredRef.current].join(',')}]`,
+        drivers.map(d => ({
+          name: d.driverName, locationId: d.locationId,
+          distKm: +haversineDist(loc.lat, loc.lng, d.lat, d.lng).toFixed(3),
+          ignored: loopIgnoredRef.current.has(d.locationId),
+        })));
+
+      // Exclude already-tried drivers, filter to radius, sort nearest-first
       const available = drivers
         .filter(d => !loopIgnoredRef.current.has(d.locationId))
         .map(d => ({ ...d, distKm: haversineDist(loc.lat, loc.lng, d.lat, d.lng) }))
-        .filter(d => d.distKm <= 2)
+        .filter(d => d.distKm <= SEARCH_RADIUS_KM)
         .sort((a, b) => a.distKm - b.distKm);
+      console.log(`[redirectToNext] available after filter: ${available.length}`, available.map(d=>({name:d.driverName, distKm:+d.distKm.toFixed(3)})));
 
       if (available.length === 0) {
         // All available drivers tried — give up

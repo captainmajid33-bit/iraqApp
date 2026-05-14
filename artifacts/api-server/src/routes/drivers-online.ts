@@ -48,6 +48,8 @@ router.get("/drivers-online", async (_req, res) => {
         )
       );
 
+    console.log(`[GET /drivers-online] returned ${rows.length} driver(s):`,
+      rows.map(r => ({ name: r.driverName, locationId: r.locationId, isOnline: r.isOnline, isBusy: r.isBusy, lat: r.lat, lng: r.lng, updatedAt: r.updatedAt })));
     res.json(rows);
   } catch (err: any) {
     console.error("[GET /drivers-online] error:", err);
