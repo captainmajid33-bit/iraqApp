@@ -1475,6 +1475,24 @@ export function ClinicMap({
     }
   }, [taxiUserName, taxiUserPhone, gasLocationAddr]);
 
+  // ── Cancel active gas order ────────────────────────────────────────────────
+  const cancelGasOrder = useCallback(async ()=>{
+    const id = activeGasOrderIdRef.current;
+    if (!id) return;
+    try {
+      await fetch(`/api/gas-orders/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'cancelled' }),
+      });
+    } catch { /* ignore network errors — reset UI anyway */ }
+    setActiveGasOrderId(null);
+    setActiveGasOrderStatus('pending');
+    activeGasOrderIdRef.current     = null;
+    activeGasOrderStatusRef.current = 'pending';
+    localStorage.removeItem('diyala_active_gas_order');
+  }, []);
+
   // ── Quick-dispatch: pre-fill name/phone from localStorage when form opens ──
   useEffect(()=>{
     if (!showTaxiQuickForm) return;
@@ -3383,6 +3401,20 @@ export function ClinicMap({
                 :null}
               </div>
             </div>
+            {/* Cancel — only while pending or accepted */}
+            {(activeGasOrderStatus==='pending'||activeGasOrderStatus==='accepted') && (
+              <button
+                onClick={cancelGasOrder}
+                style={{
+                  background:'rgba(255,45,120,0.12)',
+                  border:'1px solid rgba(255,45,120,0.45)',
+                  color:'#ff2d78',cursor:'pointer',
+                  fontSize:'11px',fontFamily:'Rajdhani,sans-serif',fontWeight:700,
+                  padding:'5px 10px',flexShrink:0,letterSpacing:'0.05em',
+                  borderRadius:'2px',
+                }}
+              >إلغاء</button>
+            )}
             {/* Dismiss — only after final state */}
             {(activeGasOrderStatus==='done'||activeGasOrderStatus==='cancelled') && (
               <button
