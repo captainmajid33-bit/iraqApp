@@ -199,13 +199,24 @@ function getAmenityStyle(amenity: string): { emoji: string; color: string } {
   return { emoji:'📍', color:'#00d4ff' };
 }
 
+// Priority tier for zoom-based visibility filtering
+// 1 = always (hospitals, mosques, fuel, schools) — zoom ≥ 12
+// 2 = medium (restaurants, pharmacies, banks, police) — zoom ≥ 14
+// 3 = low (cafes, hotels, bakeries, parks …) — zoom ≥ 16
+function getAmenityPriority(amenity: string): number {
+  if (/hospital|clinic|health|fuel|mosque|place_of_worship|school|university|college|police/.test(amenity)) return 1;
+  if (/pharmacy|bank|atm|supermarket|restaurant|fast_food|library/.test(amenity)) return 2;
+  return 3;
+}
+
+// Clean label — NO colored box, just white text with dark stroke (no visual clutter)
 function poiNeonHtml(emoji: string, label: string, color: string): string {
-  const short = label.length > 18 ? label.slice(0, 18) + '…' : label;
-  return `<div style="display:flex;flex-direction:column;align-items:center;cursor:pointer;filter:drop-shadow(0 0 7px ${color}80);">
-    <div style="background:rgba(0,8,18,0.96);border:2px solid ${color};color:${color};font-family:'Rajdhani',sans-serif;font-size:10px;font-weight:700;padding:2px 7px;white-space:nowrap;max-width:150px;overflow:hidden;text-overflow:ellipsis;letter-spacing:0.03em;box-shadow:0 0 8px ${color}44;">${short}</div>
-    <div style="width:2px;height:5px;background:${color};"></div>
-    <div style="width:28px;height:28px;background:${color}18;border:2px solid ${color};border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:14px;box-shadow:0 0 10px ${color}55;">${emoji}</div>
-    <div style="width:2px;height:4px;background:linear-gradient(to bottom,${color},transparent);"></div>
+  const short = label.length > 15 ? label.slice(0, 14) + '…' : label;
+  // Icon is 30% smaller than before: 20 px circle (was 28 px)
+  return `<div style="display:flex;flex-direction:column;align-items:center;cursor:pointer;filter:drop-shadow(0 0 4px ${color}50);">
+    <div style="color:#f0f4ff;font-family:'Noto Sans Arabic',Rajdhani,sans-serif;font-size:9px;font-weight:700;white-space:nowrap;text-shadow:0 0 3px #000,1px 1px 0 #000,-1px -1px 0 #000,1px -1px 0 #000,-1px 1px 0 #000;letter-spacing:0.02em;text-align:center;">${short}</div>
+    <div style="width:1.5px;height:3px;background:${color};opacity:0.6;"></div>
+    <div style="width:20px;height:20px;background:${color}20;border:1.5px solid ${color};border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:10px;box-shadow:0 0 5px ${color}44;">${emoji}</div>
   </div>`;
 }
 
@@ -910,21 +921,39 @@ export function ClinicMap({
     let lastBoundsKey = '';
     let poiTimer: ReturnType<typeof setTimeout>|null = null;
 
-    // Build markers into a target layer — reuses existing GTA icon helpers
-    const buildPoiMarkers = (elements: any[], target: L.LayerGroup) => {
-      elements.slice(0, 300).forEach((el: any) => {
+    // Build markers into a target layer — zoom-filtered, collision-pruned, 30% smaller icons
+    const buildPoiMarkers = (elements: any[], target: L.LayerGroup, zoom: number) => {
+      // Priority threshold based on zoom
+      const maxPriority = zoom >= 16 ? 3 : zoom >= 14 ? 2 : 1;
+
+      // Collision grid: min distance in degrees between two markers
+      // (proportional to zoom level so nearby icons don't pile up)
+      const minDistDeg = zoom >= 16 ? 0.0006 : zoom >= 14 ? 0.0018 : 0.004;
+      const placed: { lat: number; lon: number }[] = [];
+
+      const tooClose = (lat: number, lon: number): boolean =>
+        placed.some(p => Math.abs(p.lat - lat) < minDistDeg && Math.abs(p.lon - lon) < minDistDeg);
+
+      elements.slice(0, 400).forEach((el: any) => {
         if (typeof el.lat !== 'number') return;
         const amenityKey = el.tags?.amenity ?? el.tags?.leisure ?? '';
+        const priority = getAmenityPriority(amenityKey);
+        if (priority > maxPriority) return;              // zoom-based density filter
+        if (tooClose(el.lat, el.lon)) return;            // collision prevention
+
         const { emoji, color } = getAmenityStyle(amenityKey);
         const name = (el.tags?.['name:ar'] ?? el.tags?.name ?? '').trim();
         if (!name) return;
+
+        placed.push({ lat: el.lat, lon: el.lon });
 
         const marker = L.marker([el.lat, el.lon], {
           icon: L.divIcon({
             className: '',
             html: poiNeonHtml(emoji, name, color),
-            iconSize:   [36, 52],
-            iconAnchor: [18, 52],
+            // 30% smaller: was [36,52]/anchor[18,52] → now [26,36]/anchor[13,36]
+            iconSize:   [26, 36],
+            iconAnchor: [13, 36],
           }),
           interactive:  true,
           keyboard:     false,
@@ -995,7 +1024,8 @@ export function ClinicMap({
     // Actual fetch + atomic swap
     const doFetchPOIs = async () => {
       const map = mapRef.current; if (!map) return;
-      if (map.getZoom() < 12) return; // keep last set visible below threshold
+      const zoom = map.getZoom();
+      if (zoom < 12) return; // keep last set visible below threshold
 
       const b   = map.getBounds();
       // Coarser key (2dp ≈ 1 km) so tiny pans don't re-fetch
@@ -1021,7 +1051,7 @@ export function ClinicMap({
         // Build into the INACTIVE layer first (zero flash)
         const buildLayer = activePoi === poiLayerA ? poiLayerB : poiLayerA;
         buildLayer.clearLayers();
-        buildPoiMarkers(data.elements ?? [], buildLayer);
+        buildPoiMarkers(data.elements ?? [], buildLayer, zoom);
 
         // Atomic swap: add new → remove old
         buildLayer.addTo(mapRef.current);
