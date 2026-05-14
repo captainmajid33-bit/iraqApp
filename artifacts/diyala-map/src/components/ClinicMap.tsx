@@ -572,6 +572,12 @@ export function ClinicMap({
   const [taxiQuickDistKm,   setTaxiQuickDistKm]   = useState<number|null>(null);
   const [taxiQuickPrice,    setTaxiQuickPrice]     = useState<number|null>(null);
   const taxiQuickPolyRef    = useRef<L.Polyline|null>(null);
+  // ── Gas order form ────────────────────────────────────────────────────────
+  const [showGasForm,    setShowGasForm]    = useState(false);
+  const [gasFormError,   setGasFormError]   = useState<string|null>(null);
+  const [gasFormLoading, setGasFormLoading] = useState(false);
+  const [gasFormSuccess, setGasFormSuccess] = useState(false);
+  const [gasLocationAddr, setGasLocationAddr] = useState('');
   const taxiManualARef      = useRef<L.Marker|null>(null);
   const manualNavLayerRef   = useRef<L.LayerGroup|null>(null);
   // Destination autocomplete (Nominatim)
@@ -1390,6 +1396,68 @@ export function ClinicMap({
       locateUserRef.current?.((newLoc)=> doSearch(newLoc));
     }
   },[taxiCategory, onFilterChange]);
+
+  // ── Gas form: open with auto reverse-geocode ─────────────────────────────
+  const openGasForm = useCallback(async ()=>{
+    setGasFormError(null);
+    setGasFormSuccess(false);
+    setGasFormLoading(false);
+    // pre-fill name/phone from localStorage
+    try {
+      const saved = JSON.parse(localStorage.getItem('diyala_user') ?? 'null');
+      if (saved?.name)  setTaxiUserName(saved.name);
+      if (saved?.phone) setTaxiUserPhone(saved.phone);
+    } catch { /* ignore */ }
+    const loc = userLocationRef.current;
+    if (loc) {
+      setGasLocationAddr(`${loc.lat.toFixed(5)}, ${loc.lng.toFixed(5)}`);
+      try {
+        const r = await fetch(
+          `https://nominatim.openstreetmap.org/reverse?format=json&lat=${loc.lat}&lon=${loc.lng}&accept-language=ar`
+        );
+        const d = await r.json();
+        if (d?.display_name) setGasLocationAddr(d.display_name);
+      } catch { /* keep lat/lng fallback */ }
+    } else {
+      setGasLocationAddr('');
+    }
+    setShowGasForm(true);
+  }, []);
+
+  const submitGasOrder = useCallback(async ()=>{
+    const name  = taxiUserName.trim();
+    const phone = taxiUserPhone.trim();
+    if (!name)  { setGasFormError('الرجاء إدخال اسمك في الملف الشخصي أولاً');        return; }
+    if (!phone) { setGasFormError('الرجاء إدخال رقم الهاتف في الملف الشخصي أولاً'); return; }
+    const loc = userLocationRef.current;
+    if (!loc)   { setGasFormError('تعذّر تحديد موقعك — فعّل الـ GPS أولاً');          return; }
+    setGasFormError(null);
+    setGasFormLoading(true);
+    try {
+      const res = await fetch('/api/gas-orders', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userName:        name,
+          phone,
+          locationAddress: gasLocationAddr || `${loc.lat.toFixed(5)}, ${loc.lng.toFixed(5)}`,
+          lat: loc.lat,
+          lng: loc.lng,
+        }),
+      });
+      if (res.ok) {
+        setGasFormSuccess(true);
+        setTimeout(()=>{ setShowGasForm(false); setGasFormSuccess(false); }, 3000);
+      } else {
+        const d = await res.json().catch(()=>({}));
+        setGasFormError((d as any).error ?? 'فشل إرسال الطلب');
+      }
+    } catch {
+      setGasFormError('خطأ في الشبكة — أعد المحاولة');
+    } finally {
+      setGasFormLoading(false);
+    }
+  }, [taxiUserName, taxiUserPhone, gasLocationAddr]);
 
   // ── Quick-dispatch: pre-fill name/phone from localStorage when form opens ──
   useEffect(()=>{
@@ -3182,6 +3250,150 @@ export function ClinicMap({
         </div>
       )}
 
+      {/* ── Gas Order Form ────────────────────────────────────────────────────── */}
+      {showGasForm && (
+        <div style={{
+          position:'absolute',inset:0,zIndex:5000,
+          background:'rgba(5,8,15,0.93)',
+          display:'flex',alignItems:'center',justifyContent:'center',
+          padding:'20px 16px',boxSizing:'border-box',
+          backdropFilter:'blur(8px)',
+          direction:'rtl',
+        }}>
+          <div style={{
+            background:'rgba(8,12,22,0.98)',
+            border:'2px solid rgba(255,45,120,0.6)',
+            boxShadow:'0 0 60px rgba(255,45,120,0.18), 0 0 120px rgba(255,45,120,0.08)',
+            padding:'28px 24px',
+            width:'100%',maxWidth:'380px',
+            display:'flex',flexDirection:'column',gap:'16px',
+          }}>
+            {/* Header */}
+            <div style={{textAlign:'center',paddingBottom:'4px'}}>
+              <div style={{position:'relative',width:'64px',height:'64px',margin:'0 auto 12px'}}>
+                <div style={{position:'absolute',inset:0,borderRadius:'50%',border:'2px solid rgba(255,45,120,0.15)',animation:'lf-ping 2s cubic-bezier(0,0,0.2,1) infinite'}}/>
+                <div style={{position:'absolute',inset:'8px',borderRadius:'50%',border:'1.5px solid rgba(255,45,120,0.3)',animation:'lf-ping 2s cubic-bezier(0,0,0.2,1) infinite',animationDelay:'0.4s'}}/>
+                <div style={{position:'absolute',inset:'18px',borderRadius:'50%',border:'1.5px solid rgba(255,45,120,0.5)',animation:'lf-ping 2s cubic-bezier(0,0,0.2,1) infinite',animationDelay:'0.8s'}}/>
+                <span style={{position:'absolute',inset:0,display:'flex',alignItems:'center',justifyContent:'center',fontSize:'24px'}}>⛽</span>
+              </div>
+              <div style={{fontFamily:'Orbitron,sans-serif',fontSize:'9px',color:'rgba(255,45,120,0.6)',letterSpacing:'0.2em',marginBottom:'4px'}}>GAS DISPATCH</div>
+              <div style={{fontFamily:'Rajdhani,sans-serif',fontSize:'20px',fontWeight:700,color:'#f5f0d0'}}>طلب توصيل غاز</div>
+            </div>
+
+            {/* Read-only name + phone */}
+            {([
+              { label:'الاسم',  value:taxiUserName,  icon:'👤' },
+              { label:'الهاتف', value:taxiUserPhone, icon:'📞' },
+            ] as const).map(f=>(
+              <div key={f.label}>
+                <div style={{display:'flex',alignItems:'center',gap:'5px',marginBottom:'5px'}}>
+                  <span style={{fontSize:'10px'}}>{f.icon}</span>
+                  <span style={{fontFamily:'Rajdhani,sans-serif',fontSize:'11px',color:'rgba(255,45,120,0.55)',letterSpacing:'0.06em'}}>{f.label}</span>
+                  <span style={{fontFamily:'Orbitron,sans-serif',fontSize:'7px',color:'rgba(0,245,212,0.5)',letterSpacing:'0.12em',marginRight:'auto'}}>محفوظ</span>
+                </div>
+                <input
+                  readOnly
+                  tabIndex={-1}
+                  inputMode="none"
+                  value={f.value}
+                  onFocus={e=>e.target.blur()}
+                  style={{
+                    width:'100%',boxSizing:'border-box',
+                    background:'rgba(255,45,120,0.03)',
+                    border:'1px solid rgba(255,45,120,0.15)',
+                    color:'rgba(245,240,208,0.6)',fontFamily:'Rajdhani,sans-serif',fontSize:'15px',
+                    padding:'10px 12px',outline:'none',
+                    cursor:'default',userSelect:'none',
+                    WebkitUserSelect:'none',
+                  }}
+                />
+              </div>
+            ))}
+
+            {/* Auto-detected location */}
+            <div>
+              <div style={{display:'flex',alignItems:'center',gap:'5px',marginBottom:'5px'}}>
+                <span style={{fontSize:'10px'}}>📍</span>
+                <span style={{fontFamily:'Rajdhani,sans-serif',fontSize:'11px',color:'rgba(255,45,120,0.55)',letterSpacing:'0.06em'}}>موقع الطلب</span>
+                <span style={{fontFamily:'Orbitron,sans-serif',fontSize:'7px',color:'rgba(0,245,212,0.5)',letterSpacing:'0.12em',marginRight:'auto'}}>تلقائي</span>
+              </div>
+              <input
+                readOnly
+                tabIndex={-1}
+                inputMode="none"
+                value={gasLocationAddr || 'جاري تحديد موقعك...'}
+                onFocus={e=>e.target.blur()}
+                style={{
+                  width:'100%',boxSizing:'border-box',
+                  background:'rgba(0,245,212,0.04)',
+                  border:'1px solid rgba(0,245,212,0.2)',
+                  color:'rgba(0,245,212,0.75)',fontFamily:'Rajdhani,sans-serif',fontSize:'12px',
+                  padding:'10px 12px',outline:'none',
+                  cursor:'default',userSelect:'none',
+                  WebkitUserSelect:'none',
+                  lineHeight:'1.4',
+                }}
+              />
+            </div>
+
+            {/* Error */}
+            {gasFormError && (
+              <div style={{
+                background:'rgba(255,45,120,0.12)',border:'1px solid rgba(255,45,120,0.4)',
+                color:'#ff2d78',fontFamily:'Rajdhani,sans-serif',fontSize:'13px',
+                padding:'8px 12px',textAlign:'center',
+              }}>{gasFormError}</div>
+            )}
+
+            {/* Success */}
+            {gasFormSuccess && (
+              <div style={{
+                background:'rgba(0,245,100,0.1)',border:'1px solid rgba(0,245,100,0.35)',
+                color:'#00f564',fontFamily:'Rajdhani,sans-serif',fontSize:'14px',
+                padding:'10px 12px',textAlign:'center',fontWeight:700,
+              }}>✓ تم إرسال طلبك بنجاح!</div>
+            )}
+
+            {/* Buttons */}
+            <div style={{display:'flex',gap:'10px',paddingTop:'4px'}}>
+              <button
+                onClick={()=>{ setShowGasForm(false); setGasFormError(null); }}
+                disabled={gasFormLoading}
+                style={{
+                  flex:1,padding:'11px 8px',
+                  background:'none',border:'1px solid rgba(255,45,120,0.25)',
+                  color:'rgba(255,45,120,0.6)',fontFamily:'Orbitron,sans-serif',fontSize:'9px',
+                  letterSpacing:'0.1em',cursor:'pointer',transition:'all 0.2s',
+                }}
+                onMouseEnter={e=>{(e.currentTarget as HTMLElement).style.background='rgba(255,45,120,0.08)';}}
+                onMouseLeave={e=>{(e.currentTarget as HTMLElement).style.background='none';}}
+              >إلغاء</button>
+              <button
+                onClick={submitGasOrder}
+                disabled={gasFormLoading || gasFormSuccess}
+                style={{
+                  flex:2,padding:'11px 8px',
+                  background: gasFormLoading ? 'rgba(255,45,120,0.08)' : 'rgba(255,45,120,0.18)',
+                  border:'1px solid rgba(255,45,120,0.7)',
+                  color:'#ff2d78',fontFamily:'Orbitron,sans-serif',fontSize:'9px',
+                  letterSpacing:'0.08em',cursor: gasFormLoading ? 'wait' : 'pointer',
+                  fontWeight:700,transition:'all 0.2s',
+                  display:'flex',alignItems:'center',justifyContent:'center',gap:'7px',
+                }}
+                onMouseEnter={e=>{ if(!gasFormLoading)(e.currentTarget as HTMLElement).style.background='rgba(255,45,120,0.3)'; }}
+                onMouseLeave={e=>{ if(!gasFormLoading)(e.currentTarget as HTMLElement).style.background='rgba(255,45,120,0.18)'; }}
+              >
+                {gasFormLoading
+                  ? <svg width="14" height="14" viewBox="0 0 28 28" fill="none" style={{animation:'lf-spin 0.8s linear infinite'}}><circle cx="14" cy="14" r="10" stroke="rgba(255,45,120,0.5)" strokeWidth="2.5" strokeDasharray="22 14" strokeLinecap="round"/></svg>
+                  : <span style={{fontSize:'14px'}}>⛽</span>
+                }
+                {gasFormLoading ? 'جاري الإرسال...' : 'اطلب غاز الآن'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showTaxiPrompt && taxiStep === 'idle' && (
         <div style={{
           position:'absolute',top:'14px',left:'50%',transform:'translateX(-50%)',
@@ -4080,9 +4292,9 @@ export function ClinicMap({
         <button
           onClick={()=>{
             if (gasCategory) {
-              onFilterChange(gasCategory.slug);
               setShowMoreModal(false);
               setShowTaxiPrompt(false);
+              openGasForm();
             }
           }}
           style={{

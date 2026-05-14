@@ -10,6 +10,7 @@ import driversOnlineRouter from "./drivers-online";
 import settingsRouter from "./settings";
 import storageRouter from "./storage";
 import ratingsRouter from "./ratings";
+import gasOrdersRouter from "./gas-orders";
 
 const router: IRouter = Router();
 
@@ -24,5 +25,6 @@ router.use(driversOnlineRouter);
 router.use(settingsRouter);
 router.use(storageRouter);
 router.use(ratingsRouter);
+router.use(gasOrdersRouter);
 
 export default router;

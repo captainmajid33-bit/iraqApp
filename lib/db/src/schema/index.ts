@@ -7,3 +7,4 @@ export * from "./messages";
 export * from "./drivers_online";
 export * from "./settings";
 export * from "./taxi_ratings";
+export * from "./gas_orders";
