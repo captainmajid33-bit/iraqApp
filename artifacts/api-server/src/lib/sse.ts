@@ -2,29 +2,6 @@ import type { Response } from "express";
 
 const clients = new Set<Response>();
 
-// ── Separate client set for /api/orders/stream (partner app gas orders) ───────
-const ordersStreamClients = new Set<Response>();
-
-export function addOrdersStreamClient(res: Response) {
-  ordersStreamClients.add(res);
-}
-
-export function removeOrdersStreamClient(res: Response) {
-  ordersStreamClients.delete(res);
-}
-
-/** Broadcast pending gas orders to all /api/orders/stream clients.
- *  Format: data: {"type":"gas_order_update","orders":[...]}  (NO event: line)
- *  Partner app uses onmessage (not addEventListener) so must be a plain data message.
- */
-export function broadcastGasOrdersToOrdersStream(orders: Record<string, unknown>[]) {
-  if (ordersStreamClients.size === 0 || orders.length === 0) return;
-  const raw = `data: ${JSON.stringify({ type: "gas_order_update", orders })}\n\n`;
-  for (const res of ordersStreamClients) {
-    try { res.write(raw); } catch { ordersStreamClients.delete(res); }
-  }
-}
-
 export function addSseClient(res: Response) {
   clients.add(res);
 }

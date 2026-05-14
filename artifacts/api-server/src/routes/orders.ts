@@ -1,9 +1,9 @@
 import { Router, type IRouter } from "express";
 import { db } from "@workspace/db";
-import { ordersTable, insertOrderSchema, locationsTable, driversOnlineTable, gasOrdersTable } from "@workspace/db";
+import { ordersTable, insertOrderSchema, locationsTable, driversOnlineTable } from "@workspace/db";
 import { eq, desc } from "drizzle-orm";
 import { requireAdmin } from "./admin";
-import { broadcastOrderUpdate, broadcastDriverUpdate, addOrdersStreamClient, removeOrdersStreamClient, broadcastGasOrdersToOrdersStream } from "../lib/sse";
+import { broadcastOrderUpdate, broadcastDriverUpdate } from "../lib/sse";
 
 const router: IRouter = Router();
 
@@ -96,32 +96,10 @@ router.post("/orders", async (req, res) => {
   }
 });
 
-// ── Helper: map a gas order to the shape the partner app expects ──────────────
-function gasOrderToOrderShape(o: typeof gasOrdersTable.$inferSelect, locationId?: string | null) {
-  return {
-    id:             `gas_${o.id}`,
-    type:           "gas",
-    locationId:     locationId ?? null,
-    userName:       o.userName,
-    phone:          o.phone,
-    destination:    o.locationAddress,
-    toLat:          null,
-    toLng:          null,
-    estimatedPrice: null,
-    lat:            o.lat,
-    lng:            o.lng,
-    driverLat:      null,
-    driverLng:      null,
-    status:         o.status,
-    createdAt:      o.createdAt,
-  };
-}
-
-// ── GET /api/orders/stream — SSE for partner app gas-order notifications ──────
+// ── GET /api/orders/stream — SSE for partner app (TAXI orders only) ───────────
 // MUST be registered before /orders/:id so Express doesn't treat "stream" as an id.
-// Partner app connects: EventSource(`/api/orders/stream?locationId=24`)
-// and listens via onmessage for: data: {"type":"gas_order_update","orders":[...]}
-router.get("/orders/stream", async (req, res) => {
+// Gas orders are handled separately via /api/events (gas_order_update events).
+router.get("/orders/stream", (req, res) => {
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache, no-transform");
   res.setHeader("Connection", "keep-alive");
@@ -129,35 +107,11 @@ router.get("/orders/stream", async (req, res) => {
   res.flushHeaders();
   res.write(":connected\n\n");
 
-  addOrdersStreamClient(res);
-
-  const locationId = req.query.locationId as string | undefined;
-
-  // Replay all pending gas orders immediately to this new client
-  try {
-    const pending = await db
-      .select()
-      .from(gasOrdersTable)
-      .where(eq(gasOrdersTable.status, "pending"))
-      .orderBy(desc(gasOrdersTable.createdAt));
-
-    if (pending.length > 0) {
-      const orders = pending.map(o => gasOrderToOrderShape(o, locationId));
-      res.write(`data: ${JSON.stringify({ type: "gas_order_update", orders })}\n\n`);
-      console.log(`[/orders/stream] locationId=${locationId ?? "?"} — replayed ${pending.length} pending gas order(s)`);
-    }
-  } catch (err) {
-    console.warn("[/orders/stream] replay error:", err);
-  }
-
   const hb = setInterval(() => {
     try { res.write(":heartbeat\n\n"); } catch { clearInterval(hb); }
   }, 25_000);
 
-  req.on("close", () => {
-    clearInterval(hb);
-    removeOrdersStreamClient(res);
-  });
+  req.on("close", () => clearInterval(hb));
 });
 
 // ── GET /api/orders/:id — public, customer polls for status + driver location ─
@@ -257,8 +211,8 @@ router.patch("/orders/:id/customer-cancel", async (req, res) => {
   }
 });
 
-// ── GET /api/orders — partners + admin: list orders, optionally by locationId ─
-// When status=pending, gas orders for gas agents are merged in.
+// ── GET /api/orders — partners + admin: TAXI orders only ─────────────────────
+// Gas orders are served separately via GET /api/gas-orders/pending.
 router.get("/orders", async (req, res) => {
   const partnerKey  = req.headers["x-partner-key"]    as string | undefined;
   const merchantKey = req.headers["x-merchant-key"]   as string | undefined;
@@ -268,33 +222,18 @@ router.get("/orders", async (req, res) => {
     adminPass === "Admin2026";
   const isPartner = !!(partnerKey || merchantKey);
 
-  // Allow partners AND admins; block unauthenticated requests only if strict auth is on
   if (!isAdmin && !isPartner && process.env.ADMIN_PASSWORD) {
     res.status(403).json({ error: "غير مصرح" }); return;
   }
 
   try {
     const locationId = req.query.locationId ? Number(req.query.locationId) : null;
-    const statusFilter = req.query.status as string | undefined;
 
     const rows = locationId
       ? await db.select().from(ordersTable).where(eq(ordersTable.locationId, locationId)).orderBy(desc(ordersTable.createdAt))
       : await db.select().from(ordersTable).orderBy(desc(ordersTable.createdAt));
 
-    // ── When fetching pending orders for a partner, also include pending gas orders ─
-    let allRows: unknown[] = rows;
-    if (statusFilter === "pending" || !statusFilter) {
-      const gasRows = await db
-        .select()
-        .from(gasOrdersTable)
-        .where(eq(gasOrdersTable.status, "pending"))
-        .orderBy(desc(gasOrdersTable.createdAt));
-
-      const mappedGas = gasRows.map(o => gasOrderToOrderShape(o, locationId ? String(locationId) : null));
-      allRows = [...rows, ...mappedGas];
-    }
-
-    res.json(allRows);
+    res.json(rows);
   } catch (err: any) {
     console.error("[GET /orders] error:", err);
     res.status(500).json({ error: "فشل جلب الطلبات" });
