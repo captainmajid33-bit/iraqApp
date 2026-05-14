@@ -243,6 +243,7 @@ export function ClinicMap({
   const routeGlowRef   = useRef<L.Polyline|null>(null);
   const routeLineRef   = useRef<L.Polyline|null>(null);
   const catStyleRef    = useRef<HTMLStyleElement|null>(null);
+  const poiLayerRef    = useRef<L.LayerGroup|null>(null);
   // User location tracking
   const watchIdRef     = useRef<number|null>(null);
   const headingRef     = useRef<number|null>(null);
@@ -895,7 +896,91 @@ export function ClinicMap({
       .addTo(mapRef.current)
       .bindPopup(L.popup({className:'map-popup mission-popup',closeButton:false,autoPan:true,offset:[0,-10]}).setContent(missionEl));
 
+    // ── OSM POI overlay — mosques, restaurants, parks, hospitals etc ────────
+    const poiLayer = L.layerGroup().addTo(mapRef.current);
+    poiLayerRef.current = poiLayer;
+
+    const POI_CAT: Record<string,{emoji:string;color:string}> = {
+      place_of_worship:{emoji:'🕌',color:'#f5c518'},
+      mosque:          {emoji:'🕌',color:'#f5c518'},
+      restaurant:      {emoji:'🍽️',color:'#ff6b35'},
+      cafe:            {emoji:'☕',color:'#c8a26b'},
+      fast_food:       {emoji:'🍟',color:'#ff9900'},
+      hospital:        {emoji:'🏥',color:'#00d4ff'},
+      clinic:          {emoji:'🏥',color:'#00d4ff'},
+      pharmacy:        {emoji:'💊',color:'#00ff9f'},
+      school:          {emoji:'🏫',color:'#a78bfa'},
+      university:      {emoji:'🎓',color:'#a78bfa'},
+      fuel:            {emoji:'⛽',color:'#ff2d78'},
+      bank:            {emoji:'🏦',color:'#00f5d4'},
+      park:            {emoji:'🌿',color:'#39ff14'},
+      garden:          {emoji:'🌺',color:'#39ff14'},
+      supermarket:     {emoji:'🛒',color:'#ff9900'},
+      hotel:           {emoji:'🏨',color:'#c084fc'},
+      bakery:          {emoji:'🥖',color:'#fb923c'},
+      butcher:         {emoji:'🥩',color:'#ef4444'},
+    };
+
+    let poiAbort: AbortController|null = null;
+    let lastBoundsKey = '';
+
+    const fetchPOIs = async () => {
+      const map = mapRef.current;
+      if (!map) return;
+      const zoom = map.getZoom();
+      if (zoom < 14) { poiLayer.clearLayers(); lastBoundsKey = ''; return; }
+
+      const b   = map.getBounds();
+      const key = `${b.getSouth().toFixed(3)},${b.getWest().toFixed(3)},${b.getNorth().toFixed(3)},${b.getEast().toFixed(3)}`;
+      if (key === lastBoundsKey) return;
+      lastBoundsKey = key;
+
+      poiAbort?.abort();
+      poiAbort = new AbortController();
+
+      const S=b.getSouth(), W=b.getWest(), N=b.getNorth(), E=b.getEast();
+      const q = `[out:json][timeout:20];(
+        node["amenity"~"place_of_worship|restaurant|cafe|fast_food|hospital|clinic|pharmacy|school|university|fuel|bank|supermarket|hotel|bakery|butcher"](${S},${W},${N},${E});
+        node["leisure"~"park|garden"](${S},${W},${N},${E});
+      );out body;`;
+
+      try {
+        const res = await fetch('https://overpass-api.de/api/interpreter',{
+          method:'POST', body:q, signal:poiAbort.signal,
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        poiLayer.clearLayers();
+
+        const elements: any[] = data.elements ?? [];
+        elements.slice(0, 300).forEach((el:any) => {
+          const amenity = el.tags?.amenity ?? el.tags?.leisure ?? '';
+          const cat = POI_CAT[amenity] ?? { emoji:'📍', color:'#94a3b8' };
+          const name = el.tags?.['name:ar'] ?? el.tags?.name ?? '';
+          if (!name || typeof el.lat !== 'number') return;
+
+          const shortName = name.length > 18 ? name.slice(0,17)+'…' : name;
+          const icon = L.divIcon({
+            className: '',
+            html: `<div style="display:flex;flex-direction:column;align-items:center;pointer-events:none;transform:translate(-50%,-100%);">
+              <div style="background:rgba(5,8,15,0.9);border:1.5px solid ${cat.color};border-radius:50%;width:26px;height:26px;display:flex;align-items:center;justify-content:center;font-size:13px;box-shadow:0 0 8px ${cat.color}77;flex-shrink:0;">${cat.emoji}</div>
+              <div style="font-family:'Noto Sans Arabic',Rajdhani,sans-serif;font-size:10px;font-weight:600;color:#f0f0f0;text-shadow:0 1px 5px #000,0 0 12px #000,1px 1px 0 #000;white-space:nowrap;text-align:center;margin-top:2px;line-height:1.2;">${shortName}</div>
+            </div>`,
+            iconSize:  [0, 0],
+            iconAnchor:[0, 0],
+          });
+          L.marker([el.lat, el.lon], { icon, interactive:false, keyboard:false }).addTo(poiLayer);
+        });
+      } catch (_) { /* aborted or network error — silent */ }
+    };
+
+    mapRef.current.on('moveend zoomend', fetchPOIs);
+    // Slight delay on initial fetch so map tiles load first
+    setTimeout(fetchPOIs, 600);
+
     return ()=>{
+      poiAbort?.abort();
+      poiLayer.remove(); poiLayerRef.current = null;
       missionMarkerRef.current?.remove(); missionMarkerRef.current=null;
       trafficLayersRef.current.forEach(l=>l.remove()); trafficLayersRef.current=[];
       mapRef.current?.remove(); mapRef.current=null;
