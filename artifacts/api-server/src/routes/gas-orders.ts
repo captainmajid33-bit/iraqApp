@@ -7,6 +7,35 @@ import { broadcastGasOrderUpdate, broadcastGasNewMessage } from "../lib/sse";
 
 const router: IRouter = Router();
 
+// ── System message helper ─────────────────────────────────────────────────────
+const STATUS_MESSAGES: Record<string, string> = {
+  accepted:  "✅ وكيل الغاز قبل طلبك وهو في الطريق إليك",
+  arrived:   "📍 وكيل الغاز وصل إلى موقعك وهو بانتظارك",
+  completed: "✅ تم تسليم الغاز بنجاح. شكراً لك!",
+  cancelled: "❌ تم إلغاء الطلب",
+};
+
+async function insertSystemMsg(gasOrderId: number, content: string) {
+  try {
+    const [msg] = await db.insert(gasOrderMessagesTable).values({
+      gasOrderId,
+      senderRole: "system",
+      content,
+      isSystemMsg: true,
+    }).returning();
+    broadcastGasNewMessage({
+      id:          msg.id,
+      gasOrderId:  msg.gasOrderId,
+      senderRole:  msg.senderRole,
+      content:     msg.content,
+      isSystemMsg: msg.isSystemMsg,
+      createdAt:   msg.createdAt,
+    });
+  } catch (e) {
+    console.warn(`[insertSystemMsg] gasOrderId=${gasOrderId}:`, e);
+  }
+}
+
 // ── Haversine distance (km) between two lat/lng points ───────────────────────
 function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): number {
   const R = 6371;
@@ -138,6 +167,7 @@ router.post("/gas-orders/:id/cancel", async (req, res) => {
 
     console.log(`[CANCEL /gas-orders/${id}] customer cancelled`);
     broadcastGasOrderUpdate({ id: updated.id, status: updated.status, agentId: updated.agentId });
+    void insertSystemMsg(id, STATUS_MESSAGES.cancelled);
     res.json({ ok: true });
   } catch (err: any) {
     console.error(`[CANCEL /gas-orders/${id}] error:`, err);
@@ -230,6 +260,7 @@ router.post("/gas-orders/:id/accept", async (req, res) => {
     console.log(`[ACCEPT /gas-orders/${id}] agent=${agentId}` +
       (agentLat ? ` loc=(${agentLat},${agentLng})` : ""));
     broadcastGasOrderUpdate({ id: updated.id, status: updated.status, agentId: updated.agentId });
+    void insertSystemMsg(id, STATUS_MESSAGES.accepted);
     res.json({ ok: true, order: updated });
   } catch (err: any) {
     console.error(`[ACCEPT /gas-orders/${id}] error:`, err);
@@ -277,6 +308,8 @@ router.patch("/gas-orders/:id", async (req, res) => {
     if (!updated) { res.status(404).json({ error: "الطلب غير موجود" }); return; }
     console.log(`[PATCH /gas-orders/${id}] status → ${status}`);
     broadcastGasOrderUpdate({ id: updated.id, status: updated.status, agentId: updated.agentId });
+    const sysMsg = STATUS_MESSAGES[String(status)];
+    if (sysMsg) void insertSystemMsg(id, sysMsg);
     res.json({ ok: true, order: updated });
   } catch (err: any) {
     console.error(`[PATCH /gas-orders/${id}] error:`, err);
