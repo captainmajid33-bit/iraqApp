@@ -276,10 +276,58 @@ function MapEditorTab({ cats, toast }: { cats: Cat[]; toast: ReturnType<typeof u
   const container = useRef<HTMLDivElement>(null);
   const mapRef = useRef<L.Map | null>(null);
   const markers = useRef<Map<number, L.Marker>>(new Map());
+  const adminMarkerRef = useRef<L.Marker | null>(null);
   const [locs, setLocs] = useState<Loc[]>([]);
   const [catFilter, setCatFilter] = useState("");
   const [saving, setSaving] = useState<number | null>(null);
+  const [gpsLoading, setGpsLoading] = useState(false);
   const catMap = Object.fromEntries(cats.map(c => [c.slug, c]));
+
+  const flyToMyLocation = () => {
+    if (!navigator.geolocation) { toast.show("المتصفح لا يدعم GPS", false); return; }
+    setGpsLoading(true);
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const { latitude: lat, longitude: lng } = pos.coords;
+        setGpsLoading(false);
+        if (!mapRef.current) return;
+        mapRef.current.flyTo([lat, lng], 19, { animate: true, duration: 1.2 });
+
+        // Remove previous admin marker if any
+        adminMarkerRef.current?.remove();
+
+        const icon = L.divIcon({
+          className: "",
+          html: `<div style="position:relative;display:flex;flex-direction:column;align-items:center;gap:3px">
+            <div style="position:absolute;inset:-8px;border-radius:50%;border:2px solid #00f5d4;opacity:0.5;animation:lf-ping 1.8s cubic-bezier(0,0,0.2,1) infinite"></div>
+            <div style="width:36px;height:36px;border-radius:50%;background:rgba(0,245,212,0.15);border:2.5px solid #00f5d4;display:flex;align-items:center;justify-content:center;box-shadow:0 0 20px #00f5d488;position:relative;z-index:1">
+              <span style="font-size:17px">📍</span>
+            </div>
+            <div style="background:rgba(0,245,212,0.18);border:1px solid rgba(0,245,212,0.5);color:#00f5d4;font-family:Orbitron,sans-serif;font-size:7px;padding:2px 7px;white-space:nowrap;letter-spacing:0.12em">موقعك</div>
+          </div>`,
+          iconSize: [36, 56], iconAnchor: [18, 56],
+        });
+
+        const m = L.marker([lat, lng], { icon }).addTo(mapRef.current);
+        m.bindPopup(
+          `<div style="background:#0d1117;padding:10px 13px;direction:rtl;font-family:Rajdhani,sans-serif">
+            <div style="color:#00f5d4;font-size:13px;font-weight:700;margin-bottom:4px">📍 موقعك الحالي</div>
+            <div style="color:#aaa;font-size:11px;font-family:monospace">${lat.toFixed(6)}, ${lng.toFixed(6)}</div>
+            <div style="color:#555;font-size:10px;margin-top:3px">اسحب أيقونات التجار فوق هذه النقطة</div>
+          </div>`,
+          { closeButton: false, offset: [0, -10] }
+        ).openPopup();
+        adminMarkerRef.current = m;
+        toast.show("📍 تم تحديد موقعك");
+      },
+      (err) => {
+        setGpsLoading(false);
+        const msg = err.code === 1 ? "تم رفض إذن الموقع" : err.code === 2 ? "تعذّر تحديد الموقع" : "انتهت مهلة تحديد الموقع";
+        toast.show(msg, false);
+      },
+      { enableHighAccuracy: true, timeout: 12000, maximumAge: 0 }
+    );
+  };
 
   const load = useCallback(async () => {
     const d = await api.get("/api/locations");
@@ -352,7 +400,41 @@ function MapEditorTab({ cats, toast }: { cats: Cat[]; toast: ReturnType<typeof u
         <span style={{ color: C.dim, fontFamily: "Rajdhani, sans-serif", fontSize: "13px" }}>↕ اسحب أي أيقونة لتحديث موقعها — يُحفظ تلقائياً</span>
         {saving !== null && <span style={{ color: C.yellow, fontFamily: "Orbitron, sans-serif", fontSize: "10px" }}>⟳ جاري الحفظ...</span>}
       </div>
-      <div ref={container} style={{ height: "calc(100vh - 200px)", minHeight: "440px", border: `1px solid ${C.border}`, borderRadius: "4px", overflow: "hidden" }} />
+      <div style={{ position: "relative" }}>
+        <div ref={container} style={{ height: "calc(100vh - 200px)", minHeight: "440px", border: `1px solid ${C.border}`, borderRadius: "4px", overflow: "hidden" }} />
+
+        {/* ── Floating GPS Button ── */}
+        <button
+          onClick={flyToMyLocation}
+          disabled={gpsLoading}
+          title="انتقل إلى موقعي"
+          style={{
+            position: "absolute", top: "12px", left: "12px", zIndex: 1000,
+            width: "42px", height: "42px",
+            background: gpsLoading ? "rgba(0,245,212,0.08)" : "rgba(0,245,212,0.15)",
+            border: `1.5px solid ${gpsLoading ? "rgba(0,245,212,0.35)" : "rgba(0,245,212,0.7)"}`,
+            borderRadius: "4px",
+            cursor: gpsLoading ? "wait" : "pointer",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            boxShadow: gpsLoading ? "none" : "0 0 14px rgba(0,245,212,0.3)",
+            transition: "all 0.2s",
+          }}
+          onMouseEnter={e => { if (!gpsLoading) (e.currentTarget as HTMLElement).style.background = "rgba(0,245,212,0.26)"; }}
+          onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = gpsLoading ? "rgba(0,245,212,0.08)" : "rgba(0,245,212,0.15)"; }}
+        >
+          {gpsLoading ? (
+            <svg width="18" height="18" viewBox="0 0 28 28" fill="none" style={{ animation: "lf-spin 0.9s linear infinite" }}>
+              <circle cx="14" cy="14" r="10" stroke="#00f5d4" strokeWidth="2.5" strokeDasharray="22 14" strokeLinecap="round" />
+            </svg>
+          ) : (
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#00f5d4" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="3" />
+              <path d="M12 2v3M12 19v3M2 12h3M19 12h3" />
+              <circle cx="12" cy="12" r="8" strokeOpacity="0.35" />
+            </svg>
+          )}
+        </button>
+      </div>
     </div>
   );
 }
