@@ -1366,6 +1366,7 @@ export function ClinicMap({
 
       type DriverRow = { locationId:number; driverName:string; phone:string; lat:number; lng:number; };
       const drivers: DriverRow[] = Array.isArray(dRaw) ? (dRaw as DriverRow[]) : [];
+      const SEARCH_RADIUS_KM = 10;
 
       const available = drivers
         .map(d=>({ ...d, distKm: haversineDist(fromPt.lat, fromPt.lng, d.lat, d.lng) }))
