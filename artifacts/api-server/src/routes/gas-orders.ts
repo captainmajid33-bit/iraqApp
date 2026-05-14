@@ -145,6 +145,34 @@ router.post("/gas-orders/:id/cancel", async (req, res) => {
   }
 });
 
+// ── DELETE /api/gas-orders/:id — PUBLIC: customer permanently deletes their order ─
+// Broadcasts 'cancelled' SSE first so agent removes it from live list, then hard-deletes.
+router.delete("/gas-orders/:id", async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id) || id <= 0) { res.status(400).json({ error: "id غير صالح" }); return; }
+
+  try {
+    const [order] = await db
+      .select({ status: gasOrdersTable.status, agentId: gasOrdersTable.agentId })
+      .from(gasOrdersTable)
+      .where(eq(gasOrdersTable.id, id));
+
+    if (!order) { res.status(404).json({ error: "الطلب غير موجود" }); return; }
+
+    // 1) Broadcast cancellation so agent's live stream removes the order immediately
+    broadcastGasOrderUpdate({ id, status: "cancelled", agentId: order.agentId ?? null });
+
+    // 2) Hard-delete from DB
+    await db.delete(gasOrdersTable).where(eq(gasOrdersTable.id, id));
+
+    console.log(`[DELETE /gas-orders/${id}] permanently deleted by customer`);
+    res.json({ ok: true });
+  } catch (err: any) {
+    console.error(`[DELETE /gas-orders/${id}] error:`, err);
+    res.status(500).json({ error: "فشل حذف الطلب", detail: err?.message });
+  }
+});
+
 // ── POST /api/gas-orders/:id/accept — atomic first-claim (no race condition) ──
 // Conditional UPDATE on status='pending' — PostgreSQL serialises concurrent
 // UPDATEs on the same row; second caller gets 0 rows → 409.

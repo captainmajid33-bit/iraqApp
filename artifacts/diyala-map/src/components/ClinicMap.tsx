@@ -526,8 +526,9 @@ export function ClinicMap({
   const [sysMsgSnack,       setSysMsgSnack]       = useState<string|null>(null);
   const sysMsgTimerRef      = useRef<ReturnType<typeof setTimeout>|null>(null);
   // ── Gas order chat ────────────────────────────────────────────────────────
-  const [showGasChat,       setShowGasChat]       = useState(false);
-  const [gasUnread,         setGasUnread]         = useState(false);
+  const [showGasChat,          setShowGasChat]          = useState(false);
+  const [gasUnread,            setGasUnread]            = useState(false);
+  const [showGasCancelConfirm, setShowGasCancelConfirm] = useState(false);
 
   // ── Rating dialog (auto-opens when ride finishes) ─────────────────────────
   const [showRating,        setShowRating]        = useState(false);
@@ -1479,19 +1480,26 @@ export function ClinicMap({
     }
   }, [taxiUserName, taxiUserPhone, gasLocationAddr]);
 
-  // ── Cancel active gas order ────────────────────────────────────────────────
-  const cancelGasOrder = useCallback(async ()=>{
+  // ── Open cancel confirmation dialog ────────────────────────────────────────
+  const cancelGasOrder = useCallback(()=>{
+    if (!activeGasOrderIdRef.current) return;
+    setShowGasCancelConfirm(true);
+  }, []);
+
+  // ── Permanently delete gas order (called after user confirms) ──────────────
+  const deleteGasOrderConfirmed = useCallback(async ()=>{
     const id = activeGasOrderIdRef.current;
+    setShowGasCancelConfirm(false);
     if (!id) return;
-    // Optimistically clear UI first so user sees instant feedback
+    // Optimistically clear UI so user sees instant feedback
     setActiveGasOrderId(null);
     setActiveGasOrderStatus('pending');
+    setShowGasChat(false);
     activeGasOrderIdRef.current     = null;
     activeGasOrderStatusRef.current = 'pending';
     localStorage.removeItem('diyala_active_gas_order');
     try {
-      // Public cancel endpoint — no auth header needed
-      await fetch(`/api/gas-orders/${id}/cancel`, { method: 'POST' });
+      await fetch(`/api/gas-orders/${id}`, { method: 'DELETE' });
     } catch { /* ignore network errors — UI already cleared */ }
   }, []);
 
@@ -4249,6 +4257,80 @@ export function ClinicMap({
             color:'#c77dff', letterSpacing:'0.05em',
           }}>CHAT</span>
         </button>
+      )}
+
+      {/* ── Gas Cancel Confirmation Dialog ── */}
+      {showGasCancelConfirm && (
+        <div style={{
+          position:'fixed', inset:0, zIndex:9999,
+          background:'rgba(0,0,0,0.72)',
+          display:'flex', alignItems:'center', justifyContent:'center',
+        }}
+          onClick={()=> setShowGasCancelConfirm(false)}
+        >
+          <div
+            onClick={e=> e.stopPropagation()}
+            style={{
+              background:'rgba(5,8,15,0.98)',
+              border:'1.5px solid #ff2d78',
+              boxShadow:'0 0 50px rgba(255,45,120,0.45), 0 0 120px rgba(255,45,120,0.15)',
+              borderRadius:'4px',
+              width:'min(340px, 90vw)',
+              padding:'28px 24px 22px',
+              direction:'rtl',
+              display:'flex', flexDirection:'column', gap:'16px',
+            }}
+          >
+            {/* Header */}
+            <div style={{ display:'flex', alignItems:'center', gap:'10px' }}>
+              <span style={{ fontSize:'22px' }}>⚠️</span>
+              <div style={{
+                fontFamily:'Orbitron,sans-serif', fontSize:'12px',
+                color:'#ff2d78', letterSpacing:'0.2em', fontWeight:700,
+              }}>تحذير</div>
+            </div>
+
+            {/* Body */}
+            <div style={{
+              fontFamily:'Rajdhani,sans-serif', fontSize:'15px',
+              color:'#e8f8f5', lineHeight:1.6,
+            }}>
+              هل أنت متأكد؟ سيتم حذف الطلب نهائياً ولن يتمكن أي وكيل من قبوله.
+            </div>
+
+            {/* Order ID badge */}
+            {activeGasOrderId && Number.isFinite(activeGasOrderId) && (
+              <div style={{
+                fontFamily:'Orbitron,sans-serif', fontSize:'10px',
+                color:'rgba(255,45,120,0.7)', letterSpacing:'0.15em',
+              }}>
+                طلب الغاز #{activeGasOrderId}
+              </div>
+            )}
+
+            {/* Buttons */}
+            <div style={{ display:'flex', gap:'10px', justifyContent:'flex-end', marginTop:'4px' }}>
+              <button
+                onClick={()=> setShowGasCancelConfirm(false)}
+                style={{
+                  padding:'8px 18px', borderRadius:'3px', cursor:'pointer',
+                  background:'rgba(255,255,255,0.06)', border:'1px solid rgba(255,255,255,0.18)',
+                  color:'#b0c4d8', fontFamily:'Rajdhani,sans-serif', fontSize:'13px', fontWeight:600,
+                }}
+              >تراجع</button>
+              <button
+                onClick={deleteGasOrderConfirmed}
+                style={{
+                  padding:'8px 18px', borderRadius:'3px', cursor:'pointer',
+                  background:'rgba(255,30,30,0.18)', border:'1.5px solid #ff2020',
+                  color:'#ff4444', fontFamily:'Rajdhani,sans-serif', fontSize:'13px', fontWeight:700,
+                  boxShadow:'0 0 14px rgba(255,30,30,0.35)',
+                  letterSpacing:'0.04em',
+                }}
+              >حذف نهائي للطلب</button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* ── Gas Chat Overlay ── */}
