@@ -248,6 +248,7 @@ export function ClinicMap({
   const onAdminDeleteRef     = useRef(onAdminDelete);
   const adminModeRef         = useRef(adminMode);
   const locateAndNavigateRef = useRef<((item:MapItem)=>void)|null>(null);
+  const locateUserRef        = useRef<((afterLocate?:(loc:{lat:number;lng:number})=>void)=>void)|null>(null);
   // Live category map — accessed in buildPopup without closure issues
   const catMapRef = useRef<Map<string,Category>>(new Map());
 
@@ -287,6 +288,15 @@ export function ClinicMap({
       taxiStepRef.current   = 'pick-from';
       taxiFromPtRef.current = null;
       if (mapRef.current) mapRef.current.getContainer().style.cursor = 'crosshair';
+
+      // ── Fly camera to user's exact location immediately ───────────────────
+      const loc = userLocationRef.current;
+      if (loc && mapRef.current) {
+        mapRef.current.flyTo([loc.lat, loc.lng], 17, { animate:true, duration:1.2 });
+      } else {
+        // GPS not acquired yet — start locating; camera will fly on first fix
+        locateUserRef.current?.();
+      }
     };
   },[]);
 
@@ -636,6 +646,9 @@ export function ClinicMap({
     );
   },[onUserLocationChange, refreshUserMarker]);
 
+  // Keep locateUserRef current so closures captured with [] deps can call it
+  useEffect(()=>{ locateUserRef.current = locateUser; },[locateUser]);
+
   // DeviceOrientation compass (mobile) — updates heading ref + marker
   useEffect(()=>{
     function handleOrientation(e: DeviceOrientationEvent) {
@@ -930,6 +943,8 @@ export function ClinicMap({
   },[]);
 
   // ── Contextual POIs: fetch Overpass when taxi enters pick-to step ─────────
+  // Depends only on taxiStep (NOT userLocation) so GPS updates don't re-trigger
+  // the effect and cause markers to flash/disappear on every position update.
   useEffect(()=>{
     poiMarkersRef.current.forEach(m=>m.remove());
     poiMarkersRef.current = [];
@@ -937,12 +952,12 @@ export function ClinicMap({
 
     if (taxiStep !== 'pick-to' || !mapRef.current) return;
 
-    // Zoom in to street level so POIs are clearly visible
-    const lat = userLocation?.lat ?? 33.7451;
-    const lon = userLocation?.lng ?? 44.6488;
-    if (mapRef.current.getZoom() < 14) {
-      mapRef.current.flyTo([lat, lon], 14, { animate:true, duration:1.1 });
-    }
+    // Use the ref so we read the latest GPS fix without adding it to deps
+    const lat = userLocationRef.current?.lat ?? 33.7451;
+    const lon = userLocationRef.current?.lng ?? 44.6488;
+
+    // Zoom to street level focused on user's exact location
+    mapRef.current.flyTo([lat, lon], 15, { animate:true, duration:1.0 });
 
     // Fetch real POIs from Overpass within 12 km radius
     const query =
@@ -989,7 +1004,7 @@ export function ClinicMap({
       poiMarkersRef.current = [];
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  },[taxiStep, userLocation]);
+  },[taxiStep]);
 
   // ── Stop active order tracking (driver arrived / cancelled) ───────────────
   const stopOrderTracking = useCallback(()=>{
