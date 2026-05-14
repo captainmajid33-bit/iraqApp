@@ -1226,10 +1226,15 @@ export function ClinicMap({
   const dispatchTaxiNow = useCallback(async ()=>{
     const name  = taxiUserName.trim();
     const phone = taxiUserPhone.trim();
-    const dest  = taxiQuickDest.trim();
+    // Accept any non-empty dest; also accept manual pin selection even if dest is still loading
+    const destRaw  = taxiQuickDest.trim();
+    const hasManualTo = !!taxiQuickToPt;
+    const dest = destRaw === 'جاري احتساب المسار...'
+      ? (taxiQuickToPt ? `${taxiQuickToPt.lat.toFixed(5)}, ${taxiQuickToPt.lng.toFixed(5)}` : '')
+      : (destRaw || (hasManualTo ? `${taxiQuickToPt!.lat.toFixed(5)}, ${taxiQuickToPt!.lng.toFixed(5)}` : ''));
     if (!name)  { setTaxiQuickError('الرجاء إدخال اسمك');        return; }
     if (!phone) { setTaxiQuickError('الرجاء إدخال رقم الهاتف');  return; }
-    if (!dest)  { setTaxiQuickError('الرجاء إدخال وجهتك');        return; }
+    if (!dest)  { setTaxiQuickError('الرجاء تحديد الوجهة أو اكتبها يدوياً'); return; }
     const loc = userLocationRef.current;
     if (!loc)   { setTaxiQuickError('تعذّر تحديد موقعك — فعّل الـ GPS أولاً'); return; }
 
@@ -1381,23 +1386,74 @@ export function ClinicMap({
     } else if (taxiManualStepRef.current === 'to') {
       setTaxiQuickToPt(pt);
       const fromPt = taxiQuickFromPtRef.current || userLocationRef.current || pt;
-      const distKm  = haversineDist(fromPt.lat, fromPt.lng, pt.lat, pt.lng);
-      const price   = Math.round(distKm * 750 / 250) * 250; // round to nearest 250
-      setTaxiQuickDistKm(distKm);
-      setTaxiQuickPrice(price);
-      // Polyline A→B
-      taxiQuickPolyRef.current?.remove();
-      taxiQuickPolyRef.current = L.polyline(
-        [[fromPt.lat, fromPt.lng],[pt.lat, pt.lng]],
-        { color:'#f5c518', weight:3.5, opacity:0.88, dashArray:'9 5' }
-      ).addTo(mapRef.current);
-      mapRef.current.fitBounds(
-        L.latLngBounds([[fromPt.lat, fromPt.lng],[pt.lat, pt.lng]]),
-        { padding:[60,60] }
-      );
+
+      // Show form immediately with loading placeholder
+      setTaxiQuickDest('جاري احتساب المسار...');
       setTaxiManualStep('idle');
       taxiManualStepRef.current = 'idle';
       setShowTaxiQuickForm(true);
+
+      // Async: OSRM road route + reverse geocode in background
+      (async () => {
+        // ── 1. OSRM road route ────────────────────────────────────────────
+        try {
+          const osrmUrl =
+            `https://router.project-osrm.org/route/v1/driving/` +
+            `${fromPt.lng},${fromPt.lat};${pt.lng},${pt.lat}` +
+            `?overview=full&geometries=geojson`;
+          const res  = await fetch(osrmUrl);
+          const data = await res.json();
+          if (data.routes?.length > 0) {
+            const route  = data.routes[0];
+            const distKm = route.distance / 1000;
+            const price  = Math.round(distKm * 750 / 250) * 250;
+            setTaxiQuickDistKm(distKm);
+            setTaxiQuickPrice(price);
+            // Draw road-following polyline
+            taxiQuickPolyRef.current?.remove();
+            if (mapRef.current) {
+              const latLngs = (route.geometry.coordinates as [number,number][])
+                .map(([lng, lat]) => [lat, lng] as [number, number]);
+              taxiQuickPolyRef.current = L.polyline(latLngs, {
+                color:'#f5c518', weight:4, opacity:0.92,
+              }).addTo(mapRef.current);
+              mapRef.current.fitBounds(taxiQuickPolyRef.current.getBounds(), { padding:[60,60] });
+            }
+          } else {
+            throw new Error('no route');
+          }
+        } catch {
+          // Fallback: straight line + haversine
+          const distKm = haversineDist(fromPt.lat, fromPt.lng, pt.lat, pt.lng);
+          setTaxiQuickDistKm(distKm);
+          setTaxiQuickPrice(Math.round(distKm * 750 / 250) * 250);
+          taxiQuickPolyRef.current?.remove();
+          if (mapRef.current) {
+            taxiQuickPolyRef.current = L.polyline(
+              [[fromPt.lat, fromPt.lng],[pt.lat, pt.lng]],
+              { color:'#f5c518', weight:3.5, opacity:0.85, dashArray:'9 5' }
+            ).addTo(mapRef.current);
+            mapRef.current.fitBounds(
+              L.latLngBounds([[fromPt.lat, fromPt.lng],[pt.lat, pt.lng]]),
+              { padding:[60,60] }
+            );
+          }
+        }
+        // ── 2. Reverse-geocode destination name (Nominatim) ───────────────
+        try {
+          const r2   = await fetch(
+            `https://nominatim.openstreetmap.org/reverse?format=json&lat=${pt.lat}&lon=${pt.lng}&accept-language=ar`,
+            { headers:{'User-Agent':'DiyalaHealthMap/1.0'} }
+          );
+          const d2   = await r2.json();
+          const name = d2.display_name
+            ? d2.display_name.split(',').slice(0, 3).join('، ')
+            : `${pt.lat.toFixed(5)}, ${pt.lng.toFixed(5)}`;
+          setTaxiQuickDest(name);
+        } catch {
+          setTaxiQuickDest(`${pt.lat.toFixed(5)}, ${pt.lng.toFixed(5)}`);
+        }
+      })();
     }
   },[]);
 
@@ -2700,21 +2756,44 @@ export function ClinicMap({
                       onClick={()=>{
                         setTaxiQuickDest(s.name);
                         setTaxiQuickToPt({lat:s.lat, lng:s.lng});
-                        const fromPt = taxiQuickFromPt || userLocationRef.current;
-                        if (fromPt) {
-                          const dist = haversineDist(fromPt.lat, fromPt.lng, s.lat, s.lng);
-                          setTaxiQuickDistKm(dist);
-                          setTaxiQuickPrice(Math.round(dist*750/250)*250);
-                          // Draw polyline
-                          taxiQuickPolyRef.current?.remove();
-                          if (mapRef.current) {
-                            taxiQuickPolyRef.current = L.polyline(
-                              [[fromPt.lat,fromPt.lng],[s.lat,s.lng]],
-                              {color:'#f5c518',weight:3.5,opacity:0.88,dashArray:'9 5'}
-                            ).addTo(mapRef.current);
-                          }
-                        }
                         setTaxiDestSuggs([]);
+                        const fromPt = taxiQuickFromPtRef.current || taxiQuickFromPt || userLocationRef.current;
+                        if (!fromPt) return;
+                        // OSRM road route
+                        (async ()=>{
+                          try {
+                            const r = await fetch(
+                              `https://router.project-osrm.org/route/v1/driving/` +
+                              `${fromPt.lng},${fromPt.lat};${s.lng},${s.lat}` +
+                              `?overview=full&geometries=geojson`
+                            );
+                            const data = await r.json();
+                            if (data.routes?.length > 0) {
+                              const route  = data.routes[0];
+                              const distKm = route.distance / 1000;
+                              setTaxiQuickDistKm(distKm);
+                              setTaxiQuickPrice(Math.round(distKm*750/250)*250);
+                              taxiQuickPolyRef.current?.remove();
+                              if (mapRef.current) {
+                                const ll = (route.geometry.coordinates as [number,number][])
+                                  .map(([lng,lat])=>[lat,lng] as [number,number]);
+                                taxiQuickPolyRef.current = L.polyline(ll, {color:'#f5c518',weight:4,opacity:0.92}).addTo(mapRef.current);
+                                mapRef.current.fitBounds(taxiQuickPolyRef.current.getBounds(), {padding:[60,60]});
+                              }
+                            } else { throw new Error(); }
+                          } catch {
+                            const distKm = haversineDist(fromPt.lat, fromPt.lng, s.lat, s.lng);
+                            setTaxiQuickDistKm(distKm);
+                            setTaxiQuickPrice(Math.round(distKm*750/250)*250);
+                            taxiQuickPolyRef.current?.remove();
+                            if (mapRef.current) {
+                              taxiQuickPolyRef.current = L.polyline(
+                                [[fromPt.lat,fromPt.lng],[s.lat,s.lng]],
+                                {color:'#f5c518',weight:3.5,opacity:0.85,dashArray:'9 5'}
+                              ).addTo(mapRef.current);
+                            }
+                          }
+                        })();
                       }}
                       style={{
                         padding:'8px 12px',cursor:'pointer',
