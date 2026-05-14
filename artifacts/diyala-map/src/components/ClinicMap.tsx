@@ -268,9 +268,22 @@ export function ClinicMap({
     catMapRef.current = new Map(categories.map(c=>[c.slug,c]));
   },[categories]);
 
+  // Helper: show the "active trip" block message briefly
+  const showBlockTaxiMsg = useCallback(()=>{
+    if (blockTaxiTimerRef.current) clearTimeout(blockTaxiTimerRef.current);
+    setBlockTaxiMsg(true);
+    blockTaxiTimerRef.current = setTimeout(()=> setBlockTaxiMsg(false), 4000);
+  },[]);
+
   // Bridge: Leaflet popup button → open taxi routing flow
   useEffect(()=>{
     setTaxiItemRef.current = (item: MapItem) => {
+      // Block if customer already has an active trip
+      const ACTIVE = new Set(['pending','accepted','driving']);
+      if (activeOrderIdRef.current !== null && ACTIVE.has(activeOrderStatusRef.current)) {
+        showBlockTaxiMsg();
+        return;
+      }
       taxiRouteLineRef.current?.remove();  taxiRouteLineRef.current  = null;
       taxiGlowLineRef.current?.remove();   taxiGlowLineRef.current   = null;
       taxiFromMarkerRef.current?.remove(); taxiFromMarkerRef.current = null;
@@ -468,7 +481,11 @@ export function ClinicMap({
   const ratingShownRef      = useRef<Set<number>>(new Set()); // prevent double-trigger
 
   const activeOrderIdRef    = useRef<number|null>(null);
+  const activeOrderStatusRef= useRef<string>('pending');            // mirrors activeOrderStatus for DOM handlers
   const seenSnackIdsRef     = useRef<Set<string|number>>(new Set()); // system msgs already snackbar'd
+  // Brief "can't order — active trip" notification
+  const [blockTaxiMsg,      setBlockTaxiMsg]      = useState(false);
+  const blockTaxiTimerRef   = useRef<ReturnType<typeof setTimeout>|null>(null);
   const prevDriverPosRef    = useRef<{lat:number;lng:number}|null>(null);
 
   // ── Online drivers (all open taxis visible on map) ────────────────────────
@@ -1027,7 +1044,8 @@ export function ClinicMap({
     setDriverLat(null);        setDriverLng(null);
     setDriverDistKm(null);     setDriverEtaMin(null);
     setShowChat(false);        prevDriverPosRef.current = null;
-    activeOrderIdRef.current = null;
+    activeOrderIdRef.current    = null;
+    activeOrderStatusRef.current = 'pending';
     localStorage.removeItem('diyala_active_order');
   },[]);
 
@@ -1050,7 +1068,8 @@ export function ClinicMap({
           // Still active — restore tracking
           setActiveOrderId(orderId);
           setActiveOrderStatus(s);
-          activeOrderIdRef.current = orderId;
+          activeOrderIdRef.current    = orderId;
+          activeOrderStatusRef.current = s;
           if (driverPhone) setActiveDriverPhone(driverPhone);
           if (s === 'accepted' || s === 'driving') setShowChat(true);
         })
@@ -1222,6 +1241,7 @@ export function ClinicMap({
     locationId?: number|null; userName?: string|null;
   })=>{
     setActiveOrderStatus(data.status);
+    activeOrderStatusRef.current = data.status;
     if (data.status === 'accepted' || data.status === 'driving') {
       setShowChat(true); // auto-open chat when driver accepts
     }
@@ -1320,7 +1340,8 @@ export function ClinicMap({
         if (orderId) {
           setActiveOrderId(orderId);
           setActiveOrderStatus('pending');
-          activeOrderIdRef.current = orderId;
+          activeOrderIdRef.current    = orderId;
+          activeOrderStatusRef.current = 'pending';
           // Capture driver id + phone for rating dialog and chat
           const driverPhone = taxiDriverItem.phone ?? '';
           setActiveDriverPhone(driverPhone);
@@ -2288,6 +2309,45 @@ export function ClinicMap({
         </div>
       )}
 
+      {/* ── Block-taxi Snackbar (shown when user tries to order while having active trip) ── */}
+      {blockTaxiMsg && (
+        <div style={{
+          position:'absolute', top:'72px', left:'50%', transform:'translateX(-50%)',
+          zIndex:5001, direction:'rtl',
+          display:'flex', alignItems:'center', gap:'12px',
+          padding:'11px 18px',
+          background:'linear-gradient(135deg,rgba(255,45,120,0.15),rgba(123,47,247,0.12))',
+          border:'1px solid rgba(255,45,120,0.7)',
+          borderTop:'3px solid #ff2d78',
+          boxShadow:'0 4px 40px rgba(255,45,120,0.3), 0 0 0 1px rgba(255,45,120,0.1)',
+          backdropFilter:'blur(16px)',
+          maxWidth:'min(380px,90vw)',
+          animation:'sys-snack-in 0.35s cubic-bezier(0.34,1.56,0.64,1)',
+          whiteSpace:'nowrap',
+        }}>
+          <div style={{
+            flexShrink:0, width:'32px', height:'32px',
+            border:'1px solid rgba(255,45,120,0.5)', borderRadius:'50%',
+            display:'flex', alignItems:'center', justifyContent:'center',
+            background:'rgba(255,45,120,0.12)',
+            boxShadow:'0 0 12px rgba(255,45,120,0.3)',
+            fontSize:'16px', lineHeight:1,
+          }}>🔒</div>
+          <div style={{flex:1, minWidth:0}}>
+            <div style={{fontFamily:'Orbitron,sans-serif',fontSize:'8px',color:'rgba(255,45,120,0.8)',letterSpacing:'0.18em',marginBottom:'3px'}}>
+              رحلة نشطة · ACTIVE TRIP
+            </div>
+            <div style={{fontFamily:'Rajdhani,sans-serif',fontSize:'14px',fontWeight:600,color:'#ffa0c0',lineHeight:1.3}}>
+              لديك رحلة نشطة حالياً — أكمل رحلتك الحالية أولاً
+            </div>
+          </div>
+          <button onClick={()=>{ setBlockTaxiMsg(false); if(blockTaxiTimerRef.current) clearTimeout(blockTaxiTimerRef.current); }}
+            style={{flexShrink:0,background:'none',border:'none',color:'rgba(255,45,120,0.5)',fontSize:'14px',cursor:'pointer',padding:'2px 4px',lineHeight:1}}>
+            ✕
+          </button>
+        </div>
+      )}
+
       {/* ── Chat Overlay ── */}
       {showChat && activeOrderId && activeOrderStatus !== 'done' && activeOrderStatus !== 'finished' && activeOrderStatus !== 'cancelled' && (
         <ChatOverlay
@@ -2490,11 +2550,19 @@ export function ClinicMap({
       }}>
 
         {/* ── TAXI button ── */}
+        {(() => {
+          const ACTIVE_STATUSES = ['pending','accepted','driving'];
+          const hasTripActive = !!(activeOrderId && ACTIVE_STATUSES.includes(activeOrderStatus));
+          return (
         <button
           onClick={()=>{
             if (taxiCategory) {
               onFilterChange(taxiCategory.slug);
               setShowMoreModal(false);
+              if (hasTripActive) {
+                showBlockTaxiMsg();
+                return;
+              }
               setShowTaxiPrompt(true);
             }
           }}
@@ -2502,22 +2570,27 @@ export function ClinicMap({
             flex:1,
             display:'flex', flexDirection:'column',
             alignItems:'center', justifyContent:'center', gap:'4px',
-            background: (activeFilter === (taxiCategory?.slug ?? '__none__') || showTaxiPrompt)
-              ? 'rgba(245,197,24,0.18)'
-              : 'transparent',
+            background: hasTripActive
+              ? 'rgba(255,45,120,0.08)'
+              : (activeFilter === (taxiCategory?.slug ?? '__none__') || showTaxiPrompt)
+                ? 'rgba(245,197,24,0.18)'
+                : 'transparent',
             border:'none',
-            borderTop: (activeFilter === (taxiCategory?.slug ?? '__none__') || showTaxiPrompt)
-              ? '3px solid #f5c518'
-              : '3px solid transparent',
+            borderTop: hasTripActive
+              ? '3px solid rgba(255,45,120,0.4)'
+              : (activeFilter === (taxiCategory?.slug ?? '__none__') || showTaxiPrompt)
+                ? '3px solid #f5c518'
+                : '3px solid transparent',
             borderRight:'1px solid rgba(255,255,255,0.07)',
-            color:'#f5c518',
+            color: hasTripActive ? 'rgba(245,197,24,0.45)' : '#f5c518',
             cursor: taxiCategory ? 'pointer' : 'not-allowed',
             opacity: taxiCategory ? 1 : 0.35,
             transition:'all 0.2s',
             padding:0,
+            position:'relative',
           }}
-          onMouseEnter={e=>{ if(taxiCategory)(e.currentTarget as HTMLElement).style.background='rgba(245,197,24,0.14)'; }}
-          onMouseLeave={e=>{ (e.currentTarget as HTMLElement).style.background=(activeFilter===(taxiCategory?.slug??'__none__')||showTaxiPrompt)?'rgba(245,197,24,0.18)':'transparent'; }}
+          onMouseEnter={e=>{ if(taxiCategory && !hasTripActive)(e.currentTarget as HTMLElement).style.background='rgba(245,197,24,0.14)'; }}
+          onMouseLeave={e=>{ (e.currentTarget as HTMLElement).style.background=hasTripActive?'rgba(255,45,120,0.08)':(activeFilter===(taxiCategory?.slug??'__none__')||showTaxiPrompt)?'rgba(245,197,24,0.18)':'transparent'; }}
         >
           {/* Taxi icon SVG */}
           <svg width="28" height="28" viewBox="0 0 48 48" fill="none">
@@ -2534,7 +2607,21 @@ export function ClinicMap({
             fontFamily:'Orbitron,sans-serif', fontSize:'11px',
             fontWeight:700, letterSpacing:'0.12em',
           }}>تكسي</span>
+          {/* Active-trip lock badge */}
+          {hasTripActive && (
+            <span style={{
+              position:'absolute', top:'6px', right:'10px',
+              fontSize:'10px', lineHeight:1,
+              background:'rgba(255,45,120,0.85)',
+              border:'1px solid rgba(255,45,120,0.5)',
+              color:'#fff', padding:'1px 5px',
+              fontFamily:'Orbitron,sans-serif', letterSpacing:'0.05em',
+              boxShadow:'0 0 6px rgba(255,45,120,0.5)',
+            }}>🔒</span>
+          )}
         </button>
+          );
+        })()}
 
         {/* ── GAS button ── */}
         <button
