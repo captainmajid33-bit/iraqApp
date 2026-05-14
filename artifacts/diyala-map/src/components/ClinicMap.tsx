@@ -3,6 +3,7 @@ import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import { MapItem, Category } from '@/data/types';
 import { ChatOverlay } from './ChatOverlay';
+import { RatingDialog } from './RatingDialog';
 
 interface ClinicMapProps {
   items: MapItem[];
@@ -449,11 +450,20 @@ export function ClinicMap({
   const [activeOrderId,     setActiveOrderId]     = useState<number|null>(null);
   const [activeOrderStatus, setActiveOrderStatus] = useState<string>('pending');
   const [activeDriverPhone, setActiveDriverPhone] = useState<string>('');
+  const [activeDriverId,    setActiveDriverId]    = useState<number>(0);
   const [driverLat,         setDriverLat]         = useState<number|null>(null);
   const [driverLng,         setDriverLng]         = useState<number|null>(null);
   const [driverDistKm,      setDriverDistKm]      = useState<number|null>(null);
   const [driverEtaMin,      setDriverEtaMin]      = useState<number|null>(null);
   const [showChat,          setShowChat]          = useState(false);
+
+  // ── Rating dialog (auto-opens when ride finishes) ─────────────────────────
+  const [showRating,        setShowRating]        = useState(false);
+  const [ratingOrderId,     setRatingOrderId]     = useState<number>(0);
+  const [ratingDriverId,    setRatingDriverId]    = useState<number>(0);
+  const [ratingCustomerName,setRatingCustomerName]= useState<string>('');
+  const ratingShownRef      = useRef<Set<number>>(new Set()); // prevent double-trigger
+
   const activeOrderIdRef    = useRef<number|null>(null);
   const prevDriverPosRef    = useRef<{lat:number;lng:number}|null>(null);
 
@@ -1178,15 +1188,26 @@ export function ClinicMap({
     id: number; status: string;
     driverLat?: number|null; driverLng?: number|null;
     fromLat?: number|null; fromLng?: number|null;
+    locationId?: number|null; userName?: string|null;
   })=>{
     setActiveOrderStatus(data.status);
     if (data.status === 'accepted' || data.status === 'driving') {
       setShowChat(true); // auto-open chat when driver accepts
     }
-    if (data.status === 'done' || data.status === 'cancelled') {
-      setShowChat(false);                               // hide chat immediately
-      localStorage.removeItem('diyala_active_order');  // clear persisted order
-      setTimeout(()=>{ stopOrderTracking(); }, 3000);  // clear tracking after 3s
+    // 'done' or 'finished' → hide chat and show rating dialog before clearing
+    if (data.status === 'done' || data.status === 'finished' || data.status === 'cancelled') {
+      setShowChat(false);
+      localStorage.removeItem('diyala_active_order');
+
+      if ((data.status === 'done' || data.status === 'finished') && !ratingShownRef.current.has(data.id)) {
+        ratingShownRef.current.add(data.id);
+        setRatingOrderId(data.id);
+        setRatingDriverId(data.locationId ?? 0);
+        setRatingCustomerName(data.userName ?? '');
+        setShowRating(true);
+      } else {
+        setTimeout(()=>{ stopOrderTracking(); }, 2500);
+      }
       return;
     }
     if (typeof data.driverLat === 'number' && typeof data.driverLng === 'number') {
@@ -1269,11 +1290,12 @@ export function ClinicMap({
           setActiveOrderId(orderId);
           setActiveOrderStatus('pending');
           activeOrderIdRef.current = orderId;
-          // Capture driver phone for call button in chat
+          // Capture driver id + phone for rating dialog and chat
           const driverPhone = taxiDriverItem.phone ?? '';
           setActiveDriverPhone(driverPhone);
+          setActiveDriverId(taxiDriverItem.id);
           // Persist order to localStorage so it survives page refresh
-          localStorage.setItem('diyala_active_order', JSON.stringify({ orderId, driverPhone }));
+          localStorage.setItem('diyala_active_order', JSON.stringify({ orderId, driverPhone, driverId: taxiDriverItem.id }));
         }
         setTimeout(()=>{ closeTaxiRouting(); }, 2600);
       } else {
@@ -2177,11 +2199,24 @@ export function ClinicMap({
       )}
 
       {/* ── Chat Overlay ── */}
-      {showChat && activeOrderId && activeOrderStatus !== 'done' && activeOrderStatus !== 'cancelled' && (
+      {showChat && activeOrderId && activeOrderStatus !== 'done' && activeOrderStatus !== 'finished' && activeOrderStatus !== 'cancelled' && (
         <ChatOverlay
           orderId={activeOrderId}
           driverPhone={activeDriverPhone}
           onClose={()=>setShowChat(false)}
+        />
+      )}
+
+      {/* ── Rating Dialog (auto-pops after ride finishes) ── */}
+      {showRating && (
+        <RatingDialog
+          orderId={ratingOrderId}
+          driverId={ratingDriverId || activeDriverId}
+          customerName={ratingCustomerName}
+          onClose={()=>{
+            setShowRating(false);
+            stopOrderTracking();
+          }}
         />
       )}
 
