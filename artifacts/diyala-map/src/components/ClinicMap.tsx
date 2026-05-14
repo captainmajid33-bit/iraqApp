@@ -3,6 +3,7 @@ import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import { MapItem, Category } from '@/data/types';
 import { ChatOverlay } from './ChatOverlay';
+import { GasChatOverlay } from './GasChatOverlay';
 import { RatingDialog } from './RatingDialog';
 
 // ── Haversine distance (km) between two lat/lng points ────────────────────
@@ -524,6 +525,9 @@ export function ClinicMap({
   // Snackbar shown when a system message arrives while chat is closed
   const [sysMsgSnack,       setSysMsgSnack]       = useState<string|null>(null);
   const sysMsgTimerRef      = useRef<ReturnType<typeof setTimeout>|null>(null);
+  // ── Gas order chat ────────────────────────────────────────────────────────
+  const [showGasChat,       setShowGasChat]       = useState(false);
+  const [gasUnread,         setGasUnread]         = useState(false);
 
   // ── Rating dialog (auto-opens when ride finishes) ─────────────────────────
   const [showRating,        setShowRating]        = useState(false);
@@ -2192,7 +2196,7 @@ export function ClinicMap({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   },[]);
 
-  // ── SSE listener for gas order updates ────────────────────────────────────
+  // ── SSE listener for gas order updates + gas chat messages ───────────────
   useEffect(()=>{
     const es = new EventSource('/api/events');
     es.addEventListener('gas_order_update', (e: MessageEvent)=>{
@@ -2206,7 +2210,18 @@ export function ClinicMap({
           activeGasOrderIdRef.current    = null;
           activeGasOrderStatusRef.current = 'pending';
           localStorage.removeItem('diyala_active_gas_order');
+          setShowGasChat(false);
+          setGasUnread(false);
           setTimeout(()=>{ setActiveGasOrderId(null); setActiveGasOrderStatus('pending'); }, 3500);
+        }
+      } catch { /* */ }
+    });
+    es.addEventListener('gas_new_message', (e: MessageEvent)=>{
+      try {
+        const { message } = JSON.parse(e.data) as { message: { gasOrderId:number; senderRole:string } };
+        if (!message || message.gasOrderId !== activeGasOrderIdRef.current) return;
+        if (message.senderRole === 'agent') {
+          setGasUnread(true);
         }
       } catch { /* */ }
     });
@@ -3399,6 +3414,31 @@ export function ClinicMap({
                 :`⏳ ${activeGasOrderStatus}`}
               </div>
             </div>
+            {/* Chat button — only when accepted */}
+            {activeGasOrderStatus==='accepted' && (
+              <button
+                onClick={()=>{ setShowGasChat(true); setGasUnread(false); }}
+                style={{
+                  position:'relative',
+                  background: showGasChat ? 'rgba(0,245,212,0.2)' : 'rgba(0,245,212,0.1)',
+                  border:'1px solid rgba(0,245,212,0.55)',
+                  color:'#00f5d4',cursor:'pointer',
+                  fontSize:'14px',padding:'5px 10px',flexShrink:0,
+                  borderRadius:'2px',transition:'all 0.2s',
+                }}
+                title="دردشة مع الوكيل"
+              >
+                💬
+                {gasUnread && (
+                  <span style={{
+                    position:'absolute',top:'-4px',right:'-4px',
+                    width:'10px',height:'10px',borderRadius:'50%',
+                    background:'#ff2d78',boxShadow:'0 0 8px #ff2d78',
+                    display:'block',
+                  }}/>
+                )}
+              </button>
+            )}
             {/* Cancel — only while pending or accepted */}
             {(activeGasOrderStatus==='pending'||activeGasOrderStatus==='accepted') && (
               <button
@@ -4207,6 +4247,45 @@ export function ClinicMap({
             fontFamily:'Orbitron,sans-serif', fontSize:'6px',
             color:'#c77dff', letterSpacing:'0.05em',
           }}>CHAT</span>
+        </button>
+      )}
+
+      {/* ── Gas Chat Overlay ── */}
+      {showGasChat && activeGasOrderId && activeGasOrderStatus === 'accepted' && (
+        <GasChatOverlay
+          gasOrderId={activeGasOrderId}
+          onMinimize={()=> setShowGasChat(false)}
+          onNewMessage={()=>{ if (!showGasChat) setGasUnread(true); }}
+        />
+      )}
+
+      {/* ── Gas Floating Chat Button (shown when minimized & order accepted) ── */}
+      {activeGasOrderId && !showGasChat && activeGasOrderStatus === 'accepted' && (
+        <button
+          onClick={()=>{ setShowGasChat(true); setGasUnread(false); }}
+          title="فتح دردشة الغاز"
+          style={{
+            position:'absolute', bottom:'90px', right:'16px', zIndex:4101,
+            width:'54px', height:'54px', borderRadius:'50%',
+            background:'rgba(5,8,15,0.97)',
+            border:'2px solid #ff2d78',
+            boxShadow:'0 0 22px rgba(255,45,120,0.55), 0 0 8px rgba(255,45,120,0.3)',
+            cursor:'pointer', display:'flex', flexDirection:'column',
+            alignItems:'center', justifyContent:'center', gap:'1px',
+            padding:0,
+          }}
+        >
+          <span style={{fontSize:'22px', lineHeight:1}}>💬</span>
+          <span style={{fontFamily:'Orbitron,sans-serif',fontSize:'6px',color:'#ff8099',letterSpacing:'0.05em'}}>GAS</span>
+          {gasUnread && (
+            <span style={{
+              position:'absolute',top:'-2px',right:'-2px',
+              width:'14px',height:'14px',borderRadius:'50%',
+              background:'#ff2d78',boxShadow:'0 0 10px #ff2d78',
+              display:'flex',alignItems:'center',justifyContent:'center',
+              fontFamily:'Orbitron,sans-serif',fontSize:'8px',color:'#fff',
+            }}>!</span>
+          )}
         </button>
       )}
 

@@ -78,6 +78,11 @@ export function broadcastGasOrderUpdate(order: Record<string, unknown>) {
   broadcast("gas_order_update", { order });
 }
 
+/** Fired when a new gas order chat message is saved */
+export function broadcastGasNewMessage(message: Record<string, unknown>) {
+  broadcast("gas_new_message", { message });
+}
+
 export function sseClientCount() {
   return clients.size;
 }

@@ -1,9 +1,9 @@
 import { Router, type IRouter } from "express";
 import { db } from "@workspace/db";
-import { gasOrdersTable, insertGasOrderSchema } from "@workspace/db";
-import { and, eq, desc } from "drizzle-orm";
+import { gasOrdersTable, insertGasOrderSchema, gasOrderMessagesTable, insertGasOrderMessageSchema } from "@workspace/db";
+import { and, eq, desc, asc } from "drizzle-orm";
 import { requireAdmin } from "./admin";
-import { broadcastGasOrderUpdate, broadcastGasOrdersToOrdersStream } from "../lib/sse";
+import { broadcastGasOrderUpdate, broadcastGasOrdersToOrdersStream, broadcastGasNewMessage } from "../lib/sse";
 
 const router: IRouter = Router();
 
@@ -271,6 +271,61 @@ router.patch("/gas-orders/:id", async (req, res) => {
   } catch (err: any) {
     console.error(`[PATCH /gas-orders/${id}] error:`, err);
     res.status(500).json({ error: "فشل تحديث الطلب", detail: err?.message });
+  }
+});
+
+// ── GET /api/gas-orders/:id/messages — public: fetch chat messages ────────────
+router.get("/gas-orders/:id/messages", async (req, res) => {
+  const gasOrderId = Number(req.params.id);
+  if (!Number.isFinite(gasOrderId)) { res.status(400).json({ error: "id غير صالح" }); return; }
+  try {
+    const [order] = await db.select({ id: gasOrdersTable.id })
+      .from(gasOrdersTable).where(eq(gasOrdersTable.id, gasOrderId));
+    if (!order) { res.status(404).json({ error: "الطلب غير موجود" }); return; }
+
+    const msgs = await db.select()
+      .from(gasOrderMessagesTable)
+      .where(eq(gasOrderMessagesTable.gasOrderId, gasOrderId))
+      .orderBy(asc(gasOrderMessagesTable.createdAt));
+
+    res.json(msgs);
+  } catch (err: any) {
+    console.error(`[GET /gas-orders/${gasOrderId}/messages] error:`, err);
+    res.status(500).json({ error: "فشل جلب الرسائل" });
+  }
+});
+
+// ── POST /api/gas-orders/:id/messages — public: send a message ───────────────
+router.post("/gas-orders/:id/messages", async (req, res) => {
+  const gasOrderId = Number(req.params.id);
+  if (!Number.isFinite(gasOrderId)) { res.status(400).json({ error: "id غير صالح" }); return; }
+  try {
+    const [order] = await db.select({ id: gasOrdersTable.id })
+      .from(gasOrdersTable).where(eq(gasOrdersTable.id, gasOrderId));
+    if (!order) { res.status(404).json({ error: "الطلب غير موجود" }); return; }
+
+    const parsed = insertGasOrderMessageSchema.safeParse({ ...req.body, gasOrderId });
+    if (!parsed.success) {
+      res.status(400).json({ error: "بيانات غير صالحة", details: parsed.error?.issues });
+      return;
+    }
+
+    const [msg] = await db.insert(gasOrderMessagesTable).values(parsed.data).returning();
+
+    broadcastGasNewMessage({
+      id:          msg.id,
+      gasOrderId:  msg.gasOrderId,
+      senderRole:  msg.senderRole,
+      content:     msg.content,
+      isSystemMsg: msg.isSystemMsg,
+      createdAt:   msg.createdAt,
+    });
+
+    console.log(`[POST /gas-orders/${gasOrderId}/messages] role=${msg.senderRole} len=${msg.content.length}`);
+    res.status(201).json(msg);
+  } catch (err: any) {
+    console.error(`[POST /gas-orders/${gasOrderId}/messages] error:`, err);
+    res.status(500).json({ error: "فشل حفظ الرسالة" });
   }
 });
 
