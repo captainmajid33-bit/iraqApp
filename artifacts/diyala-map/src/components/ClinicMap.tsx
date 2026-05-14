@@ -1937,8 +1937,9 @@ export function ClinicMap({
     const saved = localStorage.getItem('diyala_active_gas_order');
     if (!saved) return;
     try {
-      const { orderId } = JSON.parse(saved) as { orderId:number };
-      if (!orderId) return;
+      const raw = JSON.parse(saved);
+      const orderId = Number(raw?.orderId);
+      if (!Number.isFinite(orderId) || orderId <= 0) return;
       fetch(`/api/gas-orders/${orderId}`)
         .then(r=>r.json())
         .then(data=>{
@@ -4251,16 +4252,16 @@ export function ClinicMap({
       )}
 
       {/* ── Gas Chat Overlay ── */}
-      {showGasChat && activeGasOrderId && activeGasOrderStatus === 'accepted' && (
+      {showGasChat && Number.isFinite(activeGasOrderId) && (activeGasOrderId ?? 0) > 0 && activeGasOrderStatus === 'accepted' && (
         <GasChatOverlay
-          gasOrderId={activeGasOrderId}
+          gasOrderId={activeGasOrderId!}
           onMinimize={()=> setShowGasChat(false)}
           onNewMessage={()=>{ if (!showGasChat) setGasUnread(true); }}
         />
       )}
 
       {/* ── Gas Floating Chat Button (shown when minimized & order accepted) ── */}
-      {activeGasOrderId && !showGasChat && activeGasOrderStatus === 'accepted' && (
+      {Number.isFinite(activeGasOrderId) && (activeGasOrderId ?? 0) > 0 && !showGasChat && activeGasOrderStatus === 'accepted' && (
         <button
           onClick={()=>{ setShowGasChat(true); setGasUnread(false); }}
           title="فتح دردشة الغاز"

@@ -73,6 +73,9 @@ function SystemAlertBubble({ msg }: { msg: GasMsg }) {
 }
 
 export function GasChatOverlay({ gasOrderId, agentPhone, onMinimize, onNewMessage }: GasChatOverlayProps) {
+  // Guard: ensure gasOrderId is a valid finite positive integer
+  const safeId = Number.isFinite(gasOrderId) && gasOrderId > 0 ? gasOrderId : null;
+
   const [messages,  setMessages]  = useState<GasMsg[]>([]);
   const [input,     setInput]     = useState('');
   const [sending,   setSending]   = useState(false);
@@ -108,8 +111,9 @@ export function GasChatOverlay({ gasOrderId, agentPhone, onMinimize, onNewMessag
   }, [onNewMessage]);
 
   const fetchMessages = useCallback(async () => {
+    if (!safeId) return;
     try {
-      const res = await fetch(MSG_PATH(gasOrderId));
+      const res = await fetch(MSG_PATH(safeId));
       if (!res.ok) return;
       const data: GasMsg[] = await res.json();
       if (seenIdsRef.current.size === 0) {
@@ -119,7 +123,7 @@ export function GasChatOverlay({ gasOrderId, agentPhone, onMinimize, onNewMessag
         mergeMessages(data);
       }
     } catch { /* silent */ }
-  }, [gasOrderId, mergeMessages]);
+  }, [safeId, mergeMessages]);
 
   useEffect(() => {
     fetchMessages();
@@ -140,7 +144,7 @@ export function GasChatOverlay({ gasOrderId, agentPhone, onMinimize, onNewMessag
       es.addEventListener('gas_new_message', (e: MessageEvent) => {
         try {
           const { message } = JSON.parse(e.data) as { message: GasMsg };
-          if (message.gasOrderId !== gasOrderId) return;
+          if (!safeId || message.gasOrderId !== safeId) return;
           mergeMessage(message);
         } catch { /* malformed */ }
       });
@@ -153,7 +157,7 @@ export function GasChatOverlay({ gasOrderId, agentPhone, onMinimize, onNewMessag
 
     connect();
     return () => { destroyed = true; if (retryTimer) clearTimeout(retryTimer); es?.close(); };
-  }, [gasOrderId, mergeMessage]);
+  }, [safeId, mergeMessage]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -161,10 +165,10 @@ export function GasChatOverlay({ gasOrderId, agentPhone, onMinimize, onNewMessag
 
   const sendMessage = useCallback(async () => {
     const text = input.trim();
-    if (!text || sending) return;
+    if (!text || sending || !safeId) return;
     setSending(true);
     try {
-      const res = await fetch(MSG_PATH(gasOrderId), {
+      const res = await fetch(MSG_PATH(safeId), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ senderRole: 'customer', content: text }),
@@ -172,11 +176,39 @@ export function GasChatOverlay({ gasOrderId, agentPhone, onMinimize, onNewMessag
       if (res.ok) { setInput(''); fetchMessages(); }
     } catch { /* silent */ }
     finally { setSending(false); }
-  }, [input, sending, gasOrderId, fetchMessages]);
+  }, [input, sending, safeId, fetchMessages]);
 
   const handleKey = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
   };
+
+  // If safeId is invalid, show an error panel instead of broken chat
+  if (!safeId) {
+    return (
+      <div style={{
+        position: 'absolute', bottom: 0, right: 0, zIndex: 4100,
+        width: 'min(360px, 100vw)',
+        background: 'rgba(5,8,15,0.98)',
+        border: '1px solid #ff2d78',
+        borderBottom: 'none',
+        padding: '18px 16px',
+        direction: 'rtl',
+        display: 'flex', flexDirection: 'column', gap: '10px',
+      }}>
+        <div style={{ fontFamily: 'Orbitron,sans-serif', fontSize: '10px', color: '#ff2d78', letterSpacing: '0.15em' }}>
+          GAS CHAT — خطأ
+        </div>
+        <div style={{ fontFamily: 'Rajdhani,sans-serif', fontSize: '13px', color: '#e8f8f5' }}>
+          تعذّر تحميل الدردشة: رقم الطلب غير صالح. أعد تحديث الصفحة.
+        </div>
+        <button onClick={onMinimize} style={{
+          alignSelf: 'flex-end', padding: '4px 14px', borderRadius: '6px',
+          background: 'rgba(255,45,120,0.15)', border: '1px solid #ff2d78',
+          color: '#ff2d78', cursor: 'pointer', fontFamily: 'Orbitron,sans-serif', fontSize: '9px',
+        }}>إغلاق</button>
+      </div>
+    );
+  }
 
   return (
     <>
@@ -218,7 +250,7 @@ export function GasChatOverlay({ gasOrderId, agentPhone, onMinimize, onNewMessag
             }} />
             <div>
               <div style={{ fontFamily: 'Orbitron,sans-serif', fontSize: '9px', color: '#ff2d78', letterSpacing: '0.18em' }}>
-                {sseOk ? 'LIVE' : 'SYNC'} · GAS ORDER #{gasOrderId}
+                {sseOk ? 'LIVE' : 'SYNC'} · GAS ORDER #{safeId}
               </div>
               <div style={{ fontFamily: 'Rajdhani,sans-serif', fontSize: '13px', color: '#e8f8f5', fontWeight: 600 }}>
                 تواصل مع وكيل الغاز
