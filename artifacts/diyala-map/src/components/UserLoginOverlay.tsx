@@ -85,44 +85,52 @@ const S: Record<string, React.CSSProperties> = {
 };
 
 export function UserLoginOverlay({ onLogin }: { onLogin: (u: DiyalaUser) => void }) {
-  const [visible,       setVisible]       = useState(false);
-  const [step,          setStep]          = useState<Step>('phone');
-  const [name,          setName]          = useState('');
-  const [phone,         setPhone]         = useState('');
-  const [otp,           setOtp]           = useState('');
-  const [loading,       setLoading]       = useState(false);
-  const [error,         setError]         = useState<string | null>(null);
-  const [sentTo,        setSentTo]        = useState('');
-  const [countdown,     setCountdown]     = useState(0);
+  const [visible,   setVisible]   = useState(false);
+  const [step,      setStep]      = useState<Step>('phone');
+  const [name,      setName]      = useState('');
+  const [phone,     setPhone]     = useState('');
+  const [otp,       setOtp]       = useState('');
+  const [loading,   setLoading]   = useState(false);
+  const [error,     setError]     = useState<string | null>(null);
+  const [sentTo,    setSentTo]    = useState('');
+  const [countdown, setCountdown] = useState(0);
 
-  const confirmRef  = useRef<ConfirmationResult | null>(null);
-  const captchaRef  = useRef<RecaptchaVerifier | null>(null);
+  const confirmRef = useRef<ConfirmationResult | null>(null);
+  const captchaRef = useRef<RecaptchaVerifier | null>(null);
 
-  // ── helpers ──────────────────────────────────────────────────────────────
+  // ── Destroy & reset the reCAPTCHA widget cleanly ─────────────────────────
   const clearRecaptcha = () => {
     try { captchaRef.current?.clear(); } catch {}
     captchaRef.current = null;
-    // Wipe any leftover reCAPTCHA iframes / elements from DOM
     const el = document.getElementById('rcv-container');
     if (el) el.innerHTML = '';
   };
 
-  const getRecaptcha = async (): Promise<RecaptchaVerifier> => {
-    if (captchaRef.current) return captchaRef.current;
-    const v = new RecaptchaVerifier(auth, 'rcv-container', {
-      size: 'invisible',
-      callback: () => { console.log('[PhoneAuth] reCAPTCHA solved ✓'); },
-      'expired-callback': () => {
-        console.warn('[PhoneAuth] reCAPTCHA expired — clearing');
-        clearRecaptcha();
-      },
-    });
-    await v.render(); // pre-render so widget is ready before signIn
-    captchaRef.current = v;
-    return v;
+  // ── Create & pre-render an invisible RecaptchaVerifier ───────────────────
+  // Called as early as possible so Google has time to silently verify the user
+  // before they click "Send OTP". This prevents the visual challenge pop-up.
+  const initRecaptcha = async () => {
+    if (captchaRef.current) return; // already initialised
+    try {
+      const v = new RecaptchaVerifier(auth, 'rcv-container', {
+        size: 'invisible',           // ← never shows a checkbox to the user
+        callback:          () => { console.log('[PhoneAuth] reCAPTCHA ✓ solved silently'); },
+        'expired-callback':() => { console.warn('[PhoneAuth] reCAPTCHA expired — will reinit'); clearRecaptcha(); },
+      });
+      await v.render(); // pre-render so the token is ready when signIn is called
+      captchaRef.current = v;
+      console.log('[PhoneAuth] reCAPTCHA initialised early ✓');
+    } catch (e) {
+      console.warn('[PhoneAuth] early reCAPTCHA init failed (will retry on send):', e);
+    }
   };
 
+  // ── Auth-state listener (runs on mount) ──────────────────────────────────
   useEffect(() => {
+    // Kick off reCAPTCHA immediately — gives Google the most time to analyse
+    // the user silently, minimising the chance of a visual challenge.
+    initRecaptcha();
+
     const unsub = onAuthStateChanged(auth, async (fbUser) => {
       if (fbUser) {
         const saved = getUserFromStorage();
@@ -136,20 +144,22 @@ export function UserLoginOverlay({ onLogin }: { onLogin: (u: DiyalaUser) => void
             localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
             onLogin(data); return;
           }
-        } catch { /* show form */ }
+        } catch { /* fall through → show form */ }
       }
       setVisible(true);
     });
-    return () => unsub();
+    return () => { unsub(); clearRecaptcha(); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // ── Countdown timer ───────────────────────────────────────────────────────
   useEffect(() => {
     if (countdown <= 0) return;
     const t = setTimeout(() => setCountdown(c => c - 1), 1000);
     return () => clearTimeout(t);
   }, [countdown]);
 
+  // ── Send OTP ─────────────────────────────────────────────────────────────
   const sendOtp = async () => {
     const trimName  = name.trim();
     const trimPhone = phone.trim();
@@ -157,56 +167,55 @@ export function UserLoginOverlay({ onLogin }: { onLogin: (u: DiyalaUser) => void
     if (!trimPhone) { setError('الرجاء إدخال رقم الهاتف');   return; }
 
     const e164 = toE164(trimPhone);
-    console.log('[PhoneAuth] Sending OTP to:', e164);
+    console.log('[PhoneAuth] → sending to:', e164);
+
     if (!/^\+964\d{10}$/.test(e164)) {
       setError('رقم الهاتف غير صحيح — مثال: 07742533658'); return;
     }
 
     setLoading(true); setError(null);
     try {
-      const verifier = await getRecaptcha();
-      console.log('[PhoneAuth] reCAPTCHA ready, calling signInWithPhoneNumber...');
+      // Ensure verifier is ready (may already be from early init)
+      if (!captchaRef.current) await initRecaptcha();
+      const verifier = captchaRef.current!;
+
+      console.log('[PhoneAuth] calling signInWithPhoneNumber...');
       const result = await signInWithPhoneNumber(auth, e164, verifier);
       confirmRef.current = result;
       setSentTo(e164);
       setStep('otp');
       setCountdown(60);
-      console.log('[PhoneAuth] OTP sent successfully ✓');
+      console.log('[PhoneAuth] OTP dispatched ✓');
     } catch (e: any) {
-      // ── طباعة الخطأ كاملاً لمعرفة السبب الحقيقي ──
-      console.error('[PhoneAuth] sendOtp FAILED:', {
+      console.error('[PhoneAuth] sendOtp FAILED ▼', {
         code:    e?.code,
         message: e?.message,
-        name:    e?.name,
         full:    e,
       });
       clearRecaptcha();
-      if (e?.code === 'auth/too-many-requests') {
-        setError('طلبات كثيرة جداً، انتظر قليلاً ثم أعد المحاولة');
-      } else if (e?.code === 'auth/invalid-phone-number') {
-        setError('رقم الهاتف غير صالح للمنظومة الدولية');
-      } else if (e?.code === 'auth/captcha-check-failed') {
-        setError('فشل reCAPTCHA — أعد تحميل الصفحة وحاول مجدداً');
-      } else if (e?.code === 'auth/operation-not-allowed') {
-        setError('خدمة Phone Auth غير مفعّلة في Firebase Console');
-      } else {
-        // إظهار الـ code الحقيقي حتى نعرف المشكلة
-        setError(`خطأ Firebase: ${e?.code ?? e?.message ?? 'unknown'}`);
-      }
+      // Re-init for next attempt
+      setTimeout(() => initRecaptcha(), 300);
+
+      if      (e?.code === 'auth/too-many-requests')     setError('طلبات كثيرة جداً، انتظر قليلاً ثم أعد المحاولة');
+      else if (e?.code === 'auth/invalid-phone-number')  setError('رقم الهاتف غير صالح');
+      else if (e?.code === 'auth/captcha-check-failed')  setError('فشل التحقق الصامت — أعد تحميل الصفحة');
+      else if (e?.code === 'auth/operation-not-allowed') setError('Phone Auth غير مفعّل في Firebase Console');
+      else setError(`خطأ Firebase: ${e?.code ?? e?.message ?? 'unknown'}`);
     } finally {
       setLoading(false);
     }
   };
 
+  // ── Verify OTP ────────────────────────────────────────────────────────────
   const verifyOtp = async () => {
-    if (otp.length < 6) { setError('الرجاء إدخال الرمز المكوّن من 6 أرقام'); return; }
-    if (!confirmRef.current) { setError('انتهت الجلسة، أعد إرسال الرمز'); return; }
+    if (otp.length < 6)        { setError('الرجاء إدخال الرمز المكوّن من 6 أرقام'); return; }
+    if (!confirmRef.current)   { setError('انتهت الجلسة، أعد إرسال الرمز'); return; }
     setLoading(true); setError(null);
     try {
-      console.log('[PhoneAuth] Verifying OTP...');
+      console.log('[PhoneAuth] confirming OTP...');
       const cred = await confirmRef.current.confirm(otp);
       const uid  = cred.user.uid;
-      console.log('[PhoneAuth] Verified ✓ uid:', uid);
+      console.log('[PhoneAuth] UID:', uid);
       const user: DiyalaUser = { name: name.trim(), phone: phone.trim(), uid };
 
       await setDoc(doc(db, 'users', uid), {
@@ -221,37 +230,45 @@ export function UserLoginOverlay({ onLogin }: { onLogin: (u: DiyalaUser) => void
       setVisible(false);
       onLogin(user);
     } catch (e: any) {
-      console.error('[PhoneAuth] verifyOtp FAILED:', {
+      console.error('[PhoneAuth] verifyOtp FAILED ▼', {
         code:    e?.code,
         message: e?.message,
-        name:    e?.name,
         full:    e,
       });
-      if (e?.code === 'auth/invalid-verification-code') {
-        setError('الرمز غير صحيح، تأكد من الأرقام وأعد المحاولة');
-      } else if (e?.code === 'auth/code-expired') {
-        setError('انتهت صلاحية الرمز، اضغط "إعادة الإرسال"');
-      } else {
-        setError(`خطأ Firebase: ${e?.code ?? e?.message ?? 'unknown'}`);
-      }
+      if      (e?.code === 'auth/invalid-verification-code') setError('الرمز غير صحيح، تأكد من الأرقام');
+      else if (e?.code === 'auth/code-expired')              setError('انتهت صلاحية الرمز، اضغط "إعادة الإرسال"');
+      else setError(`خطأ Firebase: ${e?.code ?? e?.message ?? 'unknown'}`);
     } finally {
       setLoading(false);
     }
   };
 
+  // ── Resend ────────────────────────────────────────────────────────────────
   const resendOtp = async () => {
     if (countdown > 0) return;
-    clearRecaptcha();            // تنظيف كامل قبل إعادة المحاولة
+    clearRecaptcha();
     setOtp(''); setError(null);
+    await initRecaptcha();
     await sendOtp();
   };
 
-  if (!visible) return null;
+  // ── The reCAPTCHA anchor is ALWAYS in the DOM (never removed) ─────────────
+  // This gives Google maximum time to silently verify the user before submit.
+  const captchaAnchor = (
+    <div
+      id="rcv-container"
+      style={{ position: 'fixed', bottom: '-9999px', left: '-9999px',
+               width: 0, height: 0, overflow: 'hidden', pointerEvents: 'none' }}
+    />
+  );
+
+  if (!visible) return captchaAnchor;
 
   const isPhoneStep = step === 'phone';
 
   return (
-    <div style={S.overlay}>
+    <>
+      {captchaAnchor}
       <style>{`
         @keyframes dl-scan  { 0%{top:-8px} 100%{top:100%} }
         @keyframes dl-blink { 0%,100%{opacity:1} 50%{opacity:0.25} }
@@ -261,173 +278,171 @@ export function UserLoginOverlay({ onLogin }: { onLogin: (u: DiyalaUser) => void
         .dl-otp-input { letter-spacing:0.35em; text-align:center; font-size:26px !important; }
       `}</style>
 
-      {/* hidden recaptcha container */}
-      <div id="rcv-container" style={{ position: 'absolute', bottom: 0, left: 0, opacity: 0, pointerEvents: 'none' }} />
+      <div style={S.overlay}>
+        <div style={S.card}>
 
-      <div style={S.card}>
-
-        {/* ── Header ── */}
-        <div style={S.header}>
-          <div style={{
-            position: 'absolute', inset: 0,
-            background: 'linear-gradient(180deg,rgba(123,47,247,0.06) 0%,transparent 100%)',
-            pointerEvents: 'none',
-          }} />
-          <div style={{
-            position: 'absolute', top: 0, left: 0, right: 0, height: '2px',
-            background: 'linear-gradient(90deg,transparent,rgba(123,47,247,0.8),transparent)',
-            animation: 'dl-scan 2.8s linear infinite',
-          }} />
-
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '10px' }}>
+          {/* ── Header ── */}
+          <div style={S.header}>
             <div style={{
-              width: '8px', height: '8px', borderRadius: '50%',
-              background: '#7b2ff7', boxShadow: '0 0 12px #7b2ff7',
-              animation: 'dl-blink 1.4s ease-in-out infinite', flexShrink: 0,
+              position: 'absolute', inset: 0,
+              background: 'linear-gradient(180deg,rgba(123,47,247,0.06) 0%,transparent 100%)',
+              pointerEvents: 'none',
             }} />
-            <div style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '8px', color: 'rgba(123,47,247,0.8)', letterSpacing: '0.25em' }}>
-              {isPhoneStep ? 'PLAYER REGISTRATION · تسجيل الدخول' : 'OTP VERIFICATION · التحقق من الهوية'}
-            </div>
-          </div>
+            <div style={{
+              position: 'absolute', top: 0, left: 0, right: 0, height: '2px',
+              background: 'linear-gradient(90deg,transparent,rgba(123,47,247,0.8),transparent)',
+              animation: 'dl-scan 2.8s linear infinite',
+            }} />
 
-          <div style={{ fontFamily: 'Rajdhani, sans-serif', fontSize: '22px', fontWeight: 800, color: '#e8f8f5', lineHeight: 1.2 }}>
-            {isPhoneStep ? 'أدخل بياناتك للدخول إلى الخريطة' : 'أدخل رمز التحقق'}
-          </div>
-          {isPhoneStep && (
-            <div style={{ fontFamily: 'Rajdhani, sans-serif', fontSize: '13px', color: 'rgba(255,255,255,0.3)', marginTop: '5px' }}>
-              سيتم إرسال رمز التحقق (OTP) إلى رقمك
-            </div>
-          )}
-          {!isPhoneStep && (
-            <div style={{ fontFamily: 'Rajdhani, sans-serif', fontSize: '13px', color: 'rgba(0,245,212,0.6)', marginTop: '5px' }}>
-              تم الإرسال إلى {sentTo}
-            </div>
-          )}
-        </div>
-
-        {/* ── Body ── */}
-        <div style={S.body}>
-
-          {/* ── STEP 1: Name + Phone ── */}
-          {isPhoneStep && (
-            <>
-              <div style={{ marginBottom: '16px' }}>
-                <label style={S.label}>الاسم الكامل</label>
-                <input
-                  className="dl-input"
-                  type="text"
-                  value={name}
-                  onChange={e => { setName(e.target.value); setError(null); }}
-                  onKeyDown={e => e.key === 'Enter' && sendOtp()}
-                  placeholder="مثال: أحمد محمد"
-                  autoFocus
-                  disabled={loading}
-                  style={S.input}
-                />
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '10px' }}>
+              <div style={{
+                width: '8px', height: '8px', borderRadius: '50%',
+                background: '#7b2ff7', boxShadow: '0 0 12px #7b2ff7',
+                animation: 'dl-blink 1.4s ease-in-out infinite', flexShrink: 0,
+              }} />
+              <div style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '8px', color: 'rgba(123,47,247,0.8)', letterSpacing: '0.25em' }}>
+                {isPhoneStep ? 'PLAYER REGISTRATION · تسجيل الدخول' : 'OTP VERIFICATION · التحقق من الهوية'}
               </div>
+            </div>
 
-              <div style={{ marginBottom: '20px' }}>
-                <label style={S.label}>رقم الهاتف</label>
-                <div style={{ position: 'relative' }}>
-                  <span style={{
-                    position: 'absolute', right: '14px', top: '50%', transform: 'translateY(-50%)',
-                    fontFamily: 'Rajdhani, sans-serif', fontSize: '15px',
-                    color: 'rgba(123,47,247,0.7)', pointerEvents: 'none', userSelect: 'none',
-                  }}>+964</span>
+            <div style={{ fontFamily: 'Rajdhani, sans-serif', fontSize: '22px', fontWeight: 800, color: '#e8f8f5', lineHeight: 1.2 }}>
+              {isPhoneStep ? 'أدخل بياناتك للدخول إلى الخريطة' : 'أدخل رمز التحقق'}
+            </div>
+            {isPhoneStep ? (
+              <div style={{ fontFamily: 'Rajdhani, sans-serif', fontSize: '13px', color: 'rgba(255,255,255,0.3)', marginTop: '5px' }}>
+                سيتم إرسال رمز التحقق (OTP) إلى رقمك
+              </div>
+            ) : (
+              <div style={{ fontFamily: 'Rajdhani, sans-serif', fontSize: '13px', color: 'rgba(0,245,212,0.6)', marginTop: '5px' }}>
+                تم الإرسال إلى {sentTo}
+              </div>
+            )}
+          </div>
+
+          {/* ── Body ── */}
+          <div style={S.body}>
+
+            {/* ── STEP 1: Name + Phone ── */}
+            {isPhoneStep && (
+              <>
+                <div style={{ marginBottom: '16px' }}>
+                  <label style={S.label}>الاسم الكامل</label>
                   <input
                     className="dl-input"
-                    type="tel"
-                    inputMode="numeric"
-                    value={phone}
-                    onChange={e => { setPhone(e.target.value); setError(null); }}
+                    type="text"
+                    value={name}
+                    onChange={e => { setName(e.target.value); setError(null); }}
                     onKeyDown={e => e.key === 'Enter' && sendOtp()}
-                    placeholder="07XX XXX XXXX"
+                    placeholder="مثال: أحمد محمد"
+                    autoFocus
                     disabled={loading}
-                    style={{ ...S.input, paddingRight: '56px' }}
+                    style={S.input}
                   />
                 </div>
-              </div>
-            </>
-          )}
 
-          {/* ── STEP 2: OTP ── */}
-          {step === 'otp' && (
-            <>
-              <div style={{ marginBottom: '20px' }}>
-                <label style={S.label}>رمز التحقق (6 أرقام)</label>
-                <input
-                  className="dl-input dl-otp-input"
-                  type="text"
-                  inputMode="numeric"
-                  value={otp}
-                  onChange={e => { setOtp(e.target.value.replace(/\D/g, '').slice(0, 6)); setError(null); }}
-                  onKeyDown={e => e.key === 'Enter' && verifyOtp()}
-                  placeholder="• • • • • •"
-                  maxLength={6}
-                  autoFocus
-                  disabled={loading}
-                  style={S.input}
-                />
-              </div>
+                <div style={{ marginBottom: '20px' }}>
+                  <label style={S.label}>رقم الهاتف</label>
+                  <div style={{ position: 'relative' }}>
+                    <span style={{
+                      position: 'absolute', right: '14px', top: '50%', transform: 'translateY(-50%)',
+                      fontFamily: 'Rajdhani, sans-serif', fontSize: '15px',
+                      color: 'rgba(123,47,247,0.7)', pointerEvents: 'none', userSelect: 'none',
+                    }}>+964</span>
+                    <input
+                      className="dl-input"
+                      type="tel"
+                      inputMode="numeric"
+                      value={phone}
+                      onChange={e => { setPhone(e.target.value); setError(null); }}
+                      onKeyDown={e => e.key === 'Enter' && sendOtp()}
+                      placeholder="07XX XXX XXXX"
+                      disabled={loading}
+                      style={{ ...S.input, paddingRight: '56px' }}
+                    />
+                  </div>
+                </div>
+              </>
+            )}
 
-              {/* Resend row */}
-              <div style={{ marginBottom: '16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                <button
-                  onClick={resendOtp}
-                  disabled={countdown > 0 || loading}
-                  style={{
-                    background: 'none', border: 'none', padding: 0, cursor: countdown > 0 ? 'not-allowed' : 'pointer',
-                    fontFamily: 'Rajdhani, sans-serif', fontSize: '13px',
-                    color: countdown > 0 ? 'rgba(255,255,255,0.2)' : 'rgba(0,245,212,0.7)',
-                    textDecoration: countdown > 0 ? 'none' : 'underline',
-                  }}
-                >
-                  إعادة الإرسال
-                </button>
-                {countdown > 0 && (
-                  <span style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '11px', color: 'rgba(123,47,247,0.6)' }}>
-                    {countdown}s
-                  </span>
-                )}
-                <button
-                  onClick={() => { setStep('phone'); setOtp(''); setError(null); captchaRef.current = null; }}
-                  disabled={loading}
-                  style={{
-                    background: 'none', border: 'none', padding: 0, cursor: 'pointer',
-                    fontFamily: 'Rajdhani, sans-serif', fontSize: '13px', color: 'rgba(255,255,255,0.3)',
-                  }}
-                >
-                  ← تغيير الرقم
-                </button>
-              </div>
-            </>
-          )}
+            {/* ── STEP 2: OTP ── */}
+            {step === 'otp' && (
+              <>
+                <div style={{ marginBottom: '20px' }}>
+                  <label style={S.label}>رمز التحقق (6 أرقام)</label>
+                  <input
+                    className="dl-input dl-otp-input"
+                    type="text"
+                    inputMode="numeric"
+                    value={otp}
+                    onChange={e => { setOtp(e.target.value.replace(/\D/g, '').slice(0, 6)); setError(null); }}
+                    onKeyDown={e => e.key === 'Enter' && verifyOtp()}
+                    placeholder="• • • • • •"
+                    maxLength={6}
+                    autoFocus
+                    disabled={loading}
+                    style={S.input}
+                  />
+                </div>
 
-          {/* ── Error ── */}
-          {error && <div style={S.error}>⚠ {error}</div>}
+                <div style={{ marginBottom: '16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <button
+                    onClick={resendOtp}
+                    disabled={countdown > 0 || loading}
+                    style={{
+                      background: 'none', border: 'none', padding: 0,
+                      cursor: countdown > 0 ? 'not-allowed' : 'pointer',
+                      fontFamily: 'Rajdhani, sans-serif', fontSize: '13px',
+                      color: countdown > 0 ? 'rgba(255,255,255,0.2)' : 'rgba(0,245,212,0.7)',
+                      textDecoration: countdown > 0 ? 'none' : 'underline',
+                    }}
+                  >
+                    إعادة الإرسال
+                  </button>
+                  {countdown > 0 && (
+                    <span style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '11px', color: 'rgba(123,47,247,0.6)' }}>
+                      {countdown}s
+                    </span>
+                  )}
+                  <button
+                    onClick={() => { setStep('phone'); setOtp(''); setError(null); clearRecaptcha(); initRecaptcha(); }}
+                    disabled={loading}
+                    style={{
+                      background: 'none', border: 'none', padding: 0, cursor: 'pointer',
+                      fontFamily: 'Rajdhani, sans-serif', fontSize: '13px', color: 'rgba(255,255,255,0.3)',
+                    }}
+                  >
+                    ← تغيير الرقم
+                  </button>
+                </div>
+              </>
+            )}
 
-          {/* ── Submit button ── */}
-          <button
-            className={loading ? '' : 'dl-btn'}
-            onClick={isPhoneStep ? sendOtp : verifyOtp}
-            disabled={loading}
-            style={loading ? S.btnDisabled : S.btn}
-          >
-            {loading ? (
-              <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
-                <svg width="14" height="14" viewBox="0 0 28 28" fill="none" style={{ animation: 'dl-spin 0.9s linear infinite' }}>
-                  <circle cx="14" cy="14" r="10" stroke="#7b2ff7" strokeWidth="2.5" strokeDasharray="22 14" strokeLinecap="round" />
-                </svg>
-                جاري المعالجة...
-              </span>
-            ) : isPhoneStep ? 'إرسال رمز التحقق ←' : 'تحقق والدخول إلى الخريطة ←'}
-          </button>
+            {/* ── Error ── */}
+            {error && <div style={S.error}>⚠ {error}</div>}
 
-          <div style={{ marginTop: '12px', fontFamily: 'Rajdhani, sans-serif', fontSize: '11px', color: 'rgba(255,255,255,0.18)', textAlign: 'center' }}>
-            بياناتك آمنة ومحمية · Firebase Authentication
+            {/* ── Submit ── */}
+            <button
+              className={loading ? '' : 'dl-btn'}
+              onClick={isPhoneStep ? sendOtp : verifyOtp}
+              disabled={loading}
+              style={loading ? S.btnDisabled : S.btn}
+            >
+              {loading ? (
+                <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
+                  <svg width="14" height="14" viewBox="0 0 28 28" fill="none" style={{ animation: 'dl-spin 0.9s linear infinite' }}>
+                    <circle cx="14" cy="14" r="10" stroke="#7b2ff7" strokeWidth="2.5" strokeDasharray="22 14" strokeLinecap="round" />
+                  </svg>
+                  جاري المعالجة...
+                </span>
+              ) : isPhoneStep ? 'إرسال رمز التحقق ←' : 'تحقق والدخول إلى الخريطة ←'}
+            </button>
+
+            <div style={{ marginTop: '12px', fontFamily: 'Rajdhani, sans-serif', fontSize: '11px', color: 'rgba(255,255,255,0.18)', textAlign: 'center' }}>
+              بياناتك آمنة ومحمية · Firebase Authentication
+            </div>
           </div>
         </div>
       </div>
-    </div>
+    </>
   );
 }
