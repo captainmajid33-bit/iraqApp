@@ -43,9 +43,13 @@ router.get("/drivers-online/all", async (req, res) => {
 // ── GET /api/drivers-online ───────────────────────────────────────────────────
 // Public — returns only drivers that are:
 //   • isOnline  = true
-//   • isBusy    = false   ← NEW: skip drivers currently on a ride
-//   • location.status = 'مفتوح'  (not disabled / closed)
-router.get("/drivers-online", async (_req, res) => {
+//   • isBusy    = false
+//   • category  = ?category query param (optional, e.g. 'taxi')
+//   • location.status = 'مفتوح' (not disabled / closed)
+router.get("/drivers-online", async (req, res) => {
+  const categoryFilter = typeof req.query.category === "string" && req.query.category.trim()
+    ? req.query.category.trim()
+    : null;
   try {
     const rows = await db
       .select({
@@ -57,6 +61,7 @@ router.get("/drivers-online", async (_req, res) => {
         lng:        driversOnlineTable.lng,
         isOnline:   driversOnlineTable.isOnline,
         isBusy:     driversOnlineTable.isBusy,
+        category:   driversOnlineTable.category,
         updatedAt:  driversOnlineTable.updatedAt,
       })
       .from(driversOnlineTable)
@@ -65,7 +70,9 @@ router.get("/drivers-online", async (_req, res) => {
         and(
           eq(driversOnlineTable.isOnline, true),
           eq(driversOnlineTable.isBusy,   false),
-          // Show driver if: location is open OR location row doesn't exist (partner uses different locationId)
+          // Filter by category when provided
+          categoryFilter ? eq(driversOnlineTable.category, categoryFilter) : undefined,
+          // Show driver if: location is open OR location row doesn't exist
           or(
             isNull(locationsTable.id),
             eq(locationsTable.status, "مفتوح"),
@@ -74,8 +81,8 @@ router.get("/drivers-online", async (_req, res) => {
         )
       );
 
-    console.log(`[GET /drivers-online] returned ${rows.length} driver(s):`,
-      rows.map(r => ({ name: r.driverName, locationId: r.locationId, isOnline: r.isOnline, isBusy: r.isBusy, lat: r.lat, lng: r.lng, updatedAt: r.updatedAt })));
+    console.log(`[GET /drivers-online] cat=${categoryFilter ?? "all"} returned ${rows.length} driver(s):`,
+      rows.map(r => ({ name: r.driverName, locationId: r.locationId, cat: r.category, isOnline: r.isOnline, isBusy: r.isBusy })));
     res.json(rows);
   } catch (err: any) {
     console.error("[GET /drivers-online] error:", err);
@@ -92,7 +99,7 @@ router.put("/drivers-online/:locationId", async (req, res) => {
     res.status(400).json({ error: "locationId غير صالح" }); return;
   }
 
-  const { lat, lng, driverName: bodyName, phone: bodyPhone } = req.body ?? {};
+  const { lat, lng, driverName: bodyName, phone: bodyPhone, category: bodyCategory } = req.body ?? {};
   if (typeof lat !== "number" || typeof lng !== "number") {
     res.status(400).json({ error: "lat و lng مطلوبان" }); return;
   }
@@ -106,16 +113,18 @@ router.put("/drivers-online/:locationId", async (req, res) => {
     // Use DB location name/phone first; fall back to body-provided values
     const driverName = loc?.name ?? (typeof bodyName === "string" ? bodyName : "") ?? "";
     const phone      = loc?.phone ?? (typeof bodyPhone === "string" ? bodyPhone : "") ?? "";
+    const category   = typeof bodyCategory === "string" && bodyCategory.trim() ? bodyCategory.trim() : "taxi";
 
     const [row] = await db
       .insert(driversOnlineTable)
-      .values({ locationId, driverName, phone, lat, lng, isOnline: true, isBusy: false, updatedAt: new Date() })
+      .values({ locationId, driverName, phone, lat, lng, isOnline: true, isBusy: false, category, updatedAt: new Date() })
       .onConflictDoUpdate({
         target: driversOnlineTable.locationId,
-        // Update name/phone too in case they were empty on first insert
+        // Update name/phone/category too in case they were empty on first insert
         set:    { lat, lng, isOnline: true, updatedAt: new Date(),
                   ...(driverName ? { driverName } : {}),
-                  ...(phone      ? { phone }      : {}) },
+                  ...(phone      ? { phone }      : {}),
+                  ...(category   ? { category }   : {}) },
         // NOTE: isBusy is NOT reset on location update — preserve current busy state
       })
       .returning();

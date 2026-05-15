@@ -9,6 +9,7 @@ export const driversOnlineTable = pgTable("drivers_online", {
   lng:         real("lng").notNull(),
   isOnline:    boolean("is_online").notNull().default(true),
   isBusy:      boolean("is_busy").notNull().default(false),
+  category:    text("category").notNull().default("taxi"),
   updatedAt:   timestamp("updated_at").defaultNow(),
 });
 

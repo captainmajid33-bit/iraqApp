@@ -1297,7 +1297,7 @@ export function ClinicMap({
     const doSearch = async (loc: {lat:number; lng:number}) => {
       setTaxiAutoSearching(true);
       try {
-        const res     = await fetch('/api/drivers-online');
+        const res     = await fetch('/api/drivers-online?category=taxi');
         const drivers: OnlineDriver[] = await res.json();
 
         // DEBUG ── log every driver returned by the API ──────────────────────
@@ -1552,7 +1552,7 @@ export function ClinicMap({
       let dOk = false, dStatus = 0, dRaw: unknown = null;
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
-          const r = await safeFetch('/api/drivers-online');
+          const r = await safeFetch('/api/drivers-online?category=taxi');
           dOk = r.ok; dStatus = r.status; dRaw = r.json;
           if (dOk && Array.isArray(dRaw)) break;           // success
           console.warn(`[dispatch] attempt ${attempt+1}: status=${dStatus} json=${JSON.stringify(dRaw)?.slice(0,60)}`);
@@ -2380,8 +2380,8 @@ export function ClinicMap({
     if (!loc) { stopOrderTracking(); return; }
 
     try {
-      // API already filters isOnline=true & isBusy=false & status='open' at DB level
-      const res     = await fetch('/api/drivers-online');
+      // API already filters isOnline=true & isBusy=false & category=taxi at DB level
+      const res     = await fetch('/api/drivers-online?category=taxi');
       const drivers: OnlineDriver[] = await res.json();
 
       const SEARCH_RADIUS_KM = 10; // ⚠ TESTING: temporarily 10 km (was 2 km)
