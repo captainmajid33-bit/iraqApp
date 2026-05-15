@@ -98,6 +98,30 @@ export function UserLoginOverlay({ onLogin }: { onLogin: (u: DiyalaUser) => void
   const confirmRef  = useRef<ConfirmationResult | null>(null);
   const captchaRef  = useRef<RecaptchaVerifier | null>(null);
 
+  // ── helpers ──────────────────────────────────────────────────────────────
+  const clearRecaptcha = () => {
+    try { captchaRef.current?.clear(); } catch {}
+    captchaRef.current = null;
+    // Wipe any leftover reCAPTCHA iframes / elements from DOM
+    const el = document.getElementById('rcv-container');
+    if (el) el.innerHTML = '';
+  };
+
+  const getRecaptcha = async (): Promise<RecaptchaVerifier> => {
+    if (captchaRef.current) return captchaRef.current;
+    const v = new RecaptchaVerifier(auth, 'rcv-container', {
+      size: 'invisible',
+      callback: () => { console.log('[PhoneAuth] reCAPTCHA solved ✓'); },
+      'expired-callback': () => {
+        console.warn('[PhoneAuth] reCAPTCHA expired — clearing');
+        clearRecaptcha();
+      },
+    });
+    await v.render(); // pre-render so widget is ready before signIn
+    captchaRef.current = v;
+    return v;
+  };
+
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (fbUser) => {
       if (fbUser) {
@@ -126,16 +150,6 @@ export function UserLoginOverlay({ onLogin }: { onLogin: (u: DiyalaUser) => void
     return () => clearTimeout(t);
   }, [countdown]);
 
-  const getRecaptcha = () => {
-    if (!captchaRef.current) {
-      captchaRef.current = new RecaptchaVerifier(auth, 'rcv-container', {
-        size: 'invisible',
-        callback: () => {},
-      });
-    }
-    return captchaRef.current;
-  };
-
   const sendOtp = async () => {
     const trimName  = name.trim();
     const trimPhone = phone.trim();
@@ -143,27 +157,41 @@ export function UserLoginOverlay({ onLogin }: { onLogin: (u: DiyalaUser) => void
     if (!trimPhone) { setError('الرجاء إدخال رقم الهاتف');   return; }
 
     const e164 = toE164(trimPhone);
+    console.log('[PhoneAuth] Sending OTP to:', e164);
     if (!/^\+964\d{10}$/.test(e164)) {
       setError('رقم الهاتف غير صحيح — مثال: 07742533658'); return;
     }
 
     setLoading(true); setError(null);
     try {
-      const verifier = getRecaptcha();
-      const result   = await signInWithPhoneNumber(auth, e164, verifier);
+      const verifier = await getRecaptcha();
+      console.log('[PhoneAuth] reCAPTCHA ready, calling signInWithPhoneNumber...');
+      const result = await signInWithPhoneNumber(auth, e164, verifier);
       confirmRef.current = result;
       setSentTo(e164);
       setStep('otp');
       setCountdown(60);
+      console.log('[PhoneAuth] OTP sent successfully ✓');
     } catch (e: any) {
-      console.error('[PhoneAuth] sendOtp error:', e);
-      captchaRef.current = null;
-      if (e.code === 'auth/too-many-requests') {
+      // ── طباعة الخطأ كاملاً لمعرفة السبب الحقيقي ──
+      console.error('[PhoneAuth] sendOtp FAILED:', {
+        code:    e?.code,
+        message: e?.message,
+        name:    e?.name,
+        full:    e,
+      });
+      clearRecaptcha();
+      if (e?.code === 'auth/too-many-requests') {
         setError('طلبات كثيرة جداً، انتظر قليلاً ثم أعد المحاولة');
-      } else if (e.code === 'auth/invalid-phone-number') {
-        setError('رقم الهاتف غير صالح');
+      } else if (e?.code === 'auth/invalid-phone-number') {
+        setError('رقم الهاتف غير صالح للمنظومة الدولية');
+      } else if (e?.code === 'auth/captcha-check-failed') {
+        setError('فشل reCAPTCHA — أعد تحميل الصفحة وحاول مجدداً');
+      } else if (e?.code === 'auth/operation-not-allowed') {
+        setError('خدمة Phone Auth غير مفعّلة في Firebase Console');
       } else {
-        setError('فشل إرسال الرمز — تأكد من رقم الهاتف وحاول مجدداً');
+        // إظهار الـ code الحقيقي حتى نعرف المشكلة
+        setError(`خطأ Firebase: ${e?.code ?? e?.message ?? 'unknown'}`);
       }
     } finally {
       setLoading(false);
@@ -175,8 +203,10 @@ export function UserLoginOverlay({ onLogin }: { onLogin: (u: DiyalaUser) => void
     if (!confirmRef.current) { setError('انتهت الجلسة، أعد إرسال الرمز'); return; }
     setLoading(true); setError(null);
     try {
+      console.log('[PhoneAuth] Verifying OTP...');
       const cred = await confirmRef.current.confirm(otp);
       const uid  = cred.user.uid;
+      console.log('[PhoneAuth] Verified ✓ uid:', uid);
       const user: DiyalaUser = { name: name.trim(), phone: phone.trim(), uid };
 
       await setDoc(doc(db, 'users', uid), {
@@ -191,13 +221,18 @@ export function UserLoginOverlay({ onLogin }: { onLogin: (u: DiyalaUser) => void
       setVisible(false);
       onLogin(user);
     } catch (e: any) {
-      console.error('[PhoneAuth] verifyOtp error:', e);
-      if (e.code === 'auth/invalid-verification-code') {
+      console.error('[PhoneAuth] verifyOtp FAILED:', {
+        code:    e?.code,
+        message: e?.message,
+        name:    e?.name,
+        full:    e,
+      });
+      if (e?.code === 'auth/invalid-verification-code') {
         setError('الرمز غير صحيح، تأكد من الأرقام وأعد المحاولة');
-      } else if (e.code === 'auth/code-expired') {
+      } else if (e?.code === 'auth/code-expired') {
         setError('انتهت صلاحية الرمز، اضغط "إعادة الإرسال"');
       } else {
-        setError('فشل التحقق، حاول مجدداً');
+        setError(`خطأ Firebase: ${e?.code ?? e?.message ?? 'unknown'}`);
       }
     } finally {
       setLoading(false);
@@ -206,7 +241,7 @@ export function UserLoginOverlay({ onLogin }: { onLogin: (u: DiyalaUser) => void
 
   const resendOtp = async () => {
     if (countdown > 0) return;
-    captchaRef.current = null;
+    clearRecaptcha();            // تنظيف كامل قبل إعادة المحاولة
     setOtp(''); setError(null);
     await sendOtp();
   };
