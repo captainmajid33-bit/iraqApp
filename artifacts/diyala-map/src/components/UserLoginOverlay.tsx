@@ -218,17 +218,26 @@ export function UserLoginOverlay({ onLogin }: { onLogin: (u: DiyalaUser) => void
       console.log('[PhoneAuth] UID:', uid);
       const user: DiyalaUser = { name: name.trim(), phone: phone.trim(), uid };
 
-      await setDoc(doc(db, 'users', uid), {
+      // ① Save to localStorage immediately — onAuthStateChanged may fire before
+      //    Firestore write completes, so this ensures the listener can read the name.
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(user));
+
+      // ② Navigate right away — never block on Firestore.
+      setStep('done');
+      setVisible(false);
+      onLogin(user);
+
+      // ③ Write to Firestore in the background (non-blocking).
+      //    If Security Rules reject this, the user is still on the map.
+      setDoc(doc(db, 'users', uid), {
         name:      user.name,
         phone:     user.phone,
         uid,
         createdAt: serverTimestamp(),
-      }, { merge: true });
+      }, { merge: true }).catch(e => {
+        console.warn('[PhoneAuth] Firestore setDoc failed (non-critical):', e?.code, e?.message);
+      });
 
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(user));
-      setStep('done');
-      setVisible(false);
-      onLogin(user);
     } catch (e: any) {
       console.error('[PhoneAuth] verifyOtp FAILED ▼', {
         code:    e?.code,
@@ -239,6 +248,7 @@ export function UserLoginOverlay({ onLogin }: { onLogin: (u: DiyalaUser) => void
       else if (e?.code === 'auth/code-expired')              setError('انتهت صلاحية الرمز، اضغط "إعادة الإرسال"');
       else setError(`خطأ Firebase: ${e?.code ?? e?.message ?? 'unknown'}`);
     } finally {
+      // Always unblock the UI — runs whether confirm() succeeded, failed, or hung.
       setLoading(false);
     }
   };
