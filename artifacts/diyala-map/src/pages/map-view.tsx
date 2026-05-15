@@ -4,6 +4,7 @@ import { Sidebar } from "@/components/Sidebar";
 import { ClinicMap } from "@/components/ClinicMap";
 import { AdminModal } from "@/components/AdminModal";
 import { UserLoginOverlay } from "@/components/UserLoginOverlay";
+import { UserMenu } from "@/components/UserMenu";
 import { MapItem, Category } from "@/data/types";
 
 const POLL_MS = 30_000; // 30 s fallback poll (SSE handles real-time)
@@ -134,6 +135,7 @@ export function MapView() {
       <UserLoginOverlay onLogin={() => {}} />
       <Header />
       <main className="flex-1 relative flex overflow-hidden">
+        <UserMenu />
         {loading && (
           <div style={{ position: "absolute", inset: 0, zIndex: 2000, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", background: "rgba(5,8,15,0.92)", backdropFilter: "blur(8px)" }}>
             <div style={{ width: "48px", height: "48px", border: "2px solid rgba(0,245,212,0.15)", borderTop: "2px solid #00f5d4", borderRadius: "50%", animation: "spin 1s linear infinite" }} />
