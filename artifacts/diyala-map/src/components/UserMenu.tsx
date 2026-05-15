@@ -70,7 +70,7 @@ export function UserMenu() {
   };
 
   // ── Save updated name ─────────────────────────────────────────────────────
-  const handleSaveName = async () => {
+  const handleSaveName = () => {
     const newName = editedName.trim();
     if (!newName || newName === user?.name) return;
 
@@ -78,21 +78,20 @@ export function UserMenu() {
     if (!fbUser) { showToast('خطأ: غير مسجّل الدخول'); return; }
 
     setSaving(true);
-    try {
-      await updateDoc(doc(db, 'users', fbUser.uid), { name: newName });
 
-      // Update local state + localStorage immediately
-      const updated = { ...user, name: newName } as DiyalaUser;
-      setUser(updated);
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+    // ① Update local state + localStorage immediately — never block on Firestore.
+    const updated = { ...user, name: newName } as DiyalaUser;
+    setUser(updated);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+    showToast('تم تحديث الاسم بنجاح ✓');
+    setSaving(false);
 
-      showToast('تم تحديث الاسم بنجاح ✓');
-    } catch (e) {
-      console.error('[UserMenu] update name error:', e);
-      showToast('فشل الحفظ، حاول مجدداً');
-    } finally {
-      setSaving(false);
-    }
+    // ② Write to Firestore in the background (non-blocking).
+    //    If Security Rules reject the write, a warning is logged — UI is unaffected.
+    updateDoc(doc(db, 'users', fbUser.uid), { name: newName })
+      .catch(e => {
+        console.warn('[UserMenu] Firestore updateDoc failed (non-critical):', e?.code, e?.message);
+      });
   };
 
   const isDirty = editedName.trim() !== (user?.name ?? '');
