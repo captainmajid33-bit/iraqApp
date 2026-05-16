@@ -1445,6 +1445,493 @@ function TaxiTab({ toast }: { toast: ReturnType<typeof useToast> }) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
+// ── BountyMissionsTab — إدارة مهمات الجوائز الصفراء (Firestore CRUD) ─────────
+// ══════════════════════════════════════════════════════════════════════════════
+interface BountyMission {
+  id:          string;
+  title:       string;
+  description: string;
+  reward:      number;
+  latitude:    number;
+  longitude:   number;
+  status:      'active' | 'claimed';
+  claimedBy?:  string;
+}
+
+const EMPTY_BOUNTY = { title: '', description: '', reward: '', latitude: '', longitude: '' };
+
+function BountyMissionsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
+  const [missions,   setMissions]   = useState<BountyMission[]>([]);
+  const [loading,    setLoading]    = useState(true);
+  const [showForm,   setShowForm]   = useState(false);
+  const [editing,    setEditing]    = useState<BountyMission | null>(null);
+  const [form,       setForm]       = useState({ ...EMPTY_BOUNTY });
+  const [saving,     setSaving]     = useState(false);
+  const [confirmDel, setConfirmDel] = useState<string | null>(null);
+
+  // ── Map picker refs ──────────────────────────────────────────────────────
+  const mapContainerRef = useRef<HTMLDivElement | null>(null);
+  const mapRef          = useRef<L.Map | null>(null);
+  const markerRef       = useRef<L.Marker | null>(null);
+
+  // ── Map picker: init / destroy with modal ───────────────────────────────
+  useEffect(() => {
+    if (!showForm) {
+      mapRef.current?.remove();
+      mapRef.current    = null;
+      markerRef.current = null;
+      return;
+    }
+    const tid = setTimeout(() => {
+      const container = mapContainerRef.current;
+      if (!container || mapRef.current) return;
+
+      const initLat = parseFloat(form.latitude) || 33.7440;
+      const initLng = parseFloat(form.longitude) || 44.6530;
+
+      const map = L.map(container, {
+        center: [initLat, initLng],
+        zoom:   14,
+        zoomControl: true,
+        attributionControl: false,
+      });
+      mapRef.current = map;
+
+      L.tileLayer(
+        'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+        { subdomains: 'abcd', maxZoom: 20 },
+      ).addTo(map);
+
+      // Golden star-diamond pin
+      const pinIcon = L.divIcon({
+        className:  '',
+        iconSize:   [40, 40],
+        iconAnchor: [20, 40],
+        html: `<div style="width:40px;height:40px;display:flex;align-items:center;justify-content:center;
+                     background:#f5c51822;border:2px solid #f5c518;border-radius:50% 50% 50% 0;
+                     transform:rotate(-45deg);box-shadow:0 0 18px #f5c518aa;cursor:grab">
+                 <span style="transform:rotate(45deg);font-size:18px;line-height:1">⭐</span>
+               </div>`,
+      });
+
+      const marker = L.marker([initLat, initLng], { draggable: true, icon: pinIcon }).addTo(map);
+      markerRef.current = marker;
+
+      const applyLatLng = (lat: number, lng: number) =>
+        setForm(p => ({ ...p, latitude: lat.toFixed(6), longitude: lng.toFixed(6) }));
+
+      marker.on('dragend', () => {
+        const { lat, lng } = marker.getLatLng();
+        applyLatLng(lat, lng);
+      });
+      map.on('click', (e: L.LeafletMouseEvent) => {
+        marker.setLatLng(e.latlng);
+        applyLatLng(e.latlng.lat, e.latlng.lng);
+      });
+
+      setTimeout(() => map.invalidateSize(), 80);
+    }, 60);
+    return () => clearTimeout(tid);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showForm]);
+
+  // ── Sync marker when lat/lng typed manually ───────────────────────────────
+  useEffect(() => {
+    const map    = mapRef.current;
+    const marker = markerRef.current;
+    if (!map || !marker) return;
+    const lat = parseFloat(form.latitude);
+    const lng = parseFloat(form.longitude);
+    if (!isNaN(lat) && !isNaN(lng)) {
+      marker.setLatLng([lat, lng]);
+      map.panTo([lat, lng], { animate: true, duration: 0.4 });
+    }
+  }, [form.latitude, form.longitude]);
+
+  // ── Live Firestore listener (all missions, any status) ───────────────────
+  useEffect(() => {
+    const unsub = onSnapshot(
+      collection(db, 'bounty_missions'),
+      snap => {
+        const docs: BountyMission[] = [];
+        snap.forEach(d => {
+          if (d.id === '_seed_check') return;
+          const raw = d.data();
+          const lat = Number(raw.latitude);
+          const lng = Number(raw.longitude);
+          if (isNaN(lat) || isNaN(lng)) return;
+          docs.push({
+            id:          d.id,
+            title:       String(raw.title ?? ''),
+            description: String(raw.description ?? ''),
+            reward:      Number(raw.reward ?? 0),
+            latitude:    lat,
+            longitude:   lng,
+            status:      raw.status ?? 'active',
+            claimedBy:   raw.claimedBy,
+          });
+        });
+        // Sort: active first, then claimed
+        docs.sort((a, b) => {
+          if (a.status === b.status) return 0;
+          return a.status === 'active' ? -1 : 1;
+        });
+        setMissions(docs);
+        setLoading(false);
+      },
+      err => { console.error('[BountyMissionsTab] Firestore error:', err); setLoading(false); }
+    );
+    return () => unsub();
+  }, []);
+
+  function openAdd() {
+    setEditing(null);
+    setForm({ ...EMPTY_BOUNTY });
+    setShowForm(true);
+  }
+
+  function openEdit(m: BountyMission) {
+    setEditing(m);
+    setForm({
+      title:       m.title,
+      description: m.description,
+      reward:      String(m.reward),
+      latitude:    String(m.latitude),
+      longitude:   String(m.longitude),
+    });
+    setShowForm(true);
+  }
+
+  async function save() {
+    const lat    = parseFloat(form.latitude);
+    const lng    = parseFloat(form.longitude);
+    const reward = parseFloat(form.reward);
+    if (!form.title.trim())        { toast.show('عنوان المهمة مطلوب', false); return; }
+    if (isNaN(lat) || isNaN(lng))  { toast.show('يرجى تحديد الموقع على الخريطة', false); return; }
+    if (lat < 30 || lat > 38)      { toast.show('خط العرض يجب أن يكون بين 30 و 38', false); return; }
+    if (lng < 38 || lng > 50)      { toast.show('خط الطول يجب أن يكون بين 38 و 50', false); return; }
+    if (isNaN(reward) || reward <= 0) { toast.show('قيمة الجائزة يجب أن تكون أكبر من صفر', false); return; }
+
+    setSaving(true);
+    try {
+      const payload = {
+        title:       form.title.trim(),
+        description: form.description.trim(),
+        reward:      reward,
+        latitude:    lat,
+        longitude:   lng,
+        status:      'active' as const,
+        updatedAt:   serverTimestamp(),
+      };
+      if (editing) {
+        await updateDoc(doc(db, 'bounty_missions', editing.id), payload);
+        toast.show('تم تحديث المهمة ✓');
+      } else {
+        await addDoc(collection(db, 'bounty_missions'), payload);
+        toast.show('تمت إضافة المهمة وتفعيلها فوراً ✓');
+      }
+      setShowForm(false);
+    } catch (e: any) {
+      toast.show(`فشل الحفظ: ${e?.message ?? e}`, false);
+    } finally { setSaving(false); }
+  }
+
+  async function doDelete(id: string) {
+    try {
+      await deleteDoc(doc(db, 'bounty_missions', id));
+      toast.show('تم حذف المهمة من خريطة الزبائن');
+    } catch (e: any) {
+      toast.show(`فشل الحذف: ${e?.message ?? e}`, false);
+    } finally { setConfirmDel(null); }
+  }
+
+  const f = (field: keyof typeof EMPTY_BOUNTY) =>
+    (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) =>
+      setForm(p => ({ ...p, [field]: e.target.value }));
+
+  const activeCount  = missions.filter(m => m.status === 'active').length;
+  const claimedCount = missions.filter(m => m.status === 'claimed').length;
+
+  // ── Render ────────────────────────────────────────────────────────────────
+  return (
+    <div style={{ direction: 'rtl' }}>
+
+      {/* Section header */}
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: '20px', flexWrap: 'wrap', gap: '10px' }}>
+        <div>
+          <div style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '11px', color: C.yellow, letterSpacing: '0.18em', marginBottom: '4px' }}>
+            ⭐ BOUNTY MISSIONS MANAGEMENT
+          </div>
+          <div style={{ fontFamily: 'Rajdhani, sans-serif', fontSize: '13px', color: C.dim }}>
+            جميع التغييرات تُطبَّق فوراً على خريطة الزبائن عبر Firestore
+            {!loading && (
+              <span style={{ marginRight: '8px' }}>
+                <span style={{ color: C.green }}>· {activeCount} نشطة</span>
+                {claimedCount > 0 && <span style={{ color: C.yellow, marginRight: '6px' }}>· {claimedCount} محجوزة</span>}
+              </span>
+            )}
+          </div>
+        </div>
+        <button
+          onClick={openAdd}
+          style={{ padding: '10px 20px', background: `${C.yellow}18`, border: `1px solid ${C.yellow}88`, color: C.yellow, fontFamily: 'Orbitron, sans-serif', fontSize: '10px', letterSpacing: '0.1em', cursor: 'pointer', borderRadius: '3px', boxShadow: neon(C.yellow, 8), display: 'flex', alignItems: 'center', gap: '6px' }}
+          onMouseEnter={e => (e.currentTarget.style.background = `${C.yellow}28`)}
+          onMouseLeave={e => (e.currentTarget.style.background = `${C.yellow}18`)}
+        >
+          ＋ إضافة مهمة / جائزة جديدة
+        </button>
+      </div>
+
+      {/* ── Add / Edit Modal ────────────────────────────────────────────── */}
+      {showForm && (
+        <div
+          style={{ position: 'fixed', inset: 0, zIndex: 500, background: 'rgba(0,0,0,0.82)', backdropFilter: 'blur(7px)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '16px' }}
+          onClick={e => { if (e.target === e.currentTarget) setShowForm(false); }}
+        >
+          <div style={{ width: 'min(600px, 100%)', background: C.surface, border: `1px solid ${C.yellow}44`, borderRadius: '4px', boxShadow: `0 0 60px ${C.yellow}18, 0 8px 40px rgba(0,0,0,0.95)`, overflow: 'hidden', maxHeight: '92vh', display: 'flex', flexDirection: 'column' }}>
+
+            {/* Modal header */}
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '13px 16px', borderBottom: `1px solid ${C.yellow}22`, background: `${C.yellow}08` }}>
+              <span style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '10px', color: C.yellow, letterSpacing: '0.15em' }}>
+                {editing ? '📝 تعديل مهمة / جائزة' : '⭐ إضافة مهمة / جائزة جديدة'}
+              </span>
+              <button onClick={() => setShowForm(false)} style={{ background: 'none', border: 'none', color: C.dim, fontSize: '20px', cursor: 'pointer', padding: '0 4px', lineHeight: 1 }}>×</button>
+            </div>
+
+            {/* Form body */}
+            <div style={{ padding: '18px 16px', display: 'flex', flexDirection: 'column', gap: '14px', overflowY: 'auto', flex: 1 }}>
+
+              {/* Title */}
+              <div>
+                <label style={LBL}>عنوان المهمة *</label>
+                <input value={form.title} onChange={f('title')} onFocus={ff} onBlur={fb}
+                  placeholder="مثال: صندوق حديقة مصطفى جواد"
+                  style={FLD} />
+              </div>
+
+              {/* Description */}
+              <div>
+                <label style={LBL}>وصف / تلميح المهمة</label>
+                <textarea
+                  value={form.description}
+                  onChange={f('description') as any}
+                  onFocus={ff} onBlur={fb}
+                  placeholder="مثال: ابحث عن الكود السري بجانب النافورة الرئيسية"
+                  rows={3}
+                  style={{ ...FLD, resize: 'vertical', minHeight: '72px', lineHeight: 1.55 }}
+                />
+              </div>
+
+              {/* Reward */}
+              <div>
+                <label style={LBL}>قيمة الجائزة (دينار عراقي) *</label>
+                <input
+                  value={form.reward}
+                  onChange={f('reward')}
+                  onFocus={ff} onBlur={fb}
+                  type="number" min="1" placeholder="مثال: 25000"
+                  style={{ ...FLD, fontFamily: 'Orbitron, monospace', fontSize: '13px', color: C.yellow, letterSpacing: '0.04em', borderColor: `${C.yellow}55` }}
+                />
+              </div>
+
+              {/* ── Map Picker ─────────────────────────────────────────────── */}
+              <div>
+                <label style={{ ...LBL, marginBottom: '6px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  📍 تحديد موقع الجائزة على الخريطة *
+                  <span style={{ color: C.dim, fontFamily: 'Rajdhani, sans-serif', fontSize: '11px', fontWeight: 400 }}>
+                    — اضغط أي مكان أو اسحب الـ Pin ⭐
+                  </span>
+                </label>
+
+                {/* Map container */}
+                <div
+                  ref={mapContainerRef}
+                  style={{
+                    width:        '100%',
+                    height:       '280px',
+                    borderRadius: '3px',
+                    border:       `1px solid ${C.yellow}44`,
+                    overflow:     'hidden',
+                    background:   '#0a0d14',
+                    boxShadow:    `inset 0 0 28px rgba(0,0,0,0.7), 0 0 16px ${C.yellow}14`,
+                    cursor:       'crosshair',
+                  }}
+                />
+
+                {/* Lat / Lng readout */}
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', marginTop: '8px' }}>
+                  <div>
+                    <label style={{ ...LBL, color: `${C.yellow}88` }}>Latitude (خط العرض)</label>
+                    <input
+                      value={form.latitude} onChange={f('latitude')} onFocus={ff} onBlur={fb}
+                      type="number" step="0.000001" placeholder="33.744000"
+                      style={{ ...FLD, fontFamily: 'Orbitron, monospace', fontSize: '11px', color: C.yellow, letterSpacing: '0.04em', borderColor: `${C.yellow}55` }}
+                    />
+                  </div>
+                  <div>
+                    <label style={{ ...LBL, color: `${C.yellow}88` }}>Longitude (خط الطول)</label>
+                    <input
+                      value={form.longitude} onChange={f('longitude')} onFocus={ff} onBlur={fb}
+                      type="number" step="0.000001" placeholder="44.653000"
+                      style={{ ...FLD, fontFamily: 'Orbitron, monospace', fontSize: '11px', color: C.yellow, letterSpacing: '0.04em', borderColor: `${C.yellow}55` }}
+                    />
+                  </div>
+                </div>
+                {!form.latitude && !form.longitude && (
+                  <div style={{ fontFamily: 'Rajdhani, sans-serif', fontSize: '12px', color: C.red, marginTop: '4px' }}>
+                    ⚠ يرجى تحديد موقع الجائزة على الخريطة
+                  </div>
+                )}
+              </div>
+
+              {/* Firestore path */}
+              <div style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '8px', color: `${C.yellow}55`, letterSpacing: '0.1em', padding: '8px 10px', background: `${C.yellow}06`, border: `1px solid ${C.yellow}15`, borderRadius: '2px' }}>
+                📂 Firestore: bounty_missions / {editing ? editing.id : '<auto-id>'} · status: active
+              </div>
+
+              {/* Actions */}
+              <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end', paddingTop: '4px' }}>
+                <button onClick={() => setShowForm(false)}
+                  style={{ padding: '9px 20px', background: 'none', border: `1px solid ${C.border}`, color: C.dim, fontFamily: 'Orbitron, sans-serif', fontSize: '9px', letterSpacing: '0.1em', cursor: 'pointer', borderRadius: '3px' }}>
+                  إلغاء
+                </button>
+                <button onClick={save} disabled={saving}
+                  style={{ padding: '9px 22px', background: saving ? `${C.yellow}08` : `${C.yellow}18`, border: `1px solid ${C.yellow}88`, color: C.yellow, fontFamily: 'Orbitron, sans-serif', fontSize: '9px', letterSpacing: '0.1em', cursor: saving ? 'wait' : 'pointer', borderRadius: '3px', boxShadow: neon(C.yellow, 6), display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  {saving
+                    ? <><svg width="12" height="12" viewBox="0 0 28 28" fill="none" style={{ animation: 'spin 0.9s linear infinite' }}><circle cx="14" cy="14" r="10" stroke={C.yellow} strokeWidth="2.5" strokeDasharray="22 14" strokeLinecap="round"/></svg>جاري الحفظ</>
+                    : editing ? '💾 حفظ التعديلات' : '✓ حفظ وتفعيل المهمة'
+                  }
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Missions Table ──────────────────────────────────────────────── */}
+      {loading ? (
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '12px', padding: '60px', color: C.dim }}>
+          <svg width="22" height="22" viewBox="0 0 28 28" fill="none" style={{ animation: 'spin 0.9s linear infinite' }}><circle cx="14" cy="14" r="10" stroke={C.yellow} strokeWidth="2.5" strokeDasharray="22 14" strokeLinecap="round"/></svg>
+          <span style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '11px', color: C.yellow }}>جاري تحميل المهمات من Firestore...</span>
+        </div>
+      ) : missions.length === 0 ? (
+        <div style={{ textAlign: 'center', padding: '60px', color: C.dim }}>
+          <div style={{ fontSize: '44px', marginBottom: '12px' }}>⭐</div>
+          <div style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '11px', letterSpacing: '0.12em' }}>لا توجد مهمات مسجلة بعد</div>
+          <div style={{ fontFamily: 'Rajdhani, sans-serif', fontSize: '13px', marginTop: '6px' }}>اضغط "+ إضافة مهمة / جائزة جديدة" للبدء</div>
+        </div>
+      ) : (
+        <div style={{ overflowX: 'auto' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontFamily: 'Rajdhani, sans-serif' }}>
+            <thead>
+              <tr style={{ borderBottom: `1px solid ${C.border}` }}>
+                {['#', 'عنوان المهمة', 'الوصف / التلميح', 'الجائزة', 'Latitude', 'Longitude', 'الحالة', 'إجراءات'].map(h => (
+                  <th key={h} style={{ padding: '10px 12px', textAlign: 'right', fontFamily: 'Orbitron, sans-serif', fontSize: '8px', color: C.yellow, letterSpacing: '0.1em', whiteSpace: 'nowrap', background: `${C.yellow}06` }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {missions.map((m, idx) => {
+                const isActive    = m.status === 'active';
+                const isDeleting  = confirmDel === m.id;
+                const rowBg       = idx % 2 === 0 ? 'transparent' : `${C.yellow}02`;
+                return (
+                  <tr key={m.id}
+                    style={{ borderBottom: `1px solid ${C.border}44`, background: rowBg, transition: 'background 0.15s', opacity: isActive ? 1 : 0.55 }}
+                    onMouseEnter={e => (e.currentTarget.style.background = `${C.yellow}06`)}
+                    onMouseLeave={e => (e.currentTarget.style.background = rowBg)}>
+
+                    {/* # */}
+                    <td style={{ padding: '10px 12px', fontFamily: 'Orbitron, sans-serif', fontSize: '9px', color: `${C.yellow}55`, whiteSpace: 'nowrap' }}>{idx + 1}</td>
+
+                    {/* Title */}
+                    <td style={{ padding: '10px 12px', color: isActive ? C.text : C.dim, fontWeight: 600, fontSize: '15px', minWidth: '150px' }}>
+                      {m.title}
+                    </td>
+
+                    {/* Description */}
+                    <td style={{ padding: '10px 12px', color: C.dim, fontSize: '12px', minWidth: '160px', maxWidth: '220px' }}>
+                      <span title={m.description} style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
+                        {m.description || '—'}
+                      </span>
+                    </td>
+
+                    {/* Reward */}
+                    <td style={{ padding: '10px 12px', whiteSpace: 'nowrap' }}>
+                      <span style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '11px', color: C.yellow, textShadow: `0 0 10px ${C.yellow}66` }}>
+                        🎁 {m.reward.toLocaleString('ar-IQ')}
+                      </span>
+                      <span style={{ fontFamily: 'Rajdhani, sans-serif', fontSize: '11px', color: C.dim, marginRight: '3px' }}>د.ع</span>
+                    </td>
+
+                    {/* Lat */}
+                    <td style={{ padding: '10px 12px', fontFamily: 'Orbitron, sans-serif', fontSize: '9px', color: C.blue, whiteSpace: 'nowrap' }}>{m.latitude.toFixed(4)}</td>
+
+                    {/* Lng */}
+                    <td style={{ padding: '10px 12px', fontFamily: 'Orbitron, sans-serif', fontSize: '9px', color: C.blue, whiteSpace: 'nowrap' }}>{m.longitude.toFixed(4)}</td>
+
+                    {/* Status badge */}
+                    <td style={{ padding: '10px 12px', whiteSpace: 'nowrap' }}>
+                      {isActive ? (
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', padding: '4px 10px', background: `${C.green}14`, border: `1px solid ${C.green}55`, color: C.green, borderRadius: '3px', fontSize: '12px', fontWeight: 600 }}>
+                          <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: C.green, display: 'inline-block', boxShadow: `0 0 6px ${C.green}` }} />
+                          نشطة · ACTIVE
+                        </span>
+                      ) : (
+                        <div>
+                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', padding: '4px 10px', background: `${C.yellow}10`, border: `1px solid ${C.yellow}44`, color: C.yellow, borderRadius: '3px', fontSize: '12px', fontWeight: 600, marginBottom: m.claimedBy ? '4px' : 0 }}>
+                            🏆 تم الاستلام
+                          </span>
+                          {m.claimedBy && (
+                            <div style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '8px', color: C.dim, letterSpacing: '0.06em', marginTop: '3px' }}>
+                              بواسطة: {m.claimedBy}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </td>
+
+                    {/* Actions */}
+                    <td style={{ padding: '10px 12px', whiteSpace: 'nowrap' }}>
+                      {isDeleting ? (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                          <span style={{ fontFamily: 'Rajdhani, sans-serif', fontSize: '12px', color: C.red }}>تأكيد الحذف؟</span>
+                          <button onClick={() => doDelete(m.id)}
+                            style={{ padding: '4px 10px', background: `${C.red}18`, border: `1px solid ${C.red}`, color: C.red, fontFamily: 'Orbitron, sans-serif', fontSize: '8px', cursor: 'pointer', borderRadius: '2px' }}>نعم 🗑️</button>
+                          <button onClick={() => setConfirmDel(null)}
+                            style={{ padding: '4px 10px', background: 'none', border: `1px solid ${C.border}`, color: C.dim, fontFamily: 'Orbitron, sans-serif', fontSize: '8px', cursor: 'pointer', borderRadius: '2px' }}>لا</button>
+                        </div>
+                      ) : (
+                        <div style={{ display: 'flex', gap: '6px' }}>
+                          {isActive && (
+                            <button onClick={() => openEdit(m)}
+                              style={{ padding: '5px 12px', background: `${C.blue}12`, border: `1px solid ${C.blue}55`, color: C.blue, fontFamily: 'Orbitron, sans-serif', fontSize: '8px', letterSpacing: '0.08em', cursor: 'pointer', borderRadius: '2px', transition: 'background 0.15s' }}
+                              onMouseEnter={e => (e.currentTarget.style.background = `${C.blue}22`)}
+                              onMouseLeave={e => (e.currentTarget.style.background = `${C.blue}12`)}>
+                              📝 تعديل
+                            </button>
+                          )}
+                          <button onClick={() => setConfirmDel(m.id)}
+                            style={{ padding: '5px 12px', background: `${C.red}10`, border: `1px solid ${C.red}44`, color: C.red, fontFamily: 'Orbitron, sans-serif', fontSize: '8px', letterSpacing: '0.08em', cursor: 'pointer', borderRadius: '2px', transition: 'background 0.15s' }}
+                            onMouseEnter={e => (e.currentTarget.style.background = `${C.red}20`)}
+                            onMouseLeave={e => (e.currentTarget.style.background = `${C.red}10`)}>
+                            🗑️ حذف
+                          </button>
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
 // ── FuelStationsTab — إدارة محطات الوقود (Firestore CRUD) ────────────────────
 // ══════════════════════════════════════════════════════════════════════════════
 type QueueStatus = 'green' | 'yellow' | 'red';
@@ -1871,7 +2358,7 @@ function FuelStationsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
 // ── Admin Dashboard ───────────────────────────────────────────────────────────
 export function AdminDashboard() {
   const [, navigate] = useLocation();
-  const [tab, setTab] = useState<"merchants" | "map" | "categories" | "settings" | "taxi" | "drivers" | "fuel">("merchants");
+  const [tab, setTab] = useState<"merchants" | "map" | "categories" | "settings" | "taxi" | "drivers" | "fuel" | "bounty">("merchants");
   const [cats, setCats] = useState<Cat[]>([]);
   const [authChecked, setAuthChecked] = useState(false);
   const toast = useToast();
@@ -1913,6 +2400,7 @@ export function AdminDashboard() {
     { key: "drivers"    as const, en: "DRIVERS",     ar: "🚗 السائقون" },
     { key: "taxi"       as const, en: "TAXI",        ar: "🚕 التكسي" },
     { key: "fuel"       as const, en: "FUEL",        ar: "⛽ محطات الوقود" },
+    { key: "bounty"     as const, en: "BOUNTY",      ar: "⭐ المهمات والجوائز" },
     { key: "settings"   as const, en: "SETTINGS",    ar: "الإعدادات" },
   ];
 
@@ -1963,6 +2451,7 @@ export function AdminDashboard() {
         {tab === "drivers"    && <DriversTab toast={toast} />}
         {tab === "taxi"       && <TaxiTab toast={toast} />}
         {tab === "fuel"       && <FuelStationsTab toast={toast} />}
+        {tab === "bounty"     && <BountyMissionsTab toast={toast} />}
         {tab === "settings"   && <SettingsTab toast={toast} />}
       </main>
 
