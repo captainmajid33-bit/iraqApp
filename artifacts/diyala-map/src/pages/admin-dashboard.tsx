@@ -344,7 +344,11 @@ function MapEditorTab({ cats, toast }: { cats: Cat[]; toast: ReturnType<typeof u
   useEffect(() => {
     if (!container.current || mapRef.current) return;
     mapRef.current = L.map(container.current, { center: [33.7451, 44.6488], zoom: 13 });
-    L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", { subdomains: "abcd", maxZoom: 20 }).addTo(mapRef.current);
+    // Voyager: shows all real POIs (mosques, schools, shops, streets) clearly
+    L.tileLayer("https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png", {
+      subdomains: "abcd", maxZoom: 20,
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/">CARTO</a>',
+    }).addTo(mapRef.current);
     return () => { mapRef.current?.remove(); mapRef.current = null; };
   }, []);
 
@@ -1747,9 +1751,10 @@ function BountyMissionsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
       });
       mapRef.current = map;
 
+      // Voyager: shows all real POIs (mosques, schools, shops, streets) clearly
       L.tileLayer(
-        'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
-        { subdomains: 'abcd', maxZoom: 20 },
+        'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png',
+        { subdomains: 'abcd', maxZoom: 20, attribution: '© OpenStreetMap © CARTO' },
       ).addTo(map);
 
       // Golden star-diamond pin
@@ -2244,9 +2249,10 @@ function FuelStationsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
       });
       mapPickerRef.current = map;
 
+      // Voyager: shows all real POIs (mosques, schools, shops, streets) clearly
       L.tileLayer(
-        'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
-        { subdomains: 'abcd', maxZoom: 20 }
+        'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png',
+        { subdomains: 'abcd', maxZoom: 20, attribution: '© OpenStreetMap © CARTO' },
       ).addTo(map);
 
       // Custom yellow fuel-pin icon
