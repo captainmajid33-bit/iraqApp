@@ -2,7 +2,7 @@
  * BountyMissionSystem — ديالى مهمات الجوائز
  * - Reads `bounty_missions` (status == 'active') from Firestore live
  * - Draws golden pulsing diamond markers on the Leaflet map
- * - Bottom sheet with details, distance check (≤20 m), and atomic claim transaction
+ * - Bottom sheet: live GPS distance, navigate polyline, atomic claim transaction
  */
 import { useEffect, useRef, useState, useCallback } from 'react';
 import L from 'leaflet';
@@ -32,6 +32,14 @@ interface Props {
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const CLAIM_RADIUS_M = 20;
+const C = {
+  yellow: '#f5c518',
+  green:  '#00dc64',
+  red:    '#ff2d50',
+  blue:   '#00d4ff',
+  dim:    'rgba(255,255,255,0.35)',
+  dimx:   'rgba(255,255,255,0.18)',
+};
 
 const SEED: Omit<BountyMission, 'id'>[] = [
   {
@@ -72,6 +80,21 @@ function haversineMeters(lat1: number, lng1: number, lat2: number, lng2: number)
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
+/** Returns human-readable distance string */
+function fmtDist(m: number): string {
+  return m < 1000 ? `${Math.round(m)} م` : `${(m / 1000).toFixed(1)} كم`;
+}
+
+/** Estimated travel time (walking ≤800m, else car ~30 km/h city) */
+function estMinutes(m: number): number {
+  if (m <= 800) return Math.max(1, Math.round(m / 70));       // ~70 m/min walking
+  return Math.max(1, Math.round((m / 1000 / 30) * 60));       // 30 km/h car
+}
+
+function travelMode(m: number): string {
+  return m <= 800 ? '🚶 مشياً' : '🚗 بالسيارة';
+}
+
 function getUser(): { name?: string; phone?: string } | null {
   try { return JSON.parse(localStorage.getItem('diyala_user') ?? 'null'); }
   catch { return null; }
@@ -98,14 +121,23 @@ function makeMissionIcon(): L.DivIcon {
 
 // ── Component ─────────────────────────────────────────────────────────────────
 export function BountyMissionSystem({ mapRef, userLocation }: Props) {
-  const [mapReady,     setMapReady]     = useState(false);
-  const [missions,     setMissions]     = useState<BountyMission[]>([]);
-  const [selected,     setSelected]     = useState<BountyMission | null>(null);
-  const [distM,        setDistM]        = useState<number | null>(null);
-  const [claiming,     setClaiming]     = useState(false);
-  const [claimResult,  setClaimResult]  = useState<'success' | 'taken' | 'error' | null>(null);
-  const markersRef = useRef<Map<string, L.Marker>>(new Map());
-  const seededRef  = useRef(false);
+  const [mapReady,       setMapReady]       = useState(false);
+  const [missions,       setMissions]       = useState<BountyMission[]>([]);
+  const [selected,       setSelected]       = useState<BountyMission | null>(null);
+  const [distM,          setDistM]          = useState<number | null>(null);
+  const [claiming,       setClaiming]       = useState(false);
+  const [claimResult,    setClaimResult]    = useState<'success' | 'taken' | 'error' | null>(null);
+  const [navigating,     setNavigating]     = useState(false);        // polyline shown?
+  const [gpsLoading,     setGpsLoading]     = useState(false);        // internal GPS fetch
+  const [internalPos,    setInternalPos]    = useState<{ lat: number; lng: number } | null>(null);
+
+  const markersRef  = useRef<Map<string, L.Marker>>(new Map());
+  const polylineRef = useRef<L.Polyline | null>(null);
+  const seededRef   = useRef(false);
+  const gpsWatchRef = useRef<number | null>(null);
+
+  // Effective location: prop first, then internal GPS fallback
+  const effectivePos = userLocation ?? internalPos;
 
   // ── Wait for Leaflet map ───────────────────────────────────────────────────
   useEffect(() => {
@@ -129,7 +161,6 @@ export function BountyMissionSystem({ mapRef, userLocation }: Props) {
             SEED.map((m, i) => setDoc(doc(db, 'bounty_missions', `mission_${i + 1}`), m))
           );
           await setDoc(checkRef, { seeded: true });
-          console.log('[BountyMission] seeded initial missions');
         }
       } catch (e) { console.warn('[BountyMission] seed error:', e); }
     })();
@@ -160,7 +191,6 @@ export function BountyMissionSystem({ mapRef, userLocation }: Props) {
           claimedBy:   raw.claimedBy,
         });
       });
-      console.log(`[BountyMission] ${docs.length} active mission(s)`);
       setMissions(docs);
     }, err => console.warn('[BountyMission] onSnapshot error:', err.message));
     return () => unsub();
@@ -171,29 +201,17 @@ export function BountyMissionSystem({ mapRef, userLocation }: Props) {
     if (!mapReady) return;
     const map = mapRef.current;
     if (!map) return;
-
     const activeIds = new Set(missions.map(m => m.id));
-
-    // Remove claimed / gone markers
     markersRef.current.forEach((marker, id) => {
-      if (!activeIds.has(id)) {
-        marker.remove();
-        markersRef.current.delete(id);
-      }
+      if (!activeIds.has(id)) { marker.remove(); markersRef.current.delete(id); }
     });
-
-    // Add new markers
     missions.forEach(mission => {
       if (markersRef.current.has(mission.id)) return;
       const marker = L.marker([mission.latitude, mission.longitude], {
         icon:         makeMissionIcon(),
         zIndexOffset: 2000,
       }).addTo(map);
-
-      marker.on('click', () => {
-        setSelected(mission);
-        setClaimResult(null);
-      });
+      marker.on('click', () => { setSelected(mission); setClaimResult(null); });
       markersRef.current.set(mission.id, marker);
     });
   }, [missions, mapReady, mapRef]);
@@ -202,58 +220,148 @@ export function BountyMissionSystem({ mapRef, userLocation }: Props) {
   useEffect(() => {
     if (!selected) return;
     const updated = missions.find(m => m.id === selected.id);
-    // If the selected mission was claimed by someone else, close the sheet
     setSelected(updated ?? null);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [missions]);
 
+  // ── Internal GPS: start watching when sheet opens & userLocation is null ───
+  useEffect(() => {
+    if (!selected) {
+      // Sheet closed — stop watch, clear internal pos
+      if (gpsWatchRef.current !== null) {
+        navigator.geolocation?.clearWatch(gpsWatchRef.current);
+        gpsWatchRef.current = null;
+      }
+      setInternalPos(null);
+      setGpsLoading(false);
+      return;
+    }
+
+    // If parent already provides location, no need for internal watch
+    if (userLocation) return;
+
+    if (!navigator.geolocation) return;
+
+    setGpsLoading(true);
+    gpsWatchRef.current = navigator.geolocation.watchPosition(
+      pos => {
+        setInternalPos({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+        setGpsLoading(false);
+      },
+      err => {
+        console.warn('[BountyMission] GPS error:', err.message);
+        setGpsLoading(false);
+      },
+      { enableHighAccuracy: true, timeout: 12000, maximumAge: 3000 },
+    );
+
+    return () => {
+      if (gpsWatchRef.current !== null) {
+        navigator.geolocation.clearWatch(gpsWatchRef.current);
+        gpsWatchRef.current = null;
+      }
+    };
+  }, [selected, userLocation]);
+
   // ── Live distance calculation ─────────────────────────────────────────────
   useEffect(() => {
-    if (!selected || !userLocation) { setDistM(null); return; }
+    if (!selected || !effectivePos) { setDistM(null); return; }
     const d = haversineMeters(
-      userLocation.lat, userLocation.lng,
+      effectivePos.lat, effectivePos.lng,
       selected.latitude, selected.longitude,
     );
     setDistM(d);
-  }, [selected, userLocation]);
+
+    // Update polyline if navigating
+    if (navigating && polylineRef.current && mapRef.current) {
+      polylineRef.current.setLatLngs([
+        [effectivePos.lat, effectivePos.lng],
+        [selected.latitude, selected.longitude],
+      ]);
+    }
+  }, [selected, effectivePos, navigating, mapRef]);
+
+  // ── Remove polyline when sheet closes ─────────────────────────────────────
+  useEffect(() => {
+    if (!selected) {
+      clearPolyline();
+      setNavigating(false);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected]);
+
+  function clearPolyline() {
+    if (polylineRef.current) {
+      polylineRef.current.remove();
+      polylineRef.current = null;
+    }
+  }
+
+  // ── Navigate: draw polyline + fit bounds ─────────────────────────────────
+  const handleNavigate = useCallback(() => {
+    if (!selected || !effectivePos || !mapRef.current) return;
+    const map = mapRef.current;
+
+    clearPolyline();
+
+    const from: L.LatLngTuple = [effectivePos.lat, effectivePos.lng];
+    const to:   L.LatLngTuple = [selected.latitude, selected.longitude];
+
+    // Draw glowing yellow polyline
+    polylineRef.current = L.polyline([from, to], {
+      color:     C.yellow,
+      weight:    4,
+      opacity:   0.92,
+      dashArray: '10 6',
+      className: 'bounty-nav-line',
+    }).addTo(map);
+
+    // Fit both endpoints with padding
+    map.fitBounds(L.latLngBounds([from, to]), {
+      padding: [60, 60],
+      maxZoom: 16,
+      animate: true,
+      duration: 0.8,
+    });
+
+    setNavigating(true);
+  }, [selected, effectivePos, mapRef]);
+
+  // ── Stop navigation ───────────────────────────────────────────────────────
+  const handleStopNav = useCallback(() => {
+    clearPolyline();
+    setNavigating(false);
+  }, []);
 
   // ── Claim handler — Firestore atomic transaction ──────────────────────────
-  // Single transaction:
-  //   1. Verify mission is still 'active' (prevents double-claim)
-  //   2. Mark mission as 'claimed'
-  //   3. Credit reward to user's wallet (users/{uid}.balance += reward)
-  // Balance only increases here — no other code path touches it.
   const handleClaim = useCallback(async () => {
     if (!selected) return;
-    const user      = getUser();
-    const userId    = user?.phone ?? user?.name ?? 'anonymous';
+    const user        = getUser();
+    const userId      = user?.phone ?? user?.name ?? 'anonymous';
     const firebaseUid = auth.currentUser?.uid;
     setClaiming(true);
     setClaimResult(null);
     try {
       const missionRef = doc(db, 'bounty_missions', selected.id);
       await runTransaction(db, async txn => {
-        // ① Verify mission is still active
         const missionSnap = await txn.get(missionRef);
         if (!missionSnap.exists() || missionSnap.data()?.status !== 'active') {
           throw new Error('already_claimed');
         }
         const prizeAmount = Number(missionSnap.data()?.reward ?? 0);
-
-        // ② Claim the mission
         txn.update(missionRef, {
           status:    'claimed',
           claimedBy: userId,
           claimedAt: serverTimestamp(),
         });
-
-        // ③ Credit reward to wallet — only if we have a valid Firebase UID
         if (firebaseUid && prizeAmount > 0) {
           const userRef = doc(db, 'users', firebaseUid);
           txn.set(userRef, { balance: increment(prizeAmount) }, { merge: true });
         }
       });
       setClaimResult('success');
+      clearPolyline();
+      setNavigating(false);
       setTimeout(() => { setSelected(null); setClaimResult(null); }, 3500);
     } catch (e: any) {
       setClaimResult(e?.message === 'already_claimed' ? 'taken' : 'error');
@@ -265,12 +373,13 @@ export function BountyMissionSystem({ mapRef, userLocation }: Props) {
   // ── Nothing to render if no selection ────────────────────────────────────
   if (!selected) return null;
 
-  const isClose   = distM !== null && distM <= CLAIM_RADIUS_M;
-  const distLabel = distM === null
-    ? 'جاري تحديد موقعك...'
-    : distM < 1000
-    ? `${Math.round(distM)} متر`
-    : `${(distM / 1000).toFixed(1)} كم`;
+  const isClose = distM !== null && distM <= CLAIM_RADIUS_M;
+  const locReady = effectivePos !== null;
+
+  // ── Distance / travel info ────────────────────────────────────────────────
+  const distStr  = distM !== null ? fmtDist(distM) : null;
+  const minutes  = distM !== null ? estMinutes(distM) : null;
+  const mode     = distM !== null ? travelMode(distM) : null;
 
   return (
     <>
@@ -278,6 +387,8 @@ export function BountyMissionSystem({ mapRef, userLocation }: Props) {
         @keyframes bounty-slide-up { from { transform: translateY(100%); } to { transform: translateY(0); } }
         @keyframes bounty-glow     { 0%,100%{box-shadow:0 0 20px #f5c51888,0 0 40px #f5c51844;} 50%{box-shadow:0 0 40px #f5c518cc,0 0 60px #f5c51866;} }
         @keyframes bounty-success  { 0%{transform:scale(0.8);opacity:0;} 60%{transform:scale(1.08);} 100%{transform:scale(1);opacity:1;} }
+        @keyframes nav-dash        { to { stroke-dashoffset: -32; } }
+        .bounty-nav-line           { filter: drop-shadow(0 0 6px #f5c518cc); animation: none; }
       `}</style>
 
       {/* Backdrop */}
@@ -358,40 +469,160 @@ export function BountyMissionSystem({ mapRef, userLocation }: Props) {
           </div>
         </div>
 
-        {/* Distance badge */}
+        {/* ── Distance badge ── */}
         <div style={{
           display: 'flex', alignItems: 'center', gap: '10px',
-          marginBottom: '16px', padding: '10px 14px',
-          background: isClose ? 'rgba(0,220,100,0.07)' : 'rgba(245,197,24,0.05)',
-          border: `1px solid ${isClose ? 'rgba(0,220,100,0.3)' : 'rgba(245,197,24,0.18)'}`,
+          marginBottom: '14px', padding: '10px 14px',
+          background: isClose
+            ? 'rgba(0,220,100,0.07)'
+            : locReady
+            ? 'rgba(245,197,24,0.05)'
+            : 'rgba(255,255,255,0.03)',
+          border: `1px solid ${
+            isClose   ? 'rgba(0,220,100,0.3)' :
+            locReady  ? 'rgba(245,197,24,0.18)' :
+                        'rgba(255,255,255,0.08)'
+          }`,
           borderRadius: '3px',
         }}>
+          {/* Pulse dot */}
           <div style={{
             width: '8px', height: '8px', borderRadius: '50%', flexShrink: 0,
-            background: isClose ? '#00dc64' : '#f5c518',
-            boxShadow: `0 0 8px ${isClose ? '#00dc64' : '#f5c518'}`,
-            animation: 'lf-ping 1.8s ease-in-out infinite',
+            background: isClose ? C.green : locReady ? C.yellow : 'rgba(255,255,255,0.25)',
+            boxShadow: isClose ? `0 0 8px ${C.green}` : locReady ? `0 0 8px ${C.yellow}` : 'none',
+            animation: locReady ? 'lf-ping 1.8s ease-in-out infinite' : 'none',
           }} />
           <div style={{ flex: 1 }}>
             <div style={{
               fontFamily: 'Orbitron, sans-serif', fontSize: '8px', letterSpacing: '0.12em',
-              color: isClose ? '#00dc64' : '#f5c518',
+              color: isClose ? C.green : locReady ? C.yellow : C.dim,
               marginBottom: '2px',
             }}>
               {isClose ? '✓ أنت داخل نطاق المهمة' : '📍 المسافة عن الهدف'}
             </div>
-            <div style={{ fontSize: '15px', fontWeight: 700, color: isClose ? '#00dc64' : '#fff' }}>
-              {distLabel}
-              {!isClose && distM !== null && (
-                <span style={{ fontSize: '11px', color: 'rgba(255,255,255,0.3)', marginRight: '6px' }}>
-                  — تحتاج أقل من {CLAIM_RADIUS_M} متر
-                </span>
-              )}
-            </div>
+
+            {/* Distance value */}
+            {gpsLoading && !locReady ? (
+              <div style={{ display: 'flex', alignItems: 'center', gap: '7px' }}>
+                <svg width="12" height="12" viewBox="0 0 28 28" fill="none"
+                  style={{ animation: 'lf-spin 1s linear infinite', flexShrink: 0 }}>
+                  <circle cx="14" cy="14" r="10" stroke={C.yellow}
+                    strokeWidth="2.5" strokeDasharray="22 14" strokeLinecap="round"/>
+                </svg>
+                <span style={{ fontSize: '13px', color: C.dim }}>جاري تحديد موقعك بدقة...</span>
+              </div>
+            ) : !locReady ? (
+              <div style={{ fontSize: '13px', color: C.dim }}>
+                تعذّر الوصول إلى GPS — أعطِ التطبيق إذن الموقع
+              </div>
+            ) : (
+              <div style={{ fontSize: '15px', fontWeight: 700, color: isClose ? C.green : '#fff' }}>
+                {distStr}
+                {!isClose && distM !== null && (
+                  <span style={{ fontSize: '11px', color: 'rgba(255,255,255,0.3)', marginRight: '6px' }}>
+                    — تحتاج أقل من {CLAIM_RADIUS_M} م للاستلام
+                  </span>
+                )}
+              </div>
+            )}
           </div>
         </div>
 
-        {/* Claim result feedback */}
+        {/* ── Navigate button + travel info (only when location known & not close) ── */}
+        {locReady && !isClose && !claimResult && (
+          <div style={{ marginBottom: '14px' }}>
+
+            {/* Navigate / Stop nav button */}
+            {!navigating ? (
+              <button
+                onClick={handleNavigate}
+                style={{
+                  width: '100%', padding: '13px 16px',
+                  background: 'rgba(0,212,255,0.09)',
+                  border: `1px solid ${C.blue}66`,
+                  color: C.blue,
+                  fontFamily: 'Orbitron, sans-serif', fontSize: '11px',
+                  letterSpacing: '0.14em', cursor: 'pointer',
+                  borderRadius: '3px', transition: 'all 0.2s',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px',
+                  boxShadow: `0 0 14px ${C.blue}22`,
+                  marginBottom: distM !== null ? '10px' : '0',
+                }}
+                onMouseEnter={e => {
+                  e.currentTarget.style.background = 'rgba(0,212,255,0.16)';
+                  e.currentTarget.style.boxShadow  = `0 0 20px ${C.blue}44`;
+                }}
+                onMouseLeave={e => {
+                  e.currentTarget.style.background = 'rgba(0,212,255,0.09)';
+                  e.currentTarget.style.boxShadow  = `0 0 14px ${C.blue}22`;
+                }}
+              >
+                🧭 الذهاب إلى المهمة
+              </button>
+            ) : (
+              <button
+                onClick={handleStopNav}
+                style={{
+                  width: '100%', padding: '11px 16px',
+                  background: 'rgba(255,255,255,0.04)',
+                  border: '1px solid rgba(255,255,255,0.12)',
+                  color: 'rgba(255,255,255,0.45)',
+                  fontFamily: 'Orbitron, sans-serif', fontSize: '9px',
+                  letterSpacing: '0.12em', cursor: 'pointer',
+                  borderRadius: '3px', marginBottom: '10px',
+                }}
+              >
+                ✕ إلغاء الملاحة
+              </button>
+            )}
+
+            {/* ── Travel info card ── */}
+            {distM !== null && minutes !== null && (
+              <div style={{
+                display: 'flex', gap: '8px',
+              }}>
+                {/* Distance chip */}
+                <div style={{
+                  flex: 1, padding: '8px 12px',
+                  background: 'rgba(245,197,24,0.06)',
+                  border: '1px solid rgba(245,197,24,0.18)',
+                  borderRadius: '3px', textAlign: 'center',
+                }}>
+                  <div style={{
+                    fontFamily: 'Orbitron, sans-serif', fontSize: '7px',
+                    color: 'rgba(245,197,24,0.55)', letterSpacing: '0.1em', marginBottom: '4px',
+                  }}>المسافة</div>
+                  <div style={{
+                    fontFamily: 'Orbitron, sans-serif', fontSize: '14px',
+                    color: C.yellow, fontWeight: 700,
+                  }}>{distStr}</div>
+                </div>
+
+                {/* Time chip */}
+                <div style={{
+                  flex: 1, padding: '8px 12px',
+                  background: 'rgba(0,212,255,0.05)',
+                  border: '1px solid rgba(0,212,255,0.18)',
+                  borderRadius: '3px', textAlign: 'center',
+                }}>
+                  <div style={{
+                    fontFamily: 'Orbitron, sans-serif', fontSize: '7px',
+                    color: 'rgba(0,212,255,0.55)', letterSpacing: '0.1em', marginBottom: '4px',
+                  }}>الوقت المتوقع</div>
+                  <div style={{
+                    fontFamily: 'Orbitron, sans-serif', fontSize: '14px',
+                    color: C.blue, fontWeight: 700,
+                  }}>~{minutes} دقيقة</div>
+                  <div style={{ fontSize: '10px', color: 'rgba(255,255,255,0.25)', marginTop: '1px' }}>
+                    {mode}
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ── Claim result feedback ── */}
         {claimResult === 'success' && (
           <div style={{
             textAlign: 'center', padding: '16px',
@@ -403,7 +634,7 @@ export function BountyMissionSystem({ mapRef, userLocation }: Props) {
             <div style={{ fontSize: '32px', marginBottom: '6px' }}>🎉</div>
             <div style={{
               fontFamily: 'Orbitron, sans-serif', fontSize: '11px',
-              color: '#00dc64', letterSpacing: '0.14em',
+              color: C.green, letterSpacing: '0.14em',
             }}>تهانينا! — استلمت الجائزة بنجاح</div>
           </div>
         )}
@@ -418,7 +649,7 @@ export function BountyMissionSystem({ mapRef, userLocation }: Props) {
             <div style={{ fontSize: '22px', marginBottom: '4px' }}>⚡</div>
             <div style={{
               fontFamily: 'Orbitron, sans-serif', fontSize: '10px',
-              color: '#ff2d50', letterSpacing: '0.1em',
+              color: C.red, letterSpacing: '0.1em',
             }}>سبقك شخص آخر — الجائزة محجوزة</div>
           </div>
         )}
@@ -431,12 +662,12 @@ export function BountyMissionSystem({ mapRef, userLocation }: Props) {
             borderRadius: '3px', marginBottom: '12px',
           }}>
             <div style={{
-              fontFamily: 'Orbitron, sans-serif', fontSize: '10px', color: '#ff2d50',
+              fontFamily: 'Orbitron, sans-serif', fontSize: '10px', color: C.red,
             }}>خطأ في الاتصال — حاول مرة أخرى</div>
           </div>
         )}
 
-        {/* Claim button */}
+        {/* ── Claim button ── */}
         {!claimResult && (
           <button
             onClick={handleClaim}
@@ -446,13 +677,12 @@ export function BountyMissionSystem({ mapRef, userLocation }: Props) {
               background: isClose
                 ? 'rgba(245,197,24,0.14)'
                 : 'rgba(255,255,255,0.02)',
-              border: `2px solid ${isClose ? '#f5c518' : 'rgba(255,255,255,0.08)'}`,
-              color: isClose ? '#f5c518' : 'rgba(255,255,255,0.18)',
+              border: `2px solid ${isClose ? C.yellow : 'rgba(255,255,255,0.08)'}`,
+              color: isClose ? C.yellow : C.dimx,
               fontFamily: 'Orbitron, sans-serif', fontSize: '11px',
               letterSpacing: '0.14em',
               cursor: (isClose && !claiming) ? 'pointer' : 'not-allowed',
               borderRadius: '3px', transition: 'all 0.22s',
-              boxShadow: isClose ? '0 0 0 rgba(245,197,24,0.3)' : 'none',
               animation: isClose && !claiming ? 'bounty-glow 2.2s ease-in-out infinite' : 'none',
               display: 'flex', alignItems: 'center',
               justifyContent: 'center', gap: '8px',
@@ -470,17 +700,15 @@ export function BountyMissionSystem({ mapRef, userLocation }: Props) {
               <>
                 <svg width="14" height="14" viewBox="0 0 28 28" fill="none"
                   style={{ animation: 'lf-spin 0.9s linear infinite' }}>
-                  <circle cx="14" cy="14" r="10" stroke="#f5c518"
+                  <circle cx="14" cy="14" r="10" stroke={C.yellow}
                     strokeWidth="2.5" strokeDasharray="22 14" strokeLinecap="round"/>
                 </svg>
                 جاري الاستلام...
               </>
             ) : isClose ? (
               '🎁 استلام الجائزة'
-            ) : distM === null ? (
-              '⏳ جاري تحديد موقعك...'
             ) : (
-              '📍 أنت بعيد جداً عن موقع المهمة'
+              '📍 اقترب من موقع المهمة للاستلام'
             )}
           </button>
         )}
