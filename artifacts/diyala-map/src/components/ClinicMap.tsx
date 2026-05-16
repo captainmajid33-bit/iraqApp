@@ -6,6 +6,8 @@ import { ChatOverlay } from './ChatOverlay';
 import { GasChatOverlay } from './GasChatOverlay';
 import { RatingDialog } from './RatingDialog';
 import { FazaaSystem } from './FazaaSystem';
+import { MarketTicker } from './MarketTicker';
+import { FuelStationRadar } from './FuelStationRadar';
 import { collection, query, where, getDocs } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 
@@ -4776,6 +4778,15 @@ export function ClinicMap({
         userLocation={userLocation}
         clearMapForRescue={clearMapForRescue}
       />
+
+      {/* ── Fuel Station Radar ── */}
+      <FuelStationRadar
+        mapRef={mapRef}
+        userLocation={userLocation}
+      />
+
+      {/* ── Live Market Ticker ── */}
+      <MarketTicker />
 
     </div>
   );
