@@ -127,8 +127,10 @@ export function BountyMissionSystem({ mapRef, userLocation }: Props) {
   const [distM,          setDistM]          = useState<number | null>(null);
   const [claiming,       setClaiming]       = useState(false);
   const [claimResult,    setClaimResult]    = useState<'success' | 'taken' | 'error' | null>(null);
-  const [navigating,     setNavigating]     = useState(false);        // polyline shown?
-  const [gpsLoading,     setGpsLoading]     = useState(false);        // internal GPS fetch
+  const [navigating,     setNavigating]     = useState(false);
+  const [routeLoading,   setRouteLoading]   = useState(false);
+  const [routeInfo,      setRouteInfo]      = useState<{ distM: number; durationSec: number } | null>(null);
+  const [gpsLoading,     setGpsLoading]     = useState(false);
   const [internalPos,    setInternalPos]    = useState<{ lat: number; lng: number } | null>(null);
 
   const markersRef  = useRef<Map<string, L.Marker>>(new Map());
@@ -263,7 +265,7 @@ export function BountyMissionSystem({ mapRef, userLocation }: Props) {
     };
   }, [selected, userLocation]);
 
-  // ── Live distance calculation ─────────────────────────────────────────────
+  // ── Live distance calculation (haversine — always kept fresh) ────────────
   useEffect(() => {
     if (!selected || !effectivePos) { setDistM(null); return; }
     const d = haversineMeters(
@@ -271,15 +273,7 @@ export function BountyMissionSystem({ mapRef, userLocation }: Props) {
       selected.latitude, selected.longitude,
     );
     setDistM(d);
-
-    // Update polyline if navigating
-    if (navigating && polylineRef.current && mapRef.current) {
-      polylineRef.current.setLatLngs([
-        [effectivePos.lat, effectivePos.lng],
-        [selected.latitude, selected.longitude],
-      ]);
-    }
-  }, [selected, effectivePos, navigating, mapRef]);
+  }, [selected, effectivePos]);
 
   // ── Remove polyline when sheet closes ─────────────────────────────────────
   useEffect(() => {
@@ -297,40 +291,104 @@ export function BountyMissionSystem({ mapRef, userLocation }: Props) {
     }
   }
 
-  // ── Navigate: draw polyline + fit bounds ─────────────────────────────────
-  const handleNavigate = useCallback(() => {
+  // ── Navigate: fetch OSRM road route → draw polyline + fit bounds ─────────
+  const handleNavigate = useCallback(async () => {
     if (!selected || !effectivePos || !mapRef.current) return;
-    const map = mapRef.current;
+    const map  = mapRef.current;
+    const from = effectivePos;
+    const to   = { lat: selected.latitude, lng: selected.longitude };
 
     clearPolyline();
-
-    const from: L.LatLngTuple = [effectivePos.lat, effectivePos.lng];
-    const to:   L.LatLngTuple = [selected.latitude, selected.longitude];
-
-    // Draw glowing yellow polyline
-    polylineRef.current = L.polyline([from, to], {
-      color:     C.yellow,
-      weight:    4,
-      opacity:   0.92,
-      dashArray: '10 6',
-      className: 'bounty-nav-line',
-    }).addTo(map);
-
-    // Fit both endpoints with padding
-    map.fitBounds(L.latLngBounds([from, to]), {
-      padding: [60, 60],
-      maxZoom: 16,
-      animate: true,
-      duration: 0.8,
-    });
-
+    setRouteLoading(true);
     setNavigating(true);
+    setRouteInfo(null);
+
+    try {
+      // OSRM public routing API — no key required
+      // Coords order: longitude,latitude (OSRM convention)
+      const url =
+        `https://router.project-osrm.org/route/v1/driving/` +
+        `${from.lng},${from.lat};${to.lng},${to.lat}` +
+        `?overview=full&geometries=geojson`;
+
+      const res  = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+      const data = await res.json();
+
+      if (data.code === 'Ok' && data.routes?.length) {
+        const route = data.routes[0];
+
+        // GeoJSON coords are [lng, lat] — flip to [lat, lng] for Leaflet
+        const latlngs: L.LatLngTuple[] = (
+          route.geometry.coordinates as [number, number][]
+        ).map(([lng, lat]) => [lat, lng]);
+
+        // Draw road-following polyline
+        polylineRef.current = L.polyline(latlngs, {
+          color:     C.yellow,
+          weight:    5,
+          opacity:   0.95,
+          className: 'bounty-nav-line',
+        }).addTo(map);
+
+        // Fit the full route on screen
+        map.fitBounds(polylineRef.current.getBounds(), {
+          padding: [55, 55],
+          maxZoom: 16,
+          animate: true,
+          duration: 0.9,
+        });
+
+        setRouteInfo({
+          distM:       route.distance,    // metres (real road)
+          durationSec: route.duration,    // seconds
+        });
+      } else {
+        // OSRM fallback — no route found, draw straight line
+        console.warn('[BountyMission] OSRM no route, using fallback');
+        const pts: L.LatLngTuple[] = [
+          [from.lat, from.lng],
+          [to.lat,   to.lng],
+        ];
+        polylineRef.current = L.polyline(pts, {
+          color:     C.yellow,
+          weight:    4,
+          opacity:   0.88,
+          dashArray: '10 6',
+          className: 'bounty-nav-line',
+        }).addTo(map);
+        map.fitBounds(L.latLngBounds(pts), {
+          padding: [60, 60], maxZoom: 16, animate: true, duration: 0.8,
+        });
+      }
+    } catch (err) {
+      console.warn('[BountyMission] OSRM fetch error:', err);
+      // Straight-line fallback on network error
+      const pts: L.LatLngTuple[] = [
+        [from.lat, from.lng],
+        [to.lat,   to.lng],
+      ];
+      if (mapRef.current) {
+        polylineRef.current = L.polyline(pts, {
+          color:     C.yellow,
+          weight:    4,
+          opacity:   0.88,
+          dashArray: '10 6',
+          className: 'bounty-nav-line',
+        }).addTo(mapRef.current);
+        mapRef.current.fitBounds(L.latLngBounds(pts), {
+          padding: [60, 60], maxZoom: 16, animate: true, duration: 0.8,
+        });
+      }
+    } finally {
+      setRouteLoading(false);
+    }
   }, [selected, effectivePos, mapRef]);
 
   // ── Stop navigation ───────────────────────────────────────────────────────
   const handleStopNav = useCallback(() => {
     clearPolyline();
     setNavigating(false);
+    setRouteInfo(null);
   }, []);
 
   // ── Claim handler — Firestore atomic transaction ──────────────────────────
@@ -532,7 +590,7 @@ export function BountyMissionSystem({ mapRef, userLocation }: Props) {
         {locReady && !isClose && !claimResult && (
           <div style={{ marginBottom: '14px' }}>
 
-            {/* Navigate / Stop nav button */}
+            {/* Navigate / Loading / Stop nav button */}
             {!navigating ? (
               <button
                 onClick={handleNavigate}
@@ -546,7 +604,7 @@ export function BountyMissionSystem({ mapRef, userLocation }: Props) {
                   borderRadius: '3px', transition: 'all 0.2s',
                   display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px',
                   boxShadow: `0 0 14px ${C.blue}22`,
-                  marginBottom: distM !== null ? '10px' : '0',
+                  marginBottom: '10px',
                 }}
                 onMouseEnter={e => {
                   e.currentTarget.style.background = 'rgba(0,212,255,0.16)';
@@ -559,6 +617,24 @@ export function BountyMissionSystem({ mapRef, userLocation }: Props) {
               >
                 🧭 الذهاب إلى المهمة
               </button>
+            ) : routeLoading ? (
+              /* Loading state while fetching OSRM route */
+              <div style={{
+                width: '100%', padding: '13px 16px',
+                background: 'rgba(0,212,255,0.05)',
+                border: `1px solid ${C.blue}33`,
+                borderRadius: '3px', marginBottom: '10px',
+                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px',
+              }}>
+                <svg width="14" height="14" viewBox="0 0 28 28" fill="none"
+                  style={{ animation: 'lf-spin 0.9s linear infinite', flexShrink: 0 }}>
+                  <circle cx="14" cy="14" r="10" stroke={C.blue}
+                    strokeWidth="2.5" strokeDasharray="22 14" strokeLinecap="round"/>
+                </svg>
+                <span style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '9px', color: C.blue, letterSpacing: '0.1em' }}>
+                  جاري حساب المسار عبر الشوارع...
+                </span>
+              </div>
             ) : (
               <button
                 onClick={handleStopNav}
@@ -577,48 +653,73 @@ export function BountyMissionSystem({ mapRef, userLocation }: Props) {
             )}
 
             {/* ── Travel info card ── */}
-            {distM !== null && minutes !== null && (
-              <div style={{
-                display: 'flex', gap: '8px',
-              }}>
-                {/* Distance chip */}
-                <div style={{
-                  flex: 1, padding: '8px 12px',
-                  background: 'rgba(245,197,24,0.06)',
-                  border: '1px solid rgba(245,197,24,0.18)',
-                  borderRadius: '3px', textAlign: 'center',
-                }}>
-                  <div style={{
-                    fontFamily: 'Orbitron, sans-serif', fontSize: '7px',
-                    color: 'rgba(245,197,24,0.55)', letterSpacing: '0.1em', marginBottom: '4px',
-                  }}>المسافة</div>
-                  <div style={{
-                    fontFamily: 'Orbitron, sans-serif', fontSize: '14px',
-                    color: C.yellow, fontWeight: 700,
-                  }}>{distStr}</div>
-                </div>
-
-                {/* Time chip */}
-                <div style={{
-                  flex: 1, padding: '8px 12px',
-                  background: 'rgba(0,212,255,0.05)',
-                  border: '1px solid rgba(0,212,255,0.18)',
-                  borderRadius: '3px', textAlign: 'center',
-                }}>
-                  <div style={{
-                    fontFamily: 'Orbitron, sans-serif', fontSize: '7px',
-                    color: 'rgba(0,212,255,0.55)', letterSpacing: '0.1em', marginBottom: '4px',
-                  }}>الوقت المتوقع</div>
-                  <div style={{
-                    fontFamily: 'Orbitron, sans-serif', fontSize: '14px',
-                    color: C.blue, fontWeight: 700,
-                  }}>~{minutes} دقيقة</div>
-                  <div style={{ fontSize: '10px', color: 'rgba(255,255,255,0.25)', marginTop: '1px' }}>
-                    {mode}
+            {(() => {
+              // Prefer OSRM real-road data; fall back to haversine
+              const useRoute  = routeInfo !== null;
+              const showDist  = useRoute ? fmtDist(routeInfo!.distM) : distStr;
+              const showMins  = useRoute
+                ? Math.max(1, Math.round(routeInfo!.durationSec / 60))
+                : minutes;
+              const showMode  = useRoute ? '🚗 عبر الطريق الفعلي' : mode;
+              if (!showDist || showMins === null) return null;
+              return (
+                <div>
+                  {/* "Via road" badge — only when OSRM data is available */}
+                  {useRoute && (
+                    <div style={{
+                      display: 'flex', alignItems: 'center', gap: '6px',
+                      marginBottom: '6px', padding: '5px 10px',
+                      background: 'rgba(123,47,247,0.08)',
+                      border: '1px solid rgba(123,47,247,0.28)',
+                      borderRadius: '2px',
+                    }}>
+                      <span style={{ fontSize: '10px' }}>🗺️</span>
+                      <span style={{
+                        fontFamily: 'Orbitron, sans-serif', fontSize: '7px',
+                        color: '#a78bfa', letterSpacing: '0.1em',
+                      }}>مسار حقيقي عبر شبكة الطرق · OSRM ROUTING</span>
+                    </div>
+                  )}
+                  <div style={{ display: 'flex', gap: '8px' }}>
+                    {/* Distance chip */}
+                    <div style={{
+                      flex: 1, padding: '8px 12px',
+                      background: 'rgba(245,197,24,0.06)',
+                      border: '1px solid rgba(245,197,24,0.18)',
+                      borderRadius: '3px', textAlign: 'center',
+                    }}>
+                      <div style={{
+                        fontFamily: 'Orbitron, sans-serif', fontSize: '7px',
+                        color: 'rgba(245,197,24,0.55)', letterSpacing: '0.1em', marginBottom: '4px',
+                      }}>المسافة {useRoute ? 'عبر الطريق' : 'الهوائية'}</div>
+                      <div style={{
+                        fontFamily: 'Orbitron, sans-serif', fontSize: '14px',
+                        color: C.yellow, fontWeight: 700,
+                      }}>{showDist}</div>
+                    </div>
+                    {/* Time chip */}
+                    <div style={{
+                      flex: 1, padding: '8px 12px',
+                      background: 'rgba(0,212,255,0.05)',
+                      border: '1px solid rgba(0,212,255,0.18)',
+                      borderRadius: '3px', textAlign: 'center',
+                    }}>
+                      <div style={{
+                        fontFamily: 'Orbitron, sans-serif', fontSize: '7px',
+                        color: 'rgba(0,212,255,0.55)', letterSpacing: '0.1em', marginBottom: '4px',
+                      }}>الوقت المتوقع</div>
+                      <div style={{
+                        fontFamily: 'Orbitron, sans-serif', fontSize: '14px',
+                        color: C.blue, fontWeight: 700,
+                      }}>~{showMins} دقيقة</div>
+                      <div style={{ fontSize: '10px', color: 'rgba(255,255,255,0.25)', marginTop: '1px' }}>
+                        {showMode}
+                      </div>
+                    </div>
                   </div>
                 </div>
-              </div>
-            )}
+              );
+            })()}
           </div>
         )}
 
