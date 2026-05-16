@@ -5,6 +5,30 @@ import { MapItem, Category } from '@/data/types';
 import { ChatOverlay } from './ChatOverlay';
 import { GasChatOverlay } from './GasChatOverlay';
 import { RatingDialog } from './RatingDialog';
+import { collection, query, where, getDocs } from 'firebase/firestore';
+import { db } from '@/lib/firebase';
+
+// ── Fetch phones of AVAILABLE agents from Firestore (cross-check filter) ──
+// Returns a Set of phone strings, or null if Firestore is unreachable.
+// "available" is the only status that should receive new orders.
+async function getAvailableAgentPhones(): Promise<Set<string> | null> {
+  try {
+    const snap = await getDocs(
+      query(collection(db, 'approved_agents'), where('status', '==', 'available'))
+    );
+    const phones = new Set<string>();
+    snap.forEach(d => {
+      const p = d.data().phone as string | undefined;
+      if (p) phones.add(p.trim());
+    });
+    console.log(`[DriverFilter] Firestore available agents: ${phones.size}`, [...phones]);
+    return phones;
+  } catch (e: any) {
+    // Non-fatal: if Firestore is unreachable, fall back to REST-only filtering
+    console.warn('[DriverFilter] Firestore unavailable — skipping status cross-check:', e?.code);
+    return null;
+  }
+}
 
 // ── Haversine distance (km) between two lat/lng points ────────────────────
 function haversineDist(lat1:number,lng1:number,lat2:number,lng2:number):number {
@@ -1309,12 +1333,20 @@ export function ClinicMap({
           userLat: loc.lat, userLng: loc.lng, driverLat: d.lat, driverLng: d.lng,
         })));
 
-        // ── NOTE: updatedAt filter REMOVED — API already guarantees isOnline=true ──
-        // Stationary drivers are still valid even if they haven't sent a GPS ping recently.
+        // ── Cross-check Firestore approved_agents status ─────────────────────
+        // Firestore is the authoritative source for driver availability.
+        // REST API guarantees isOnline=true & isBusy=false at DB level,
+        // but Firestore may show "offline" / "on_trip" if driver status changed
+        // without the partner app calling the REST offline endpoint.
+        const availablePhones = await getAvailableAgentPhones();
+        const fsFiltered = availablePhones !== null
+          ? drivers.filter(d => availablePhones.has((d.phone ?? '').trim()))
+          : drivers; // fallback: Firestore unreachable → trust REST only
+        console.log(`[autoFindDriver] after Firestore cross-check: ${fsFiltered.length}/${drivers.length} driver(s) have status=available`);
 
         // ── Fixed radius, sorted nearest-first ───────────────────────────────
         const SEARCH_RADIUS_KM = 10; // ⚠ TESTING: temporarily 10 km (was 2 km)
-        const withDist = drivers
+        const withDist = fsFiltered
           .map(d => ({ ...d, distKm: haversineDist(loc.lat, loc.lng, d.lat, d.lng) }));
         console.log(`[autoFindDriver] after distance calc — within ${SEARCH_RADIUS_KM} km:`,
           withDist.filter(d => d.distKm <= SEARCH_RADIUS_KM).map(d=>({name:d.driverName, distKm:+d.distKm.toFixed(3)})));
@@ -2380,7 +2412,8 @@ export function ClinicMap({
     if (!loc) { stopOrderTracking(); return; }
 
     try {
-      // API already filters isOnline=true & isBusy=false & category=taxi at DB level
+      // API filters isOnline=true & isBusy=false & category=taxi at DB level.
+      // Firestore cross-check further removes drivers marked offline/on_trip.
       const res     = await fetch('/api/drivers-online?category=taxi');
       const drivers: OnlineDriver[] = await res.json();
 
@@ -2394,8 +2427,15 @@ export function ClinicMap({
           ignored: loopIgnoredRef.current.has(d.locationId),
         })));
 
+      // ── Cross-check Firestore approved_agents status ──────────────────────
+      const availablePhones = await getAvailableAgentPhones();
+      const fsFiltered = availablePhones !== null
+        ? drivers.filter(d => availablePhones.has((d.phone ?? '').trim()))
+        : drivers; // fallback: Firestore unreachable → trust REST only
+      console.log(`[redirectToNext] after Firestore cross-check: ${fsFiltered.length}/${drivers.length} driver(s) have status=available`);
+
       // Exclude already-tried drivers, filter to radius, sort nearest-first
-      const available = drivers
+      const available = fsFiltered
         .filter(d => !loopIgnoredRef.current.has(d.locationId))
         .map(d => ({ ...d, distKm: haversineDist(loc.lat, loc.lng, d.lat, d.lng) }))
         .filter(d => d.distKm <= SEARCH_RADIUS_KM)
