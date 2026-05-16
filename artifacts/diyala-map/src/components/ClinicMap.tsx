@@ -10,6 +10,7 @@ import { MarketTicker } from './MarketTicker';
 import { FuelStationRadar } from './FuelStationRadar';
 import { BountyMissionSystem } from './BountyMissionSystem';
 import { ActiveOrderTracker } from './ActiveOrderTracker';
+import TrafficLayer from './TrafficLayer';
 import { useMapTheme } from '@/lib/mapTheme';
 import { collection, query, where, getDocs, onSnapshot, orderBy, limit, doc, setDoc, serverTimestamp } from 'firebase/firestore';
 import { auth, db } from '@/lib/firebase';
@@ -653,7 +654,6 @@ export function ClinicMap({
   const taxiFromPtRef     = useRef<{lat:number;lng:number}|null>(null);
 
   const pendingJumpRef   = useRef<number|null>(null);
-  const trafficLayersRef = useRef<L.Polyline[]>([]);
 
   const clearRouteVisuals = useCallback(()=>{
     routeGlowRef.current?.remove(); routeGlowRef.current=null;
@@ -1090,7 +1090,6 @@ export function ClinicMap({
       poiLayerA.remove(); poiLayerRef.current = null;
       poiRouteGlowRef.current?.remove(); poiRouteGlowRef.current = null;
       poiRouteLineRef.current?.remove(); poiRouteLineRef.current = null;
-      trafficLayersRef.current.forEach(l=>l.remove()); trafficLayersRef.current=[];
       mapRef.current?.remove(); mapRef.current=null;
       style.remove();
       catStyleRef.current?.remove(); catStyleRef.current=null;
@@ -1235,41 +1234,8 @@ export function ClinicMap({
     return el;
   },[]);
 
-  // ── Traffic layer — simulated GTA-style road congestion ─────────────────────
-  useEffect(()=>{
-    if (!mapRef.current) return;
-    // Remove existing layers
-    trafficLayersRef.current.forEach(l=>l.remove());
-    trafficLayersRef.current=[];
-    if (!showTraffic) return;
-    // Main roads of Baqubah (approximate real coordinates)
-    const roads: { coords:[number,number][], color:string, weight:number, dash?:string }[] = [
-      // Baghdad-Kirkuk highway (main N-S artery) — heavy traffic (red)
-      { coords:[[33.763,44.651],[33.756,44.651],[33.750,44.650],[33.742,44.649],[33.736,44.648]], color:'#ff2d78', weight:6 },
-      // Main E-W road — moderate (yellow)
-      { coords:[[33.745,44.632],[33.745,44.640],[33.745,44.649],[33.745,44.658],[33.745,44.666]], color:'#f5c518', weight:5 },
-      // Secondary road west — free (green)
-      { coords:[[33.760,44.640],[33.752,44.639],[33.744,44.639]], color:'#00f5d4', weight:4 },
-      // Secondary road east — moderate
-      { coords:[[33.751,44.659],[33.746,44.661],[33.739,44.662]], color:'#f5c518', weight:3 },
-      // Cross connector A — heavy
-      { coords:[[33.753,44.641],[33.753,44.649],[33.754,44.658]], color:'#ff2d78', weight:4 },
-      // Cross connector B — free
-      { coords:[[33.740,44.642],[33.741,44.650],[33.740,44.660]], color:'#00f5d4', weight:3 },
-      // Ring road north — moderate
-      { coords:[[33.760,44.638],[33.762,44.648],[33.761,44.658],[33.757,44.665]], color:'#f5c518', weight:3 },
-      // Ring road south — free
-      { coords:[[33.734,44.643],[33.735,44.653],[33.736,44.663]], color:'#00f5d4', weight:3 },
-      // Inner city — heavy
-      { coords:[[33.748,44.644],[33.748,44.650],[33.749,44.655]], color:'#ff9500', weight:4 },
-    ];
-    trafficLayersRef.current = roads.flatMap(({coords,color,weight})=>[
-      // Glow layer
-      L.polyline(coords,{color,weight:weight+6,opacity:0.08,lineCap:'round',lineJoin:'round'}).addTo(mapRef.current!),
-      // Main line
-      L.polyline(coords,{color,weight,opacity:0.75,lineCap:'round',lineJoin:'round',dashArray:'14 6'}).addTo(mapRef.current!),
-    ]);
-  },[showTraffic]);
+  // ── Traffic layer handled by <TrafficLayer> component (crowdsourced) ─────────
+  // (old static-roads useEffect removed)
 
   // ── Close / cancel taxi routing ──────────────────────────────────────────────
   const closeTaxiRouting = useCallback(()=>{
@@ -5001,6 +4967,13 @@ export function ClinicMap({
       <ActiveOrderTracker
         mapRef={mapRef}
         userLocation={userLocation}
+      />
+
+      {/* ── Crowdsourced Live Traffic Layer ── */}
+      <TrafficLayer
+        mapRef={mapRef}
+        userLocation={userLocation}
+        enabled={showTraffic}
       />
 
       {/* ── Bounty Mission System ── */}
