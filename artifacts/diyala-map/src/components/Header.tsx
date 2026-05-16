@@ -26,6 +26,7 @@ export function Header() {
   const [items,      setItems]      = useState<MediaItem[]>([]);
   const [idx,        setIdx]        = useState(0);
   const [visible,    setVisible]    = useState(true); // for crossfade
+  const [isMuted,    setIsMuted]    = useState(true);
   const esRef    = useRef<EventSource | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -123,7 +124,7 @@ export function Header() {
                   key={current!.url}
                   src={current!.url}
                   autoPlay
-                  muted
+                  muted={isMuted}
                   loop
                   playsInline
                   style={{
@@ -154,6 +155,51 @@ export function Header() {
               background: "linear-gradient(to right, rgba(5,8,15,0.05) 60%, rgba(5,8,15,0.75) 100%)",
               pointerEvents: "none",
             }} />
+
+            {/* ── Mute / Unmute button (video only) ── */}
+            {current!.type === "video" && (
+              <button
+                onClick={() => setIsMuted(m => !m)}
+                title={isMuted ? "تشغيل الصوت" : "كتم الصوت"}
+                style={{
+                  position:   "absolute",
+                  top:        "10px",
+                  left:       "10px",
+                  zIndex:     4,
+                  width:      "32px",
+                  height:     "32px",
+                  display:    "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  background: "rgba(5,8,15,0.65)",
+                  border:     `1px solid ${isMuted ? "rgba(123,47,247,0.5)" : "rgba(0,212,255,0.6)"}`,
+                  borderRadius: "50%",
+                  cursor:     "pointer",
+                  backdropFilter: "blur(4px)",
+                  boxShadow:  isMuted
+                    ? "0 0 8px rgba(123,47,247,0.4)"
+                    : "0 0 8px rgba(0,212,255,0.5)",
+                  transition: "all 0.2s ease",
+                  padding:    0,
+                }}
+              >
+                {isMuted ? (
+                  /* Muted — speaker with X */
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="rgba(123,47,247,0.9)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
+                    <line x1="23" y1="9" x2="17" y2="15"/>
+                    <line x1="17" y1="9" x2="23" y2="15"/>
+                  </svg>
+                ) : (
+                  /* Unmuted — speaker with waves */
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="rgba(0,212,255,0.9)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
+                    <path d="M15.54 8.46a5 5 0 0 1 0 7.07"/>
+                    <path d="M19.07 4.93a10 10 0 0 1 0 14.14"/>
+                  </svg>
+                )}
+              </button>
+            )}
 
             {/* ── Dot indicators (only when >1 item) ── */}
             {items.length > 1 && (
