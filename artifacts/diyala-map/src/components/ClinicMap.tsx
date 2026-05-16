@@ -495,6 +495,7 @@ export function ClinicMap({
   const [showMoreModal,  setShowMoreModal]  = useState(false);
   const [searchQuery,    setSearchQuery]    = useState('');
   const [showTraffic,    setShowTraffic]    = useState(false);
+  const [showFuel,       setShowFuel]       = useState(false);
   const [showTaxiPrompt, setShowTaxiPrompt] = useState(false);
 
   // ── Place search (Nominatim OSM) ─────────────────────────────────────────────
@@ -2653,6 +2654,38 @@ export function ClinicMap({
                   </button>
                 );
               })}
+              {/* ── Fuel Stations toggle button ── */}
+              <button
+                onClick={() => setShowFuel(v => !v)}
+                style={{
+                  padding:'8px 16px',
+                  background: showFuel ? 'rgba(245,197,24,0.18)' : 'rgba(5,8,15,0.92)',
+                  border:'none',
+                  borderBottom: showFuel ? '2px solid #f5c518' : '2px solid transparent',
+                  color: showFuel ? '#f5c518' : 'rgba(255,255,255,0.35)',
+                  fontFamily:'Orbitron,sans-serif',fontSize:'10px',letterSpacing:'0.1em',
+                  cursor:'pointer',transition:'all 0.2s',
+                  display:'flex',flexDirection:'column',alignItems:'center',gap:'3px',
+                  minWidth:'90px',flexShrink:0,
+                  boxShadow: showFuel ? 'inset 0 0 20px rgba(245,197,24,0.18)' : 'none',
+                  position:'relative',
+                }}>
+                <span style={{fontSize:'15px'}}>⛽</span>
+                <span style={{whiteSpace:'nowrap'}}>FUEL</span>
+                <span style={{fontSize:'11px',fontFamily:'Rajdhani,sans-serif',opacity:0.8,whiteSpace:'nowrap'}}>
+                  محطات الوقود
+                </span>
+                {showFuel && (
+                  <span style={{
+                    position:'absolute',top:'6px',right:'6px',
+                    width:'6px',height:'6px',borderRadius:'50%',
+                    background:'#f5c518',
+                    boxShadow:'0 0 6px #f5c518, 0 0 12px #f5c51888',
+                    animation:'fuel-top-pulse 1.6s ease-in-out infinite',
+                  }}/>
+                )}
+              </button>
+
               {/* More button — always visible (search + extra categories) */}
               <button onClick={()=>setShowMoreModal(v=>!v)}
                 style={{
@@ -4799,6 +4832,7 @@ export function ClinicMap({
       <FuelStationRadar
         mapRef={mapRef}
         userLocation={userLocation}
+        visible={showFuel}
       />
 
       {/* ── Live Market Ticker ── */}

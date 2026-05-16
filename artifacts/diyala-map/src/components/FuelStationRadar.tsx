@@ -29,6 +29,7 @@ interface FuelStation {
 interface FuelStationRadarProps {
   mapRef:       React.MutableRefObject<L.Map | null>;
   userLocation: { lat: number; lng: number } | null;
+  visible?:     boolean;
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -115,7 +116,7 @@ function formatTime(ts: unknown): string {
 }
 
 // ── Component ─────────────────────────────────────────────────────────────────
-export function FuelStationRadar({ mapRef, userLocation }: FuelStationRadarProps) {
+export function FuelStationRadar({ mapRef, userLocation, visible = true }: FuelStationRadarProps) {
 
   const [mapReady,   setMapReady]   = useState(false);
   const [stations,   setStations]   = useState<FuelStation[]>([]);
@@ -191,6 +192,14 @@ export function FuelStationRadar({ mapRef, userLocation }: FuelStationRadarProps
     const map = mapRef.current;
     if (!map) return;
 
+    // Hide all markers when not visible
+    if (!visible) {
+      markersRef.current.forEach(marker => marker.remove());
+      markersRef.current.clear();
+      setSelected(null);
+      return;
+    }
+
     const currentIds = new Set(stations.map(s => s.id));
 
     // Remove stale
@@ -216,7 +225,7 @@ export function FuelStationRadar({ mapRef, userLocation }: FuelStationRadarProps
       });
       markersRef.current.set(station.id, marker);
     });
-  }, [stations, mapReady, mapRef]);
+  }, [stations, mapReady, mapRef, visible]);
 
   // ── Sync selected station with live updates ───────────────────────────────
   useEffect(() => {
