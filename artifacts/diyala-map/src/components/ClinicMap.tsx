@@ -5,6 +5,7 @@ import { MapItem, Category } from '@/data/types';
 import { ChatOverlay } from './ChatOverlay';
 import { GasChatOverlay } from './GasChatOverlay';
 import { RatingDialog } from './RatingDialog';
+import { FazaaSystem } from './FazaaSystem';
 import { collection, query, where, getDocs } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 
@@ -2499,6 +2500,13 @@ export function ClinicMap({
   // Keep redirectToNextRef always pointing at latest version
   useEffect(()=>{ redirectToNextRef.current = redirectToNextDriver; },[redirectToNextDriver]);
 
+  // ── Fazaa: clear all active map layers to focus on rescue ─────────────────
+  const clearMapForRescue = useCallback(()=>{
+    stopOrderTracking();   // cancels taxi order, removes taxi route + markers
+    clearRouteVisuals();   // removes clinic/navigation route polylines
+    onClearRoute();        // resets parent route target state
+  },[stopOrderTracking, clearRouteVisuals, onClearRoute]);
+
   // ── Countdown tick: decrement every second, trigger redirect at 0 ─────────
   useEffect(()=>{
     if (!loopActive || loopCountdown === null) return;
@@ -4721,7 +4729,7 @@ export function ClinicMap({
         <button
           onClick={()=>{
             if (!gasCategory) return;
-            if (activeGasOrderId) return; // locked — active order in progress
+            if (activeGasOrderId) return;
             setShowMoreModal(false);
             setShowTaxiPrompt(false);
             openGasForm();
@@ -4761,6 +4769,14 @@ export function ClinicMap({
         </button>
 
       </div>
+
+      {/* ── Fazaa Rescue System ── */}
+      <FazaaSystem
+        mapRef={mapRef}
+        userLocation={userLocation}
+        clearMapForRescue={clearMapForRescue}
+      />
+
     </div>
   );
 }
