@@ -1,117 +1,106 @@
 /**
- * BountyMissionSystem — ديالى مهمات الجوائز
- * - Reads `bounty_missions` (status == 'active') from Firestore live
- * - Draws golden pulsing diamond markers on the Leaflet map
- * - Bottom sheet: live GPS distance, navigate polyline, atomic claim transaction
+ * BountyMissionSystem v2 — مطاردة الكنوز المزدوجة
+ * Firestore collection: 'bounties'
+ * Each pair = 2 docs sharing pairId (isFake: false = real, isFake: true = fake)
+ * - Identical markers for both; countdown overlays above each
+ * - 15m GPS radius to claim
+ * - Fake → funny red popup; Real → Firestore transaction, top-3 winners
  */
 import { useEffect, useRef, useState, useCallback } from 'react';
 import L from 'leaflet';
 import {
   collection, onSnapshot, query, where,
   runTransaction, doc, serverTimestamp,
-  setDoc, getDoc, increment,
+  arrayUnion, updateDoc, Timestamp,
 } from 'firebase/firestore';
 import { db, auth } from '@/lib/firebase';
 
-// ── Types ─────────────────────────────────────────────────────────────────────
-interface BountyMission {
-  id:          string;
-  title:       string;
-  description: string;
-  reward:      number;
-  latitude:    number;
-  longitude:   number;
-  status:      'active' | 'claimed';
-  claimedBy?:  string;
+// ── Types ──────────────────────────────────────────────────────────────────────
+interface BountyDoc {
+  id:            string;
+  pairId:        string;
+  isFake:        boolean;
+  sponsor_name:  string;
+  title:         string;
+  first_reward:  string;
+  second_reward: string;
+  third_reward:  string;
+  fake_message:  string;
+  winners_log:   WinnerEntry[];
+  expiresAt:     Timestamp;
+  status:        'active' | 'closed' | 'expired';
+  latitude:      number;
+  longitude:     number;
+}
+
+interface WinnerEntry {
+  uid:       string;
+  name:      string;
+  rank:      number;
+  claimedAt: any;
 }
 
 interface Props {
-  mapRef:        React.MutableRefObject<L.Map | null>;
-  userLocation:  { lat: number; lng: number } | null;
-  isDay?:        boolean;
-  /** When true, all bounty map markers are removed (category filter active) */
+  mapRef:       React.MutableRefObject<L.Map | null>;
+  userLocation: { lat: number; lng: number } | null;
+  isDay?:       boolean;
   filterActive?: boolean;
 }
 
-// ── Constants ─────────────────────────────────────────────────────────────────
-const CLAIM_RADIUS_M = 20;
-const C = {
+// ── Constants ──────────────────────────────────────────────────────────────────
+const CLAIM_RADIUS_M = 15;
+const CL = {
   yellow: '#f5c518',
   green:  '#00dc64',
   red:    '#ff2d50',
   blue:   '#00d4ff',
+  gold:   '#FFD700',
+  silver: '#C0C0C0',
+  bronze: '#CD7F32',
   dim:    'rgba(255,255,255,0.35)',
-  dimx:   'rgba(255,255,255,0.18)',
 };
 
-const SEED: Omit<BountyMission, 'id'>[] = [
-  {
-    title:       'صندوق حديقة مصطفى جواد',
-    description: 'ابحث عن الصندوق السري في حديقة مصطفى جواد وكن أول من يصل إليه واستلم مكافأتك الحصرية!',
-    reward:      25000,
-    latitude:    33.7460,
-    longitude:   44.6510,
-    status:      'active',
-  },
-  {
-    title:       'كنز الساحة المركزية',
-    description: 'توجّه إلى الساحة المركزية في باقوبة — الأول يفوز بالجائزة الكبرى.',
-    reward:      15000,
-    latitude:    33.7430,
-    longitude:   44.6498,
-    status:      'active',
-  },
-  {
-    title:       'تحدي الشارع الرئيسي',
-    description: 'أكمل تحدي الوصول السريع على الشارع الرئيسي وكن البطل الأول في ديالى!',
-    reward:      35000,
-    latitude:    33.7472,
-    longitude:   44.6540,
-    status:      'active',
-  },
-];
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-function haversineMeters(lat1: number, lng1: number, lat2: number, lng2: number): number {
+// ── Helpers ────────────────────────────────────────────────────────────────────
+function haversineMeters(la1: number, lo1: number, la2: number, lo2: number): number {
   const R = 6_371_000;
-  const toRad = (d: number) => (d * Math.PI) / 180;
-  const dLat = toRad(lat2 - lat1);
-  const dLng = toRad(lng2 - lng1);
-  const a =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+  const r = (d: number) => (d * Math.PI) / 180;
+  const dLa = r(la2 - la1), dLo = r(lo2 - lo1);
+  const a = Math.sin(dLa / 2) ** 2 + Math.cos(r(la1)) * Math.cos(r(la2)) * Math.sin(dLo / 2) ** 2;
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-/** Returns human-readable distance string */
-function fmtDist(m: number): string {
-  return m < 1000 ? `${Math.round(m)} م` : `${(m / 1000).toFixed(1)} كم`;
+function fmtDist(m: number) { return m < 1000 ? `${Math.round(m)} م` : `${(m / 1000).toFixed(1)} كم`; }
+
+function fmtMmSs(ms: number): string {
+  if (ms <= 0) return '00:00';
+  const s = Math.floor(ms / 1000);
+  return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
 }
 
-/** Estimated travel time (walking ≤800m, else car ~30 km/h city) */
-function estMinutes(m: number): number {
-  if (m <= 800) return Math.max(1, Math.round(m / 70));       // ~70 m/min walking
-  return Math.max(1, Math.round((m / 1000 / 30) * 60));       // 30 km/h car
-}
-
-function travelMode(m: number): string {
-  return m <= 800 ? '🚶 مشياً' : '🚗 بالسيارة';
-}
-
-function getUser(): { name?: string; phone?: string } | null {
-  try { return JSON.parse(localStorage.getItem('diyala_user') ?? 'null'); }
+function getUser() {
+  try { return JSON.parse(localStorage.getItem('diyala_user') ?? 'null') as { name?: string; phone?: string } | null; }
   catch { return null; }
+}
+
+function getVisitedFakes(): Set<string> {
+  try { return new Set(JSON.parse(localStorage.getItem('diyala_fakes') ?? '[]') as string[]); }
+  catch { return new Set(); }
+}
+
+function markFakeVisited(id: string) {
+  const s = getVisitedFakes(); s.add(id);
+  localStorage.setItem('diyala_fakes', JSON.stringify([...s]));
 }
 
 function makeMissionIcon(): L.DivIcon {
   return L.divIcon({
-    className:  '',
-    iconSize:   [54, 54],
+    className: '',
+    iconSize: [54, 54],
     iconAnchor: [27, 27],
     html: `<div style="width:54px;height:54px;position:relative;display:flex;align-items:center;justify-content:center;cursor:pointer;">
       <div style="position:absolute;inset:-4px;border-radius:50%;background:#f5c518;opacity:0.10;animation:lf-ping 1.8s cubic-bezier(0,0,0.2,1) infinite;"></div>
       <div style="position:absolute;inset:-10px;border-radius:50%;background:#f5c518;opacity:0.05;animation:lf-ping 1.8s cubic-bezier(0,0,0.2,1) infinite;animation-delay:0.5s;"></div>
-      <div style="animation:mission-pulse 2s ease-in-out infinite;">
+      <div style="animation:bms-pulse 2s ease-in-out infinite;">
         <svg width="46" height="46" viewBox="0 0 46 46" fill="none">
           <polygon points="23,2 43,23 23,44 3,23" fill="#f5c51818" stroke="#f5c518" stroke-width="2"/>
           <polygon points="23,10 36,23 23,36 10,23" fill="#f5c518" opacity="0.85"/>
@@ -122,755 +111,451 @@ function makeMissionIcon(): L.DivIcon {
   });
 }
 
-// ── Component ─────────────────────────────────────────────────────────────────
-export function BountyMissionSystem({ mapRef, userLocation, isDay = false, filterActive = false }: Props) {
-  const [mapReady,       setMapReady]       = useState(false);
-  const [missions,       setMissions]       = useState<BountyMission[]>([]);
-  const [selected,       setSelected]       = useState<BountyMission | null>(null);
-  const [distM,          setDistM]          = useState<number | null>(null);
-  const [claiming,       setClaiming]       = useState(false);
-  const [claimResult,    setClaimResult]    = useState<'success' | 'taken' | 'error' | null>(null);
-  const [navigating,     setNavigating]     = useState(false);
-  const [routeLoading,   setRouteLoading]   = useState(false);
-  const [routeInfo,      setRouteInfo]      = useState<{ distM: number; durationSec: number } | null>(null);
-  const [gpsLoading,     setGpsLoading]     = useState(false);
-  const [internalPos,    setInternalPos]    = useState<{ lat: number; lng: number } | null>(null);
+// ── Component ──────────────────────────────────────────────────────────────────
+export function BountyMissionSystem({
+  mapRef, userLocation, isDay = false, filterActive = false,
+}: Props) {
+  const [mapReady,    setMapReady]    = useState(false);
+  const [bounties,    setBounties]    = useState<BountyDoc[]>([]);
+  const [selected,    setSelected]    = useState<BountyDoc | null>(null);
+  const [distM,       setDistM]       = useState<number | null>(null);
+  const [claiming,    setClaiming]    = useState(false);
+  const [phase, setPhase] = useState<'idle'|'fake'|'rank1'|'rank2'|'rank3'|'full'|'error'>('idle');
+  const [gpsLoading,  setGpsLoading]  = useState(false);
+  const [internalPos, setInternalPos] = useState<{lat:number;lng:number}|null>(null);
+  const [overlays,    setOverlays]    = useState<Array<{id:string;x:number;y:number;ms:number}>>([]);
 
   const markersRef  = useRef<Map<string, L.Marker>>(new Map());
-  const polylineRef = useRef<L.Polyline | null>(null);
-  const seededRef   = useRef(false);
   const gpsWatchRef = useRef<number | null>(null);
 
-  // Effective location: prop first, then internal GPS fallback
-  const effectivePos = userLocation ?? internalPos;
+  const pos = userLocation ?? internalPos;
 
-  // ── Wait for Leaflet map ───────────────────────────────────────────────────
+  // ── Wait for map ───────────────────────────────────────────────────────────
   useEffect(() => {
     if (mapRef.current) { setMapReady(true); return; }
-    const iv = setInterval(() => {
-      if (mapRef.current) { setMapReady(true); clearInterval(iv); }
-    }, 250);
+    const iv = setInterval(() => { if (mapRef.current) { setMapReady(true); clearInterval(iv); } }, 250);
     return () => clearInterval(iv);
   }, [mapRef]);
 
-  // ── Seed Firestore once if collection is empty ─────────────────────────────
+  // ── Firestore listener ─────────────────────────────────────────────────────
   useEffect(() => {
-    if (seededRef.current) return;
-    seededRef.current = true;
-    (async () => {
-      try {
-        const checkRef = doc(db, 'bounty_missions', '_seed_check');
-        const snap = await getDoc(checkRef);
-        if (!snap.exists()) {
-          await Promise.all(
-            SEED.map((m, i) => setDoc(doc(db, 'bounty_missions', `mission_${i + 1}`), m))
-          );
-          await setDoc(checkRef, { seeded: true });
-        }
-      } catch (e) { console.warn('[BountyMission] seed error:', e); }
-    })();
-  }, []);
-
-  // ── Live Firestore listener — active missions only ─────────────────────────
-  useEffect(() => {
-    const q = query(
-      collection(db, 'bounty_missions'),
-      where('status', '==', 'active'),
-    );
+    const q = query(collection(db, 'bounties'), where('status', '==', 'active'));
     const unsub = onSnapshot(q, snap => {
-      const docs: BountyMission[] = [];
+      const visited = getVisitedFakes();
+      const docs: BountyDoc[] = [];
       snap.forEach(d => {
-        if (d.id === '_seed_check') return;
         const raw = d.data();
-        const lat = Number(raw.latitude);
-        const lng = Number(raw.longitude);
+        const lat = Number(raw.latitude), lng = Number(raw.longitude);
         if (isNaN(lat) || isNaN(lng)) return;
+        if (raw.isFake && visited.has(d.id)) return; // already visited fake for this user
         docs.push({
-          id:          d.id,
-          title:       String(raw.title ?? 'مهمة'),
-          description: String(raw.description ?? ''),
-          reward:      Number(raw.reward ?? 0),
-          latitude:    lat,
-          longitude:   lng,
-          status:      raw.status as 'active' | 'claimed',
-          claimedBy:   raw.claimedBy,
+          id:            d.id,
+          pairId:        String(raw.pairId ?? d.id),
+          isFake:        Boolean(raw.isFake),
+          sponsor_name:  String(raw.sponsor_name ?? ''),
+          title:         String(raw.title ?? 'مهمة كنز'),
+          first_reward:  String(raw.first_reward ?? ''),
+          second_reward: String(raw.second_reward ?? ''),
+          third_reward:  String(raw.third_reward ?? ''),
+          fake_message:  String(raw.fake_message ?? 'أكلت المقلب خوية! 😂 اركض للموقع الثاني بسرعة!'),
+          winners_log:   Array.isArray(raw.winners_log) ? raw.winners_log : [],
+          expiresAt:     raw.expiresAt as Timestamp,
+          status:        raw.status,
+          latitude:      lat,
+          longitude:     lng,
         });
       });
-      setMissions(docs);
-    }, err => console.warn('[BountyMission] onSnapshot error:', err.message));
+      setBounties(docs);
+    }, err => console.warn('[BountyV2] snapshot:', err.message));
     return () => unsub();
   }, []);
 
-  // ── Draw / update markers when missions, map, or filterActive change ────────
+  // ── Draw markers ───────────────────────────────────────────────────────────
   useEffect(() => {
     if (!mapReady) return;
-    const map = mapRef.current;
-    if (!map) return;
-    // Hide all bounty markers when any category filter is active
+    const map = mapRef.current; if (!map) return;
+
     if (filterActive) {
       markersRef.current.forEach(m => m.remove());
       markersRef.current.clear();
       return;
     }
-    const activeIds = new Set(missions.map(m => m.id));
-    markersRef.current.forEach((marker, id) => {
-      if (!activeIds.has(id)) { marker.remove(); markersRef.current.delete(id); }
-    });
-    missions.forEach(mission => {
-      if (markersRef.current.has(mission.id)) return;
-      const marker = L.marker([mission.latitude, mission.longitude], {
-        icon:         makeMissionIcon(),
-        zIndexOffset: 2000,
-      }).addTo(map);
-      marker.on('click', () => { setSelected(mission); setClaimResult(null); });
-      markersRef.current.set(mission.id, marker);
-    });
-  }, [missions, mapReady, mapRef, filterActive]);
 
-  // ── Sync selected with live mission list ─────────────────────────────────
+    const ids = new Set(bounties.map(b => b.id));
+    markersRef.current.forEach((m, id) => { if (!ids.has(id)) { m.remove(); markersRef.current.delete(id); } });
+
+    bounties.forEach(b => {
+      if (markersRef.current.has(b.id)) return;
+      const marker = L.marker([b.latitude, b.longitude], { icon: makeMissionIcon(), zIndexOffset: 2000 }).addTo(map);
+      marker.on('click', () => { setSelected(b); setPhase('idle'); });
+      markersRef.current.set(b.id, marker);
+    });
+  }, [bounties, mapReady, mapRef, filterActive]);
+
+  // ── Countdown overlays ─────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!mapReady) return;
+    const updateOverlays = () => {
+      const map = mapRef.current; if (!map) return;
+      const now = Date.now();
+      const next: Array<{id:string;x:number;y:number;ms:number}> = [];
+      bounties.forEach(b => {
+        if (!b.expiresAt || filterActive) return;
+        const ms = b.expiresAt.toMillis() - now;
+        if (ms <= 0) {
+          updateDoc(doc(db, 'bounties', b.id), { status: 'expired' }).catch(() => {});
+          return;
+        }
+        const marker = markersRef.current.get(b.id); if (!marker) return;
+        const pt = map.latLngToContainerPoint([b.latitude, b.longitude]);
+        next.push({ id: b.id, x: pt.x, y: pt.y, ms });
+      });
+      setOverlays(next);
+    };
+    updateOverlays();
+    const iv = setInterval(updateOverlays, 1000);
+    const map = mapRef.current;
+    if (map) map.on('move zoom resize', updateOverlays);
+    return () => {
+      clearInterval(iv);
+      if (map) map.off('move zoom resize', updateOverlays);
+    };
+  }, [bounties, mapReady, mapRef, filterActive]);
+
+  // ── Sync selected ──────────────────────────────────────────────────────────
   useEffect(() => {
     if (!selected) return;
-    const updated = missions.find(m => m.id === selected.id);
-    setSelected(updated ?? null);
+    const upd = bounties.find(b => b.id === selected.id);
+    setSelected(upd ?? null);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [missions]);
+  }, [bounties]);
 
-  // ── Internal GPS: start watching when sheet opens & userLocation is null ───
+  // ── GPS watch ──────────────────────────────────────────────────────────────
   useEffect(() => {
     if (!selected) {
-      // Sheet closed — stop watch, clear internal pos
-      if (gpsWatchRef.current !== null) {
-        navigator.geolocation?.clearWatch(gpsWatchRef.current);
-        gpsWatchRef.current = null;
-      }
-      setInternalPos(null);
-      setGpsLoading(false);
+      if (gpsWatchRef.current !== null) { navigator.geolocation?.clearWatch(gpsWatchRef.current); gpsWatchRef.current = null; }
+      setInternalPos(null); setGpsLoading(false); return;
+    }
+    if (userLocation || !navigator.geolocation) return;
+    setGpsLoading(true);
+    gpsWatchRef.current = navigator.geolocation.watchPosition(
+      p => { setInternalPos({ lat: p.coords.latitude, lng: p.coords.longitude }); setGpsLoading(false); },
+      () => setGpsLoading(false),
+      { enableHighAccuracy: true, timeout: 12000, maximumAge: 3000 },
+    );
+    return () => { if (gpsWatchRef.current !== null) { navigator.geolocation.clearWatch(gpsWatchRef.current); gpsWatchRef.current = null; } };
+  }, [selected, userLocation]);
+
+  // ── Distance ───────────────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!selected || !pos) { setDistM(null); return; }
+    setDistM(haversineMeters(pos.lat, pos.lng, selected.latitude, selected.longitude));
+  }, [selected, pos]);
+
+  // ── Claim ──────────────────────────────────────────────────────────────────
+  const handleClaim = useCallback(async () => {
+    if (!selected || claiming) return;
+
+    if (selected.isFake) {
+      markFakeVisited(selected.id);
+      markersRef.current.get(selected.id)?.remove();
+      markersRef.current.delete(selected.id);
+      setPhase('fake');
       return;
     }
 
-    // If parent already provides location, no need for internal watch
-    if (userLocation) return;
-
-    if (!navigator.geolocation) return;
-
-    setGpsLoading(true);
-    gpsWatchRef.current = navigator.geolocation.watchPosition(
-      pos => {
-        setInternalPos({ lat: pos.coords.latitude, lng: pos.coords.longitude });
-        setGpsLoading(false);
-      },
-      err => {
-        console.warn('[BountyMission] GPS error:', err.message);
-        setGpsLoading(false);
-      },
-      { enableHighAccuracy: true, timeout: 12000, maximumAge: 3000 },
-    );
-
-    return () => {
-      if (gpsWatchRef.current !== null) {
-        navigator.geolocation.clearWatch(gpsWatchRef.current);
-        gpsWatchRef.current = null;
-      }
-    };
-  }, [selected, userLocation]);
-
-  // ── Live distance calculation (haversine — always kept fresh) ────────────
-  useEffect(() => {
-    if (!selected || !effectivePos) { setDistM(null); return; }
-    const d = haversineMeters(
-      effectivePos.lat, effectivePos.lng,
-      selected.latitude, selected.longitude,
-    );
-    setDistM(d);
-  }, [selected, effectivePos]);
-
-  // ── Sheet close: reset UI state but KEEP the polyline on the map ──────────
-  // The route line stays visible so the user can follow it after closing the
-  // detail sheet. Only ❌ "إلغاء المسار" (handleStopNav) or a successful
-  // claim (handleClaim) are allowed to remove the polyline.
-  useEffect(() => {
-    if (!selected) {
-      setNavigating(false);
-      setRouteInfo(null);
-      // ⚠️ Do NOT call clearPolyline() here — route stays on the map.
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selected]);
-
-  function clearPolyline() {
-    if (polylineRef.current) {
-      polylineRef.current.remove();
-      polylineRef.current = null;
-    }
-  }
-
-  // ── Navigate: fetch OSRM road route → draw polyline + fit bounds ─────────
-  const handleNavigate = useCallback(async () => {
-    if (!selected || !effectivePos || !mapRef.current) return;
-    const map  = mapRef.current;
-    const from = effectivePos;
-    const to   = { lat: selected.latitude, lng: selected.longitude };
-
-    clearPolyline();
-    setRouteLoading(true);
-    setNavigating(true);
-    setRouteInfo(null);
-
-    try {
-      // OSRM public routing API — no key required
-      // Coords order: longitude,latitude (OSRM convention)
-      const url =
-        `https://router.project-osrm.org/route/v1/driving/` +
-        `${from.lng},${from.lat};${to.lng},${to.lat}` +
-        `?overview=full&geometries=geojson`;
-
-      const res  = await fetch(url, { signal: AbortSignal.timeout(10_000) });
-      const data = await res.json();
-
-      if (data.code === 'Ok' && data.routes?.length) {
-        const route = data.routes[0];
-
-        // GeoJSON coords are [lng, lat] — flip to [lat, lng] for Leaflet
-        const latlngs: L.LatLngTuple[] = (
-          route.geometry.coordinates as [number, number][]
-        ).map(([lng, lat]) => [lat, lng]);
-
-        // Draw road-following polyline
-        polylineRef.current = L.polyline(latlngs, {
-          color:     C.yellow,
-          weight:    5,
-          opacity:   0.95,
-          className: 'bounty-nav-line',
-        }).addTo(map);
-
-        // Fit the full route on screen
-        map.fitBounds(polylineRef.current.getBounds(), {
-          padding: [55, 55],
-          maxZoom: 16,
-          animate: true,
-          duration: 0.9,
-        });
-
-        setRouteInfo({
-          distM:       route.distance,    // metres (real road)
-          durationSec: route.duration,    // seconds
-        });
-      } else {
-        // OSRM fallback — no route found, draw straight line
-        console.warn('[BountyMission] OSRM no route, using fallback');
-        const pts: L.LatLngTuple[] = [
-          [from.lat, from.lng],
-          [to.lat,   to.lng],
-        ];
-        polylineRef.current = L.polyline(pts, {
-          color:     C.yellow,
-          weight:    4,
-          opacity:   0.88,
-          dashArray: '10 6',
-          className: 'bounty-nav-line',
-        }).addTo(map);
-        map.fitBounds(L.latLngBounds(pts), {
-          padding: [60, 60], maxZoom: 16, animate: true, duration: 0.8,
-        });
-      }
-    } catch (err) {
-      console.warn('[BountyMission] OSRM fetch error:', err);
-      // Straight-line fallback on network error
-      const pts: L.LatLngTuple[] = [
-        [from.lat, from.lng],
-        [to.lat,   to.lng],
-      ];
-      if (mapRef.current) {
-        polylineRef.current = L.polyline(pts, {
-          color:     C.yellow,
-          weight:    4,
-          opacity:   0.88,
-          dashArray: '10 6',
-          className: 'bounty-nav-line',
-        }).addTo(mapRef.current);
-        mapRef.current.fitBounds(L.latLngBounds(pts), {
-          padding: [60, 60], maxZoom: 16, animate: true, duration: 0.8,
-        });
-      }
-    } finally {
-      setRouteLoading(false);
-    }
-  }, [selected, effectivePos, mapRef]);
-
-  // ── Stop navigation — clear polyline + reset camera ─────────────────────
-  const handleStopNav = useCallback(() => {
-    clearPolyline();
-    setNavigating(false);
-    setRouteInfo(null);
-
-    // Reset camera: zoom back to fit user + mission without the route
-    if (mapRef.current && effectivePos && selected) {
-      const pts: L.LatLngTuple[] = [
-        [effectivePos.lat, effectivePos.lng],
-        [selected.latitude, selected.longitude],
-      ];
-      mapRef.current.fitBounds(L.latLngBounds(pts), {
-        padding: [90, 90],
-        maxZoom: 15,
-        animate: true,
-        duration: 0.7,
-      });
-    }
-  }, [mapRef, effectivePos, selected]);
-
-  // ── Claim handler — Firestore atomic transaction ──────────────────────────
-  const handleClaim = useCallback(async () => {
-    if (!selected) return;
-    const user        = getUser();
-    const userId      = user?.phone ?? user?.name ?? 'anonymous';
-    const firebaseUid = auth.currentUser?.uid;
+    const user      = getUser();
+    const uid       = auth.currentUser?.uid ?? user?.phone ?? user?.name ?? 'anonymous';
+    const uname     = user?.name ?? uid;
     setClaiming(true);
-    setClaimResult(null);
     try {
-      const missionRef = doc(db, 'bounty_missions', selected.id);
+      let rank = 0;
       await runTransaction(db, async txn => {
-        const missionSnap = await txn.get(missionRef);
-        if (!missionSnap.exists() || missionSnap.data()?.status !== 'active') {
-          throw new Error('already_claimed');
-        }
-        const prizeAmount = Number(missionSnap.data()?.reward ?? 0);
-        txn.update(missionRef, {
-          status:    'claimed',
-          claimedBy: userId,
-          claimedAt: serverTimestamp(),
-        });
-        if (firebaseUid && prizeAmount > 0) {
-          const userRef = doc(db, 'users', firebaseUid);
-          txn.set(userRef, { balance: increment(prizeAmount) }, { merge: true });
-        }
+        const ref = doc(db, 'bounties', selected.id);
+        const snap = await txn.get(ref);
+        if (!snap.exists() || snap.data()?.status !== 'active') throw new Error('closed');
+        const log: WinnerEntry[] = snap.data()?.winners_log ?? [];
+        if (log.length >= 3) throw new Error('full');
+        rank = log.length + 1;
+        const entry: WinnerEntry = { uid, name: uname, rank, claimedAt: serverTimestamp() };
+        const upd: Record<string,any> = { winners_log: arrayUnion(entry) };
+        if (rank === 3) upd.status = 'closed';
+        txn.update(ref, upd);
       });
-      setClaimResult('success');
-      clearPolyline();
-      setNavigating(false);
-      setTimeout(() => { setSelected(null); setClaimResult(null); }, 3500);
+      setPhase(rank === 1 ? 'rank1' : rank === 2 ? 'rank2' : 'rank3');
     } catch (e: any) {
-      setClaimResult(e?.message === 'already_claimed' ? 'taken' : 'error');
+      setPhase(e?.message === 'full' || e?.message === 'closed' ? 'full' : 'error');
     } finally {
       setClaiming(false);
     }
-  }, [selected]);
+  }, [selected, claiming]);
 
-  // ── Nothing to render if no selection ────────────────────────────────────
-  if (!selected) return null;
+  const closeSheet = () => { setSelected(null); setPhase('idle'); setDistM(null); };
 
-  const isClose = distM !== null && distM <= CLAIM_RADIUS_M;
-  const locReady = effectivePos !== null;
+  if (!mapReady) return null;
 
-  // ── Distance / travel info ────────────────────────────────────────────────
-  const distStr  = distM !== null ? fmtDist(distM) : null;
-  const minutes  = distM !== null ? estMinutes(distM) : null;
-  const mode     = distM !== null ? travelMode(distM) : null;
+  const isClose  = distM !== null && distM <= CLAIM_RADIUS_M;
+  const locReady = pos !== null;
+  const selMs    = selected?.expiresAt ? selected.expiresAt.toMillis() - Date.now() : null;
 
   return (
     <>
       <style>{`
-        @keyframes bounty-slide-up { from { transform: translateY(100%); } to { transform: translateY(0); } }
-        @keyframes bounty-glow     { 0%,100%{box-shadow:0 0 20px #f5c51888,0 0 40px #f5c51844;} 50%{box-shadow:0 0 40px #f5c518cc,0 0 60px #f5c51866;} }
-        @keyframes bounty-success  { 0%{transform:scale(0.8);opacity:0;} 60%{transform:scale(1.08);} 100%{transform:scale(1);opacity:1;} }
-        @keyframes nav-dash        { to { stroke-dashoffset: -32; } }
-        .bounty-nav-line           { filter: drop-shadow(0 0 6px #f5c518cc); animation: none; }
+        @keyframes bms-pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.08)}}
+        @keyframes bms-up{from{transform:translateY(100%)}to{transform:translateY(0)}}
+        @keyframes bms-pop{0%{transform:scale(0.5);opacity:0}60%{transform:scale(1.15)}100%{transform:scale(1);opacity:1}}
+        @keyframes bms-blink{0%,100%{opacity:1}50%{opacity:0.5}}
+        @keyframes bms-gold{0%,100%{box-shadow:0 0 30px #FFD70099,0 0 60px #FFD70033}50%{box-shadow:0 0 50px #FFD700cc,0 0 80px #FFD70055}}
+        @keyframes bms-silver{0%,100%{box-shadow:0 0 30px #C0C0C099}50%{box-shadow:0 0 50px #C0C0C0cc}}
+        @keyframes bms-bronze{0%,100%{box-shadow:0 0 30px #CD7F3299}50%{box-shadow:0 0 50px #CD7F32cc}}
       `}</style>
 
-      {/* Backdrop */}
-      <div
-        onClick={() => { setSelected(null); setClaimResult(null); }}
-        style={{
-          position: 'absolute', inset: 0, zIndex: 3000,
-          background: 'rgba(0,0,0,0.52)',
-          backdropFilter: 'blur(3px)',
-        }}
-      />
-
-      {/* Bottom Sheet */}
-      <div style={{
-        position: 'absolute', bottom: 0, left: 0, right: 0, zIndex: 3001,
-        background: isDay ? 'rgba(248,249,252,0.98)' : 'rgba(5,8,15,0.99)',
-        borderTop: '2px solid #f5c518',
-        boxShadow: '0 -8px 48px rgba(245,197,24,0.28), 0 -2px 16px rgba(245,197,24,0.14)',
-        backdropFilter: 'blur(20px)',
-        padding: '20px 20px 36px',
-        direction: 'rtl',
-        animation: 'bounty-slide-up 0.35s cubic-bezier(0.34,1.56,0.64,1)',
-        fontFamily: 'Rajdhani, sans-serif',
-        maxHeight: '82vh',
-        overflowY: 'auto',
-      }}>
-
-        {/* Close ✕ */}
-        <button
-          onClick={() => { setSelected(null); setClaimResult(null); }}
-          style={{
-            position: 'absolute', top: '12px', left: '16px',
-            background: 'none', border: 'none',
-            color: isDay ? 'rgba(13,17,23,0.35)' : 'rgba(255,255,255,0.35)', fontSize: '22px',
-            cursor: 'pointer', padding: '4px', lineHeight: 1,
-            transition: 'color 0.2s',
-          }}
-          onMouseEnter={e => (e.currentTarget.style.color = isDay ? '#0d1117' : '#fff')}
-          onMouseLeave={e => (e.currentTarget.style.color = isDay ? 'rgba(13,17,23,0.35)' : 'rgba(255,255,255,0.35)')}
-        >×</button>
-
-        {/* ── Mission header ── */}
-        <div style={{ display: 'flex', alignItems: 'flex-start', gap: '12px', marginBottom: '14px' }}>
-          <div style={{ fontSize: '36px', lineHeight: 1, filter: 'drop-shadow(0 0 12px #f5c518)', flexShrink: 0 }}>⭐</div>
-          <div style={{ flex: 1 }}>
-            <div style={{
-              fontFamily: 'Orbitron, sans-serif', fontSize: '8px',
-              color: '#f5c518', letterSpacing: '0.2em', marginBottom: '4px',
-            }}>⚡ BOUNTY MISSION · مهمة جائزة</div>
-            <div style={{ fontSize: '19px', fontWeight: 800, color: isDay ? '#0d1117' : '#fff', lineHeight: 1.25 }}>
-              {selected.title}
-            </div>
-          </div>
-        </div>
-
-        {/* Description */}
-        <div style={{
-          fontSize: '14px', color: isDay ? 'rgba(13,17,23,0.6)' : 'rgba(255,255,255,0.55)',
-          lineHeight: 1.7, marginBottom: '16px',
-          paddingBottom: '14px',
-          borderBottom: '1px solid rgba(245,197,24,0.1)',
+      {/* ── Countdown overlays ── */}
+      {!filterActive && overlays.map(o => (
+        <div key={o.id} style={{
+          position: 'absolute', left: o.x, top: o.y - 66,
+          transform: 'translateX(-50%)',
+          zIndex: 1800, pointerEvents: 'none',
+          background: 'rgba(10,13,20,0.92)',
+          border: `1px solid ${CL.yellow}88`,
+          borderRadius: '20px', padding: '3px 10px',
+          display: 'flex', alignItems: 'center', gap: '5px',
+          boxShadow: `0 0 12px ${CL.yellow}44`,
+          backdropFilter: 'blur(4px)',
+          animation: o.ms < 60_000 ? 'bms-blink 1s ease-in-out infinite' : 'none',
         }}>
-          {selected.description}
-        </div>
-
-        {/* Reward */}
-        <div style={{
-          display: 'flex', alignItems: 'center',
-          justifyContent: 'space-between', marginBottom: '14px',
-        }}>
-          <div style={{ fontSize: '13px', color: isDay ? 'rgba(13,17,23,0.45)' : 'rgba(255,255,255,0.4)' }}>قيمة الجائزة</div>
-          <div style={{
-            fontFamily: 'Orbitron, sans-serif', fontSize: '17px',
-            color: '#f5c518', fontWeight: 700,
-            textShadow: '0 0 16px #f5c51888, 0 0 32px #f5c51844',
+          <span style={{ fontSize: '9px' }}>⏰</span>
+          <span style={{
+            fontFamily: 'Orbitron, monospace', fontSize: '11px', fontWeight: 700,
+            letterSpacing: '0.08em',
+            color: o.ms < 60_000 ? CL.red : o.ms < 300_000 ? CL.yellow : CL.green,
           }}>
-            🎁 {selected.reward.toLocaleString('ar-IQ')} دينار
-          </div>
+            {fmtMmSs(o.ms)}
+          </span>
         </div>
+      ))}
 
-        {/* ── Distance badge ── */}
-        <div style={{
-          display: 'flex', alignItems: 'center', gap: '10px',
-          marginBottom: '14px', padding: '10px 14px',
-          background: isClose
-            ? 'rgba(0,220,100,0.07)'
-            : locReady
-            ? 'rgba(245,197,24,0.05)'
-            : 'rgba(255,255,255,0.03)',
-          border: `1px solid ${
-            isClose   ? 'rgba(0,220,100,0.3)' :
-            locReady  ? 'rgba(245,197,24,0.18)' :
-                        'rgba(255,255,255,0.08)'
-          }`,
-          borderRadius: '3px',
-        }}>
-          {/* Pulse dot */}
+      {/* ── Bottom Sheet ── */}
+      {selected && (
+        <>
+          <div onClick={closeSheet} style={{ position:'absolute',inset:0,zIndex:3000,background:'rgba(0,0,0,0.55)',backdropFilter:'blur(3px)' }} />
           <div style={{
-            width: '8px', height: '8px', borderRadius: '50%', flexShrink: 0,
-            background: isClose ? C.green : locReady ? C.yellow : 'rgba(255,255,255,0.25)',
-            boxShadow: isClose ? `0 0 8px ${C.green}` : locReady ? `0 0 8px ${C.yellow}` : 'none',
-            animation: locReady ? 'lf-ping 1.8s ease-in-out infinite' : 'none',
-          }} />
-          <div style={{ flex: 1 }}>
-            <div style={{
-              fontFamily: 'Orbitron, sans-serif', fontSize: '8px', letterSpacing: '0.12em',
-              color: isClose ? C.green : locReady ? C.yellow : C.dim,
-              marginBottom: '2px',
-            }}>
-              {isClose ? '✓ أنت داخل نطاق المهمة' : '📍 المسافة عن الهدف'}
-            </div>
+            position:'absolute',bottom:0,left:0,right:0,zIndex:3001,
+            background: isDay ? 'rgba(248,249,252,0.99)' : 'rgba(5,8,15,0.99)',
+            borderTop:`2px solid ${CL.yellow}`,
+            boxShadow:`0 -8px 48px ${CL.yellow}28`,
+            backdropFilter:'blur(20px)',
+            padding:'20px 20px 44px',
+            direction:'rtl', fontFamily:'Rajdhani, sans-serif',
+            maxHeight:'84vh', overflowY:'auto',
+            animation:'bms-up 0.35s cubic-bezier(0.34,1.56,0.64,1)',
+          }}>
+            <button onClick={closeSheet} style={{ position:'absolute',top:'12px',left:'16px',background:'none',border:'none',color:'rgba(255,255,255,0.3)',fontSize:'22px',cursor:'pointer' }}>×</button>
 
-            {/* Distance value */}
-            {gpsLoading && !locReady ? (
-              <div style={{ display: 'flex', alignItems: 'center', gap: '7px' }}>
-                <svg width="12" height="12" viewBox="0 0 28 28" fill="none"
-                  style={{ animation: 'lf-spin 1s linear infinite', flexShrink: 0 }}>
-                  <circle cx="14" cy="14" r="10" stroke={C.yellow}
-                    strokeWidth="2.5" strokeDasharray="22 14" strokeLinecap="round"/>
-                </svg>
-                <span style={{ fontSize: '13px', color: C.dim }}>جاري تحديد موقعك بدقة...</span>
-              </div>
-            ) : !locReady ? (
-              <div style={{ fontSize: '13px', color: C.dim }}>
-                تعذّر الوصول إلى GPS — أعطِ التطبيق إذن الموقع
-              </div>
-            ) : (
-              <div style={{ fontSize: '15px', fontWeight: 700, color: isClose ? C.green : '#fff' }}>
-                {distStr}
-                {!isClose && distM !== null && (
-                  <span style={{ fontSize: '11px', color: 'rgba(255,255,255,0.3)', marginRight: '6px' }}>
-                    — تحتاج أقل من {CLAIM_RADIUS_M} م للاستلام
-                  </span>
-                )}
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* ── Navigate button + travel info (only when location known & not close) ── */}
-        {locReady && !isClose && !claimResult && (
-          <div style={{ marginBottom: '14px' }}>
-
-            {/* Navigate / Loading / Stop nav button */}
-            {!navigating ? (
-              <button
-                onClick={handleNavigate}
-                style={{
-                  width: '100%', padding: '13px 16px',
-                  background: 'rgba(0,212,255,0.09)',
-                  border: `1px solid ${C.blue}66`,
-                  color: C.blue,
-                  fontFamily: 'Orbitron, sans-serif', fontSize: '11px',
-                  letterSpacing: '0.14em', cursor: 'pointer',
-                  borderRadius: '3px', transition: 'all 0.2s',
-                  display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px',
-                  boxShadow: `0 0 14px ${C.blue}22`,
-                  marginBottom: '10px',
-                }}
-                onMouseEnter={e => {
-                  e.currentTarget.style.background = 'rgba(0,212,255,0.16)';
-                  e.currentTarget.style.boxShadow  = `0 0 20px ${C.blue}44`;
-                }}
-                onMouseLeave={e => {
-                  e.currentTarget.style.background = 'rgba(0,212,255,0.09)';
-                  e.currentTarget.style.boxShadow  = `0 0 14px ${C.blue}22`;
-                }}
-              >
-                🧭 الذهاب إلى المهمة
-              </button>
-            ) : routeLoading ? (
-              /* Loading state while fetching OSRM route */
-              <div style={{
-                width: '100%', padding: '13px 16px',
-                background: 'rgba(0,212,255,0.05)',
-                border: `1px solid ${C.blue}33`,
-                borderRadius: '3px', marginBottom: '10px',
-                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px',
-              }}>
-                <svg width="14" height="14" viewBox="0 0 28 28" fill="none"
-                  style={{ animation: 'lf-spin 0.9s linear infinite', flexShrink: 0 }}>
-                  <circle cx="14" cy="14" r="10" stroke={C.blue}
-                    strokeWidth="2.5" strokeDasharray="22 14" strokeLinecap="round"/>
-                </svg>
-                <span style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '9px', color: C.blue, letterSpacing: '0.1em' }}>
-                  جاري حساب المسار عبر الشوارع...
-                </span>
-              </div>
-            ) : (
-              <div style={{ display: 'flex', gap: '8px', marginBottom: '10px' }}>
-                {/* Active route indicator */}
-                <div style={{
-                  flex: 1, padding: '11px 14px',
-                  background: 'rgba(0,212,255,0.06)',
-                  border: `1px solid ${C.blue}33`,
-                  borderRadius: '3px',
-                  display: 'flex', alignItems: 'center', gap: '8px',
-                }}>
-                  <div style={{
-                    width: '7px', height: '7px', borderRadius: '50%', flexShrink: 0,
-                    background: C.yellow, boxShadow: `0 0 7px ${C.yellow}`,
-                    animation: 'lf-ping 1.4s ease-in-out infinite',
-                  }} />
-                  <span style={{
-                    fontFamily: 'Orbitron, sans-serif', fontSize: '8px',
-                    color: C.blue, letterSpacing: '0.1em',
-                  }}>المسار نشط على الخريطة</span>
-                </div>
-                {/* Cancel route button */}
-                <button
-                  onClick={handleStopNav}
-                  style={{
-                    padding: '11px 16px', flexShrink: 0,
-                    background: 'rgba(255,45,80,0.09)',
-                    border: `1px solid ${C.red}55`,
-                    color: C.red,
-                    fontFamily: 'Orbitron, sans-serif', fontSize: '9px',
-                    letterSpacing: '0.1em', cursor: 'pointer',
-                    borderRadius: '3px', transition: 'all 0.18s',
-                    display: 'flex', alignItems: 'center', gap: '5px',
-                  }}
-                  onMouseEnter={e => {
-                    e.currentTarget.style.background = `rgba(255,45,80,0.18)`;
-                    e.currentTarget.style.boxShadow  = `0 0 14px ${C.red}33`;
-                  }}
-                  onMouseLeave={e => {
-                    e.currentTarget.style.background = `rgba(255,45,80,0.09)`;
-                    e.currentTarget.style.boxShadow  = 'none';
-                  }}
-                >
-                  ❌ إلغاء المسار
-                </button>
+            {/* ── Result Screens ── */}
+            {phase === 'fake' && <FakeScreen msg={selected.fake_message} onClose={closeSheet} />}
+            {phase === 'rank1' && <WinScreen rank={1} reward={selected.first_reward} sponsor={selected.sponsor_name} onClose={closeSheet} />}
+            {phase === 'rank2' && <WinScreen rank={2} reward={selected.second_reward} sponsor={selected.sponsor_name} onClose={closeSheet} />}
+            {phase === 'rank3' && <WinScreen rank={3} reward={selected.third_reward} sponsor={selected.sponsor_name} onClose={closeSheet} />}
+            {phase === 'full'  && <FullScreen onClose={closeSheet} />}
+            {phase === 'error' && (
+              <div style={{ textAlign:'center', padding:'20px' }}>
+                <div style={{ fontSize:'32px',marginBottom:'8px' }}>⚠️</div>
+                <div style={{ color:CL.red, fontFamily:'Orbitron, sans-serif', fontSize:'11px' }}>حدث خطأ — حاول مجدداً</div>
+                <button onClick={() => setPhase('idle')} style={{ marginTop:'14px',padding:'8px 20px',background:`${CL.red}15`,border:`1px solid ${CL.red}55`,color:CL.red,borderRadius:'3px',cursor:'pointer',fontFamily:'Orbitron, sans-serif',fontSize:'9px' }}>إعادة المحاولة</button>
               </div>
             )}
 
-            {/* ── Travel info card ── */}
-            {(() => {
-              // Prefer OSRM real-road data; fall back to haversine
-              const useRoute  = routeInfo !== null;
-              const showDist  = useRoute ? fmtDist(routeInfo!.distM) : distStr;
-              const showMins  = useRoute
-                ? Math.max(1, Math.round(routeInfo!.durationSec / 60))
-                : minutes;
-              const showMode  = useRoute ? '🚗 عبر الطريق الفعلي' : mode;
-              if (!showDist || showMins === null) return null;
-              return (
-                <div>
-                  {/* "Via road" badge — only when OSRM data is available */}
-                  {useRoute && (
-                    <div style={{
-                      display: 'flex', alignItems: 'center', gap: '6px',
-                      marginBottom: '6px', padding: '5px 10px',
-                      background: 'rgba(123,47,247,0.08)',
-                      border: '1px solid rgba(123,47,247,0.28)',
-                      borderRadius: '2px',
-                    }}>
-                      <span style={{ fontSize: '10px' }}>🗺️</span>
-                      <span style={{
-                        fontFamily: 'Orbitron, sans-serif', fontSize: '7px',
-                        color: '#a78bfa', letterSpacing: '0.1em',
-                      }}>مسار حقيقي عبر شبكة الطرق · OSRM ROUTING</span>
-                    </div>
-                  )}
-                  <div style={{ display: 'flex', gap: '8px' }}>
-                    {/* Distance chip */}
-                    <div style={{
-                      flex: 1, padding: '8px 12px',
-                      background: 'rgba(245,197,24,0.06)',
-                      border: '1px solid rgba(245,197,24,0.18)',
-                      borderRadius: '3px', textAlign: 'center',
-                    }}>
-                      <div style={{
-                        fontFamily: 'Orbitron, sans-serif', fontSize: '7px',
-                        color: 'rgba(245,197,24,0.55)', letterSpacing: '0.1em', marginBottom: '4px',
-                      }}>المسافة {useRoute ? 'عبر الطريق' : 'الهوائية'}</div>
-                      <div style={{
-                        fontFamily: 'Orbitron, sans-serif', fontSize: '14px',
-                        color: C.yellow, fontWeight: 700,
-                      }}>{showDist}</div>
-                    </div>
-                    {/* Time chip */}
-                    <div style={{
-                      flex: 1, padding: '8px 12px',
-                      background: 'rgba(0,212,255,0.05)',
-                      border: '1px solid rgba(0,212,255,0.18)',
-                      borderRadius: '3px', textAlign: 'center',
-                    }}>
-                      <div style={{
-                        fontFamily: 'Orbitron, sans-serif', fontSize: '7px',
-                        color: 'rgba(0,212,255,0.55)', letterSpacing: '0.1em', marginBottom: '4px',
-                      }}>الوقت المتوقع</div>
-                      <div style={{
-                        fontFamily: 'Orbitron, sans-serif', fontSize: '14px',
-                        color: C.blue, fontWeight: 700,
-                      }}>~{showMins} دقيقة</div>
-                      <div style={{ fontSize: '10px', color: 'rgba(255,255,255,0.25)', marginTop: '1px' }}>
-                        {showMode}
-                      </div>
+            {/* ── Main Info (idle) ── */}
+            {phase === 'idle' && (
+              <>
+                {/* Header */}
+                <div style={{ display:'flex',alignItems:'flex-start',gap:'12px',marginBottom:'14px' }}>
+                  <div style={{ fontSize:'34px',lineHeight:1,filter:`drop-shadow(0 0 12px ${CL.yellow})`,flexShrink:0 }}>⭐</div>
+                  <div style={{ flex:1 }}>
+                    <div style={{ fontFamily:'Orbitron, sans-serif',fontSize:'8px',color:CL.yellow,letterSpacing:'0.2em',marginBottom:'3px' }}>⚡ BOUNTY HUNT · مطاردة الكنز</div>
+                    <div style={{ fontSize:'18px',fontWeight:800,color:isDay?'#0d1117':'#fff',lineHeight:1.25 }}>{selected.title}</div>
+                    <div style={{ fontSize:'12px',color:CL.dim,marginTop:'2px' }}>
+                      راعي المهمة: <strong style={{ color:CL.yellow }}>{selected.sponsor_name}</strong>
                     </div>
                   </div>
                 </div>
-              );
-            })()}
-          </div>
-        )}
 
-        {/* ── Claim result feedback ── */}
-        {claimResult === 'success' && (
-          <div style={{
-            textAlign: 'center', padding: '16px',
-            background: 'rgba(0,220,100,0.09)',
-            border: '1px solid rgba(0,220,100,0.4)',
-            borderRadius: '3px', marginBottom: '12px',
-            animation: 'bounty-success 0.5s ease',
-          }}>
-            <div style={{ fontSize: '32px', marginBottom: '6px' }}>🎉</div>
-            <div style={{
-              fontFamily: 'Orbitron, sans-serif', fontSize: '11px',
-              color: C.green, letterSpacing: '0.14em',
-            }}>تهانينا! — استلمت الجائزة بنجاح</div>
-          </div>
-        )}
+                {/* Countdown in sheet */}
+                {selMs !== null && selMs > 0 && (
+                  <div style={{ display:'flex',alignItems:'center',justifyContent:'center',gap:'12px',marginBottom:'14px',padding:'12px 16px',background:`${CL.yellow}08`,border:`1px solid ${CL.yellow}33`,borderRadius:'8px' }}>
+                    <span style={{ fontSize:'18px' }}>⏰</span>
+                    <div>
+                      <div style={{ fontFamily:'Orbitron, sans-serif',fontSize:'8px',color:CL.dim,letterSpacing:'0.1em',marginBottom:'3px' }}>الوقت المتبقي</div>
+                      <LiveCountdown expiresAt={selected.expiresAt} />
+                    </div>
+                  </div>
+                )}
+                {selMs !== null && selMs <= 0 && (
+                  <div style={{ textAlign:'center',padding:'12px',background:`${CL.red}10`,border:`1px solid ${CL.red}44`,borderRadius:'6px',marginBottom:'14px',color:CL.red,fontFamily:'Orbitron, sans-serif',fontSize:'10px' }}>
+                    ⚠ انتهت مدة المهمة
+                  </div>
+                )}
 
-        {claimResult === 'taken' && (
-          <div style={{
-            textAlign: 'center', padding: '12px',
-            background: 'rgba(255,45,80,0.07)',
-            border: '1px solid rgba(255,45,80,0.35)',
-            borderRadius: '3px', marginBottom: '12px',
-          }}>
-            <div style={{ fontSize: '22px', marginBottom: '4px' }}>⚡</div>
-            <div style={{
-              fontFamily: 'Orbitron, sans-serif', fontSize: '10px',
-              color: C.red, letterSpacing: '0.1em',
-            }}>سبقك شخص آخر — الجائزة محجوزة</div>
-          </div>
-        )}
+                {/* Top-3 Prizes */}
+                <div style={{ display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'8px',marginBottom:'14px' }}>
+                  {[
+                    { emoji:'🥇',label:'الأول',val:selected.first_reward,color:CL.gold },
+                    { emoji:'🥈',label:'الثاني',val:selected.second_reward,color:CL.silver },
+                    { emoji:'🥉',label:'الثالث',val:selected.third_reward,color:CL.bronze },
+                  ].map(p => (
+                    <div key={p.label} style={{ padding:'10px 8px',background:`${p.color}0C`,border:`1px solid ${p.color}44`,borderRadius:'8px',textAlign:'center' }}>
+                      <div style={{ fontSize:'20px',marginBottom:'4px' }}>{p.emoji}</div>
+                      <div style={{ fontFamily:'Rajdhani, sans-serif',fontSize:'12px',color:p.color,fontWeight:700,lineHeight:1.3 }}>{p.val||'—'}</div>
+                      <div style={{ fontSize:'9px',color:CL.dim,marginTop:'2px' }}>المركز {p.label}</div>
+                    </div>
+                  ))}
+                </div>
 
-        {claimResult === 'error' && (
-          <div style={{
-            textAlign: 'center', padding: '10px',
-            background: 'rgba(255,45,80,0.07)',
-            border: '1px solid rgba(255,45,80,0.3)',
-            borderRadius: '3px', marginBottom: '12px',
-          }}>
-            <div style={{
-              fontFamily: 'Orbitron, sans-serif', fontSize: '10px', color: C.red,
-            }}>خطأ في الاتصال — حاول مرة أخرى</div>
-          </div>
-        )}
+                {/* Winners count bar */}
+                <div style={{ display:'flex',alignItems:'center',gap:'8px',marginBottom:'14px',padding:'8px 12px',background:`${CL.yellow}06`,border:`1px solid ${CL.yellow}22`,borderRadius:'4px' }}>
+                  <span style={{ fontSize:'14px' }}>🏆</span>
+                  <span style={{ fontFamily:'Rajdhani, sans-serif',fontSize:'13px',color:CL.dim }}>
+                    الفائزون حتى الآن: <strong style={{ color:CL.yellow }}>{selected.winners_log.length} / 3</strong>
+                  </span>
+                  <div style={{ flex:1, height:'4px', background:'rgba(255,255,255,0.08)', borderRadius:'2px', overflow:'hidden' }}>
+                    <div style={{ height:'100%', width:`${(selected.winners_log.length/3)*100}%`, background:CL.yellow, borderRadius:'2px', transition:'width 0.4s' }} />
+                  </div>
+                </div>
 
-        {/* ── Claim button ── */}
-        {!claimResult && (
-          <button
-            onClick={handleClaim}
-            disabled={!isClose || claiming}
-            style={{
-              width: '100%', padding: '15px',
-              background: isClose
-                ? 'rgba(245,197,24,0.14)'
-                : 'rgba(255,255,255,0.02)',
-              border: `2px solid ${isClose ? C.yellow : 'rgba(255,255,255,0.08)'}`,
-              color: isClose ? C.yellow : C.dimx,
-              fontFamily: 'Orbitron, sans-serif', fontSize: '11px',
-              letterSpacing: '0.14em',
-              cursor: (isClose && !claiming) ? 'pointer' : 'not-allowed',
-              borderRadius: '3px', transition: 'all 0.22s',
-              animation: isClose && !claiming ? 'bounty-glow 2.2s ease-in-out infinite' : 'none',
-              display: 'flex', alignItems: 'center',
-              justifyContent: 'center', gap: '8px',
-            }}
-            onMouseEnter={e => {
-              if (isClose && !claiming)
-                (e.currentTarget as HTMLElement).style.background = 'rgba(245,197,24,0.24)';
-            }}
-            onMouseLeave={e => {
-              if (isClose && !claiming)
-                (e.currentTarget as HTMLElement).style.background = 'rgba(245,197,24,0.14)';
-            }}
-          >
-            {claiming ? (
-              <>
-                <svg width="14" height="14" viewBox="0 0 28 28" fill="none"
-                  style={{ animation: 'lf-spin 0.9s linear infinite' }}>
-                  <circle cx="14" cy="14" r="10" stroke={C.yellow}
-                    strokeWidth="2.5" strokeDasharray="22 14" strokeLinecap="round"/>
-                </svg>
-                جاري الاستلام...
+                {/* Distance */}
+                <div style={{
+                  display:'flex',alignItems:'center',gap:'10px',marginBottom:'16px',
+                  padding:'10px 14px',
+                  background: isClose ? `${CL.green}08` : locReady ? `${CL.yellow}05` : 'rgba(255,255,255,0.02)',
+                  border:`1px solid ${isClose?`${CL.green}44`:locReady?`${CL.yellow}22`:'rgba(255,255,255,0.07)'}`,
+                  borderRadius:'4px',
+                }}>
+                  <div style={{ width:'8px',height:'8px',borderRadius:'50%',flexShrink:0,background:isClose?CL.green:locReady?CL.yellow:'rgba(255,255,255,0.2)',boxShadow:isClose?`0 0 8px ${CL.green}`:locReady?`0 0 8px ${CL.yellow}`:'none' }} />
+                  <div style={{ flex:1 }}>
+                    <div style={{ fontFamily:'Orbitron, sans-serif',fontSize:'8px',letterSpacing:'0.12em',color:isClose?CL.green:CL.dim,marginBottom:'2px' }}>
+                      {isClose ? '✓ أنت داخل نطاق المهمة — اضغط الاستلام!' : '📍 المسافة عن الهدف'}
+                    </div>
+                    {gpsLoading && !locReady
+                      ? <span style={{ fontSize:'13px',color:CL.dim }}>جاري تحديد موقعك...</span>
+                      : !locReady
+                      ? <span style={{ fontSize:'13px',color:CL.dim }}>أعطِ التطبيق إذن الموقع</span>
+                      : <span style={{ fontSize:'15px',fontWeight:700,color:isClose?CL.green:'#fff' }}>
+                          {fmtDist(distM!)}
+                          {!isClose && <span style={{ fontSize:'11px',color:'rgba(255,255,255,0.28)',marginRight:'6px' }}>— تحتاج أقل من {CLAIM_RADIUS_M} م</span>}
+                        </span>
+                    }
+                  </div>
+                </div>
+
+                {/* Claim button */}
+                {isClose && selMs !== null && selMs > 0 && selected.winners_log.length < 3 && (
+                  <button onClick={handleClaim} disabled={claiming} style={{
+                    width:'100%',padding:'15px 20px',
+                    background: claiming ? `${CL.yellow}10` : `linear-gradient(135deg,${CL.yellow}22,${CL.yellow}0C)`,
+                    border:`2px solid ${CL.yellow}`,color:CL.yellow,
+                    fontFamily:'Orbitron, sans-serif',fontSize:'12px',letterSpacing:'0.15em',
+                    cursor:claiming?'wait':'pointer',borderRadius:'6px',
+                    boxShadow:`0 0 24px ${CL.yellow}44,0 0 48px ${CL.yellow}18`,
+                    display:'flex',alignItems:'center',justifyContent:'center',gap:'10px',
+                    animation:claiming?'none':'bms-gold 2s ease-in-out infinite',
+                  }}>
+                    {claiming
+                      ? <><svg width="16" height="16" viewBox="0 0 28 28" fill="none" style={{ animation:'lf-spin 1s linear infinite' }}><circle cx="14" cy="14" r="10" stroke={CL.yellow} strokeWidth="2.5" strokeDasharray="22 14"/></svg>جاري التحقق...</>
+                      : '🎯 أنا وصلت — استلام الجائزة!'
+                    }
+                  </button>
+                )}
+                {locReady && !isClose && selMs !== null && selMs > 0 && (
+                  <div style={{ textAlign:'center',padding:'12px',color:CL.dim,fontFamily:'Rajdhani, sans-serif',fontSize:'13px' }}>
+                    اقترب أكثر من الموقع لتفعيل زر الاستلام ⭐
+                  </div>
+                )}
               </>
-            ) : isClose ? (
-              '🎁 استلام الجائزة'
-            ) : (
-              '📍 اقترب من موقع المهمة للاستلام'
             )}
-          </button>
-        )}
-      </div>
+          </div>
+        </>
+      )}
     </>
+  );
+}
+
+// ── Sub-components ─────────────────────────────────────────────────────────────
+
+function LiveCountdown({ expiresAt }: { expiresAt: Timestamp }) {
+  const [ms, setMs] = useState(() => expiresAt.toMillis() - Date.now());
+  useEffect(() => {
+    const iv = setInterval(() => setMs(expiresAt.toMillis() - Date.now()), 1000);
+    return () => clearInterval(iv);
+  }, [expiresAt]);
+  const color = ms < 60_000 ? '#ff2d50' : ms < 300_000 ? '#f5c518' : '#00dc64';
+  return (
+    <span style={{ fontFamily:'Orbitron, monospace',fontSize:'24px',fontWeight:900,color,letterSpacing:'0.08em',textShadow:`0 0 20px ${color}88` }}>
+      {fmtMmSs(Math.max(0, ms))}
+    </span>
+  );
+}
+
+function FakeScreen({ msg, onClose }: { msg: string; onClose: () => void }) {
+  return (
+    <div style={{ textAlign:'center',padding:'10px 0 20px',animation:'bms-pop 0.5s cubic-bezier(0.34,1.56,0.64,1)' }}>
+      <div style={{ fontSize:'58px',marginBottom:'10px',filter:'drop-shadow(0 0 20px #ff2d50)' }}>🎭</div>
+      <div style={{ fontFamily:'Orbitron, sans-serif',fontSize:'14px',color:'#ff2d50',letterSpacing:'0.12em',marginBottom:'12px',textShadow:'0 0 20px #ff2d5088' }}>
+        أكلت المقلب! 😂
+      </div>
+      <div style={{ fontFamily:'Rajdhani, sans-serif',fontSize:'17px',color:'#fff',lineHeight:1.7,marginBottom:'20px',padding:'14px 16px',background:'rgba(255,45,80,0.08)',border:'1px solid rgba(255,45,80,0.35)',borderRadius:'10px' }}>
+        {msg}
+      </div>
+      <button onClick={onClose} style={{ padding:'11px 28px',background:'rgba(255,45,80,0.12)',border:'1px solid rgba(255,45,80,0.5)',color:'#ff2d50',fontFamily:'Orbitron, sans-serif',fontSize:'10px',letterSpacing:'0.12em',cursor:'pointer',borderRadius:'4px' }}>
+        🏃 اركض للموقع الثاني!
+      </button>
+    </div>
+  );
+}
+
+function WinScreen({ rank, reward, sponsor, onClose }: { rank:number; reward:string; sponsor:string; onClose:()=>void }) {
+  const cfg = rank === 1
+    ? { emoji:'🥇',label:'الفائز الأول', color:'#FFD700',anim:'bms-gold',  bg:'rgba(255,215,0,0.08)' }
+    : rank === 2
+    ? { emoji:'🥈',label:'الفائز الثاني',color:'#C0C0C0',anim:'bms-silver',bg:'rgba(192,192,192,0.08)' }
+    : { emoji:'🥉',label:'الفائز الثالث',color:'#CD7F32',anim:'bms-bronze',bg:'rgba(205,127,50,0.08)' };
+  return (
+    <div style={{ textAlign:'center',padding:'10px 0 20px',animation:'bms-pop 0.6s cubic-bezier(0.34,1.56,0.64,1)' }}>
+      <div style={{ fontSize:'66px',marginBottom:'10px',filter:`drop-shadow(0 0 24px ${cfg.color})`,animation:`${cfg.anim} 2s ease-in-out infinite` }}>
+        {cfg.emoji}
+      </div>
+      <div style={{ fontFamily:'Orbitron, sans-serif',fontSize:'16px',color:cfg.color,letterSpacing:'0.12em',marginBottom:'10px',textShadow:`0 0 24px ${cfg.color}88` }}>
+        مبروك! أنت {cfg.label}!
+      </div>
+      <div style={{ padding:'16px 18px',background:cfg.bg,border:`1px solid ${cfg.color}44`,borderRadius:'10px',marginBottom:'14px' }}>
+        <div style={{ fontFamily:'Rajdhani, sans-serif',fontSize:'15px',color:'rgba(255,255,255,0.7)',marginBottom:'8px' }}>جائزتك:</div>
+        <div style={{ fontFamily:'Orbitron, sans-serif',fontSize:'22px',color:cfg.color,fontWeight:900,textShadow:`0 0 20px ${cfg.color}88` }}>
+          {reward}
+        </div>
+        <div style={{ fontFamily:'Rajdhani, sans-serif',fontSize:'13px',color:'rgba(255,255,255,0.4)',marginTop:'6px' }}>من {sponsor}</div>
+      </div>
+      <div style={{ fontFamily:'Rajdhani, sans-serif',fontSize:'17px',color:'rgba(255,255,255,0.8)',marginBottom:'20px',padding:'12px',background:'rgba(255,255,255,0.05)',borderRadius:'8px' }}>
+        📲 شوّف الشاشة للكاشير للاستلام!
+      </div>
+      <button onClick={onClose} style={{ padding:'11px 28px',background:`${cfg.color}15`,border:`1px solid ${cfg.color}55`,color:cfg.color,fontFamily:'Orbitron, sans-serif',fontSize:'10px',letterSpacing:'0.12em',cursor:'pointer',borderRadius:'4px' }}>
+        إغلاق
+      </button>
+    </div>
+  );
+}
+
+function FullScreen({ onClose }: { onClose: () => void }) {
+  return (
+    <div style={{ textAlign:'center',padding:'10px 0 20px',animation:'bms-pop 0.5s cubic-bezier(0.34,1.56,0.64,1)' }}>
+      <div style={{ fontSize:'54px',marginBottom:'10px',filter:'grayscale(1) opacity(0.7)' }}>😔</div>
+      <div style={{ fontFamily:'Orbitron, sans-serif',fontSize:'13px',color:'rgba(255,255,255,0.45)',letterSpacing:'0.1em',marginBottom:'10px' }}>أوووف! راحت عليك خوية</div>
+      <div style={{ fontFamily:'Rajdhani, sans-serif',fontSize:'17px',color:'rgba(255,255,255,0.7)',lineHeight:1.7,marginBottom:'20px',padding:'16px',background:'rgba(255,255,255,0.04)',borderRadius:'10px' }}>
+        انتهت المقاعد المتاحة لهذه المهمة!<br/>
+        <span style={{ color:'rgba(255,255,255,0.4)',fontSize:'14px' }}>حظاً أوفر بالقادم 🍀</span>
+      </div>
+      <button onClick={onClose} style={{ padding:'11px 28px',background:'rgba(255,255,255,0.06)',border:'1px solid rgba(255,255,255,0.18)',color:'rgba(255,255,255,0.55)',fontFamily:'Orbitron, sans-serif',fontSize:'10px',letterSpacing:'0.12em',cursor:'pointer',borderRadius:'4px' }}>
+        إغلاق
+      </button>
+    </div>
   );
 }

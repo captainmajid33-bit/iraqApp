@@ -4,7 +4,7 @@ import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import {
   collection, onSnapshot, addDoc, updateDoc, deleteDoc,
-  doc, serverTimestamp,
+  doc, serverTimestamp, writeBatch, Timestamp,
 } from "firebase/firestore";
 import { db } from "@/lib/firebase";
 
@@ -1699,363 +1699,396 @@ function UsersTab({ toast }: { toast: ReturnType<typeof useToast> }) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// ── BountyMissionsTab — إدارة مهمات الجوائز الصفراء (Firestore CRUD) ─────────
+// ── BountyMissionsTab v2 — مطاردة الكنوز المزدوجة ────────────────────────────
 // ══════════════════════════════════════════════════════════════════════════════
-interface BountyMission {
-  id:          string;
-  title:       string;
-  description: string;
-  reward:      number;
-  latitude:    number;
-  longitude:   number;
-  status:      'active' | 'claimed';
-  claimedBy?:  string;
+interface AdminBountyDoc {
+  id:            string;
+  pairId:        string;
+  isFake:        boolean;
+  sponsor_name:  string;
+  title:         string;
+  first_reward:  string;
+  second_reward: string;
+  third_reward:  string;
+  fake_message:  string;
+  winners_log:   any[];
+  expiresAt:     any;
+  status:        'active' | 'closed' | 'expired';
+  latitude:      number;
+  longitude:     number;
+  createdAt:     any;
 }
 
-const EMPTY_BOUNTY = { title: '', description: '', reward: '', latitude: '', longitude: '' };
+interface AdminBountyPair {
+  pairId:       string;
+  sponsor_name: string;
+  title:        string;
+  first_reward: string;
+  second_reward:string;
+  third_reward: string;
+  fake_message: string;
+  winners_log:  any[];
+  expiresAt:    any;
+  status:       string;
+  realDoc?:     AdminBountyDoc;
+  fakeDoc?:     AdminBountyDoc;
+  createdAt:    any;
+}
+
+const EMPTY_BMISSION = {
+  sponsor_name:   '',
+  title:          '',
+  first_reward:   '',
+  second_reward:  '',
+  third_reward:   '',
+  fake_message:   '',
+  duration_minutes: '30',
+  realLat: '', realLng: '',
+  fakeLat: '', fakeLng: '',
+};
+
+type PickMode = 'real' | 'fake';
 
 function BountyMissionsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
-  const [missions,   setMissions]   = useState<BountyMission[]>([]);
+  const [docs,       setDocs]       = useState<AdminBountyDoc[]>([]);
   const [loading,    setLoading]    = useState(true);
   const [showForm,   setShowForm]   = useState(false);
-  const [editing,    setEditing]    = useState<BountyMission | null>(null);
-  const [form,       setForm]       = useState({ ...EMPTY_BOUNTY });
+  const [form,       setForm]       = useState({ ...EMPTY_BMISSION });
   const [saving,     setSaving]     = useState(false);
-  const [confirmDel, setConfirmDel] = useState<string | null>(null);
+  const [confirmDel, setConfirmDel] = useState<string | null>(null); // pairId
+  const [pickMode,   setPickMode]   = useState<PickMode>('real');
 
   // ── Map picker refs ──────────────────────────────────────────────────────
-  const mapContainerRef = useRef<HTMLDivElement | null>(null);
-  const mapRef          = useRef<L.Map | null>(null);
-  const markerRef       = useRef<L.Marker | null>(null);
+  const mapContainerRef  = useRef<HTMLDivElement | null>(null);
+  const mapRef           = useRef<L.Map | null>(null);
+  const realMarkerRef    = useRef<L.Marker | null>(null);
+  const fakeMarkerRef    = useRef<L.Marker | null>(null);
+  const pickModeRef      = useRef<PickMode>('real');
 
-  // ── Map picker: init / destroy with modal ───────────────────────────────
+  // ── Map picker: init / destroy ────────────────────────────────────────────
   useEffect(() => {
     if (!showForm) {
-      mapRef.current?.remove();
-      mapRef.current    = null;
-      markerRef.current = null;
+      mapRef.current?.remove(); mapRef.current = null;
+      realMarkerRef.current = null; fakeMarkerRef.current = null;
       return;
     }
     const tid = setTimeout(() => {
       const container = mapContainerRef.current;
       if (!container || mapRef.current) return;
 
-      const initLat = parseFloat(form.latitude) || 33.7440;
-      const initLng = parseFloat(form.longitude) || 44.6530;
+      const initLat = parseFloat(form.realLat) || 33.7440;
+      const initLng = parseFloat(form.realLng) || 44.6530;
 
-      const map = L.map(container, {
-        center: [initLat, initLng],
-        zoom:   14,
-        zoomControl: true,
-        attributionControl: false,
-      });
+      const map = L.map(container, { center: [initLat, initLng], zoom: 14, zoomControl: true, attributionControl: false });
       mapRef.current = map;
 
-      // Voyager: shows all real POIs (mosques, schools, shops, streets) clearly
       L.tileLayer(
         'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png',
         { subdomains: 'abcd', maxZoom: 20, attribution: '© OpenStreetMap © CARTO' },
       ).addTo(map);
 
-      // Golden star-diamond pin
-      const pinIcon = L.divIcon({
-        className:  '',
-        iconSize:   [40, 40],
-        iconAnchor: [20, 40],
-        html: `<div style="width:40px;height:40px;display:flex;align-items:center;justify-content:center;
-                     background:#f5c51822;border:2px solid #f5c518;border-radius:50% 50% 50% 0;
-                     transform:rotate(-45deg);box-shadow:0 0 18px #f5c518aa;cursor:grab">
-                 <span style="transform:rotate(45deg);font-size:18px;line-height:1">⭐</span>
-               </div>`,
+      const makeRealIcon = () => L.divIcon({
+        className: '', iconSize: [38, 38], iconAnchor: [19, 38],
+        html: `<div style="width:38px;height:38px;display:flex;align-items:center;justify-content:center;background:#f5c51820;border:2px solid #f5c518;border-radius:50% 50% 50% 0;transform:rotate(-45deg);box-shadow:0 0 14px #f5c518aa;cursor:grab"><span style="transform:rotate(45deg);font-size:17px">⭐</span></div>`,
+      });
+      const makeFakeIcon = () => L.divIcon({
+        className: '', iconSize: [38, 38], iconAnchor: [19, 38],
+        html: `<div style="width:38px;height:38px;display:flex;align-items:center;justify-content:center;background:#ff2d5020;border:2px solid #ff2d50;border-radius:50% 50% 50% 0;transform:rotate(-45deg);box-shadow:0 0 14px #ff2d50aa;cursor:grab"><span style="transform:rotate(45deg);font-size:17px">🎭</span></div>`,
       });
 
-      const marker = L.marker([initLat, initLng], { draggable: true, icon: pinIcon }).addTo(map);
-      markerRef.current = marker;
+      const realM = L.marker([initLat, initLng], { draggable: true, icon: makeRealIcon() }).addTo(map);
+      const fakeM = L.marker([initLat + 0.002, initLng + 0.002], { draggable: true, icon: makeFakeIcon() }).addTo(map);
+      realMarkerRef.current = realM; fakeMarkerRef.current = fakeM;
 
-      const applyLatLng = (lat: number, lng: number) =>
-        setForm(p => ({ ...p, latitude: lat.toFixed(6), longitude: lng.toFixed(6) }));
-
-      marker.on('dragend', () => {
-        const { lat, lng } = marker.getLatLng();
-        applyLatLng(lat, lng);
+      realM.on('dragend', () => {
+        const { lat, lng } = realM.getLatLng();
+        setForm(p => ({ ...p, realLat: lat.toFixed(6), realLng: lng.toFixed(6) }));
       });
+      fakeM.on('dragend', () => {
+        const { lat, lng } = fakeM.getLatLng();
+        setForm(p => ({ ...p, fakeLat: lat.toFixed(6), fakeLng: lng.toFixed(6) }));
+      });
+
       map.on('click', (e: L.LeafletMouseEvent) => {
-        marker.setLatLng(e.latlng);
-        applyLatLng(e.latlng.lat, e.latlng.lng);
+        const { lat, lng } = e.latlng;
+        if (pickModeRef.current === 'real') {
+          realM.setLatLng(e.latlng);
+          setForm(p => ({ ...p, realLat: lat.toFixed(6), realLng: lng.toFixed(6) }));
+        } else {
+          fakeM.setLatLng(e.latlng);
+          setForm(p => ({ ...p, fakeLat: lat.toFixed(6), fakeLng: lng.toFixed(6) }));
+        }
       });
 
-      setTimeout(() => map.invalidateSize(), 80);
+      // Fit both pins on screen
+      setTimeout(() => {
+        map.invalidateSize();
+        setForm(p => ({ ...p, fakeLat: (initLat + 0.002).toFixed(6), fakeLng: (initLng + 0.002).toFixed(6) }));
+      }, 80);
     }, 60);
     return () => clearTimeout(tid);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showForm]);
 
-  // ── Sync marker when lat/lng typed manually ───────────────────────────────
-  useEffect(() => {
-    const map    = mapRef.current;
-    const marker = markerRef.current;
-    if (!map || !marker) return;
-    const lat = parseFloat(form.latitude);
-    const lng = parseFloat(form.longitude);
-    if (!isNaN(lat) && !isNaN(lng)) {
-      marker.setLatLng([lat, lng]);
-      map.panTo([lat, lng], { animate: true, duration: 0.4 });
-    }
-  }, [form.latitude, form.longitude]);
+  // ── Keep pickModeRef in sync ───────────────────────────────────────────────
+  useEffect(() => { pickModeRef.current = pickMode; }, [pickMode]);
 
-  // ── Live Firestore listener (all missions, any status) ───────────────────
+  // ── Firestore listener ─────────────────────────────────────────────────────
   useEffect(() => {
-    const unsub = onSnapshot(
-      collection(db, 'bounty_missions'),
-      snap => {
-        const docs: BountyMission[] = [];
-        snap.forEach(d => {
-          if (d.id === '_seed_check') return;
-          const raw = d.data();
-          const lat = Number(raw.latitude);
-          const lng = Number(raw.longitude);
-          if (isNaN(lat) || isNaN(lng)) return;
-          docs.push({
-            id:          d.id,
-            title:       String(raw.title ?? ''),
-            description: String(raw.description ?? ''),
-            reward:      Number(raw.reward ?? 0),
-            latitude:    lat,
-            longitude:   lng,
-            status:      raw.status ?? 'active',
-            claimedBy:   raw.claimedBy,
-          });
+    const unsub = onSnapshot(collection(db, 'bounties'), snap => {
+      const result: AdminBountyDoc[] = [];
+      snap.forEach(d => {
+        const raw = d.data();
+        const lat = Number(raw.latitude), lng = Number(raw.longitude);
+        if (isNaN(lat) || isNaN(lng)) return;
+        result.push({
+          id: d.id, pairId: String(raw.pairId ?? d.id),
+          isFake: Boolean(raw.isFake),
+          sponsor_name: String(raw.sponsor_name ?? ''),
+          title: String(raw.title ?? ''),
+          first_reward: String(raw.first_reward ?? ''),
+          second_reward: String(raw.second_reward ?? ''),
+          third_reward: String(raw.third_reward ?? ''),
+          fake_message: String(raw.fake_message ?? ''),
+          winners_log: Array.isArray(raw.winners_log) ? raw.winners_log : [],
+          expiresAt: raw.expiresAt,
+          status: raw.status ?? 'active',
+          latitude: lat, longitude: lng,
+          createdAt: raw.createdAt,
         });
-        // Sort: active first, then claimed
-        docs.sort((a, b) => {
-          if (a.status === b.status) return 0;
-          return a.status === 'active' ? -1 : 1;
-        });
-        setMissions(docs);
-        setLoading(false);
-      },
-      err => { console.error('[BountyMissionsTab] Firestore error:', err); setLoading(false); }
-    );
+      });
+      setDocs(result);
+      setLoading(false);
+    }, err => { console.error('[BountyTab] Firestore:', err); setLoading(false); });
     return () => unsub();
   }, []);
 
-  function openAdd() {
-    setEditing(null);
-    setForm({ ...EMPTY_BOUNTY });
-    setShowForm(true);
-  }
-
-  function openEdit(m: BountyMission) {
-    setEditing(m);
-    setForm({
-      title:       m.title,
-      description: m.description,
-      reward:      String(m.reward),
-      latitude:    String(m.latitude),
-      longitude:   String(m.longitude),
+  // ── Group by pairId ────────────────────────────────────────────────────────
+  const pairs = useCallback((): AdminBountyPair[] => {
+    const map = new Map<string, AdminBountyPair>();
+    docs.forEach(d => {
+      if (!map.has(d.pairId)) {
+        map.set(d.pairId, {
+          pairId: d.pairId, sponsor_name: d.sponsor_name, title: d.title,
+          first_reward: d.first_reward, second_reward: d.second_reward, third_reward: d.third_reward,
+          fake_message: d.fake_message, winners_log: d.winners_log,
+          expiresAt: d.expiresAt, status: d.status, createdAt: d.createdAt,
+        });
+      }
+      const p = map.get(d.pairId)!;
+      if (!d.isFake) p.realDoc = d; else p.fakeDoc = d;
+      // Use the worst status
+      if (d.status !== 'active') p.status = d.status;
+      // Use longer winners_log
+      if (d.winners_log.length > p.winners_log.length) p.winners_log = d.winners_log;
     });
-    setShowForm(true);
+    return [...map.values()].sort((a, b) => {
+      const sa = a.status === 'active' ? 0 : 1;
+      const sb = b.status === 'active' ? 0 : 1;
+      return sa - sb;
+    });
+  }, [docs]);
+
+  function openAdd() {
+    setForm({ ...EMPTY_BMISSION }); setPickMode('real'); setShowForm(true);
   }
 
   async function save() {
-    const lat    = parseFloat(form.latitude);
-    const lng    = parseFloat(form.longitude);
-    const reward = parseFloat(form.reward);
-    if (!form.title.trim())        { toast.show('عنوان المهمة مطلوب', false); return; }
-    if (isNaN(lat) || isNaN(lng))  { toast.show('يرجى تحديد الموقع على الخريطة', false); return; }
-    if (lat < 30 || lat > 38)      { toast.show('خط العرض يجب أن يكون بين 30 و 38', false); return; }
-    if (lng < 38 || lng > 50)      { toast.show('خط الطول يجب أن يكون بين 38 و 50', false); return; }
-    if (isNaN(reward) || reward <= 0) { toast.show('قيمة الجائزة يجب أن تكون أكبر من صفر', false); return; }
+    const rLat = parseFloat(form.realLat), rLng = parseFloat(form.realLng);
+    const fLat = parseFloat(form.fakeLat), fLng = parseFloat(form.fakeLng);
+    const dur  = parseInt(form.duration_minutes);
+
+    if (!form.sponsor_name.trim()) { toast.show('اسم الراعي مطلوب', false); return; }
+    if (!form.first_reward.trim()) { toast.show('جائزة المركز الأول مطلوبة', false); return; }
+    if (isNaN(rLat) || isNaN(rLng)) { toast.show('يرجى تحديد الموقع الحقيقي ⭐ على الخريطة', false); return; }
+    if (isNaN(fLat) || isNaN(fLng)) { toast.show('يرجى تحديد الموقع الوهمي 🎭 على الخريطة', false); return; }
+    if (isNaN(dur) || dur <= 0) { toast.show('مدة المهمة يجب أن تكون أكبر من صفر', false); return; }
 
     setSaving(true);
     try {
-      const payload = {
-        title:       form.title.trim(),
-        description: form.description.trim(),
-        reward:      reward,
-        latitude:    lat,
-        longitude:   lng,
-        status:      'active' as const,
-        updatedAt:   serverTimestamp(),
+      const pairId   = `pair_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+      const expiresAt = Timestamp.fromDate(new Date(Date.now() + dur * 60_000));
+      const title    = `مهمة ${form.sponsor_name.trim()}`;
+      const shared   = {
+        pairId, sponsor_name: form.sponsor_name.trim(), title,
+        first_reward: form.first_reward.trim(),
+        second_reward: form.second_reward.trim(),
+        third_reward: form.third_reward.trim(),
+        fake_message: form.fake_message.trim() || 'أكلت المقلب خوية! 😂 اركض للموقع الثاني بسرعة!',
+        winners_log: [],
+        expiresAt,
+        status: 'active',
+        createdAt: serverTimestamp(),
       };
-      if (editing) {
-        await updateDoc(doc(db, 'bounty_missions', editing.id), payload);
-        toast.show('تم تحديث المهمة ✓');
-      } else {
-        await addDoc(collection(db, 'bounty_missions'), payload);
-        toast.show('تمت إضافة المهمة وتفعيلها فوراً ✓');
-      }
+      await Promise.all([
+        addDoc(collection(db, 'bounties'), { ...shared, isFake: false, latitude: rLat, longitude: rLng }),
+        addDoc(collection(db, 'bounties'), { ...shared, isFake: true,  latitude: fLat, longitude: fLng }),
+      ]);
+      toast.show(`✓ تم إطلاق مهمة "${title}" — ${dur} دقيقة`);
       setShowForm(false);
     } catch (e: any) {
       toast.show(`فشل الحفظ: ${e?.message ?? e}`, false);
     } finally { setSaving(false); }
   }
 
-  async function doDelete(id: string) {
+  async function deletePair(pair: AdminBountyPair) {
     try {
-      await deleteDoc(doc(db, 'bounty_missions', id));
-      toast.show('تم حذف المهمة من خريطة الزبائن');
+      const dels: Promise<any>[] = [];
+      if (pair.realDoc) dels.push(deleteDoc(doc(db, 'bounties', pair.realDoc.id)));
+      if (pair.fakeDoc) dels.push(deleteDoc(doc(db, 'bounties', pair.fakeDoc.id)));
+      await Promise.all(dels);
+      toast.show('تم حذف المهمة المزدوجة ✓');
     } catch (e: any) {
       toast.show(`فشل الحذف: ${e?.message ?? e}`, false);
     } finally { setConfirmDel(null); }
   }
 
-  const f = (field: keyof typeof EMPTY_BOUNTY) =>
+  const f = (field: keyof typeof EMPTY_BMISSION) =>
     (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) =>
       setForm(p => ({ ...p, [field]: e.target.value }));
 
-  const activeCount  = missions.filter(m => m.status === 'active').length;
-  const claimedCount = missions.filter(m => m.status === 'claimed').length;
+  const pairList = pairs();
+  const activeCount = pairList.filter(p => p.status === 'active').length;
 
-  // ── Render ────────────────────────────────────────────────────────────────
+  // ── Render ─────────────────────────────────────────────────────────────────
   return (
     <div style={{ direction: 'rtl' }}>
 
-      {/* Section header */}
+      {/* Header */}
       <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: '20px', flexWrap: 'wrap', gap: '10px' }}>
         <div>
           <div style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '11px', color: C.yellow, letterSpacing: '0.18em', marginBottom: '4px' }}>
-            ⭐ BOUNTY MISSIONS MANAGEMENT
+            ⭐ BOUNTY HUNT MANAGEMENT · مطاردة الكنوز المزدوجة
           </div>
           <div style={{ fontFamily: 'Rajdhani, sans-serif', fontSize: '13px', color: C.dim }}>
-            جميع التغييرات تُطبَّق فوراً على خريطة الزبائن عبر Firestore
-            {!loading && (
-              <span style={{ marginRight: '8px' }}>
-                <span style={{ color: C.green }}>· {activeCount} نشطة</span>
-                {claimedCount > 0 && <span style={{ color: C.yellow, marginRight: '6px' }}>· {claimedCount} محجوزة</span>}
-              </span>
-            )}
+            كل مهمة = موقعان متشابهان (حقيقي + وهمي) · أول 3 يصلون للحقيقي يفوزون
+            {!loading && <span style={{ color: C.green, marginRight: '8px' }}>· {activeCount} مهمة نشطة</span>}
           </div>
         </div>
-        <button
-          onClick={openAdd}
-          style={{ padding: '10px 20px', background: `${C.yellow}18`, border: `1px solid ${C.yellow}88`, color: C.yellow, fontFamily: 'Orbitron, sans-serif', fontSize: '10px', letterSpacing: '0.1em', cursor: 'pointer', borderRadius: '3px', boxShadow: neon(C.yellow, 8), display: 'flex', alignItems: 'center', gap: '6px' }}
+        <button onClick={openAdd}
+          style={{ padding: '10px 20px', background: `${C.yellow}18`, border: `1px solid ${C.yellow}88`, color: C.yellow, fontFamily: 'Orbitron, sans-serif', fontSize: '10px', letterSpacing: '0.1em', cursor: 'pointer', borderRadius: '3px', boxShadow: neon(C.yellow, 8) }}
           onMouseEnter={e => (e.currentTarget.style.background = `${C.yellow}28`)}
-          onMouseLeave={e => (e.currentTarget.style.background = `${C.yellow}18`)}
-        >
-          ＋ إضافة مهمة / جائزة جديدة
+          onMouseLeave={e => (e.currentTarget.style.background = `${C.yellow}18`)}>
+          ＋ إطلاق مهمة كنز جديدة
         </button>
       </div>
 
-      {/* ── Add / Edit Modal ────────────────────────────────────────────── */}
+      {/* ── Add Modal ── */}
       {showForm && (
-        <div
-          style={{ position: 'fixed', inset: 0, zIndex: 500, background: 'rgba(0,0,0,0.82)', backdropFilter: 'blur(7px)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '16px' }}
-          onClick={e => { if (e.target === e.currentTarget) setShowForm(false); }}
-        >
-          <div style={{ width: 'min(600px, 100%)', background: C.surface, border: `1px solid ${C.yellow}44`, borderRadius: '4px', boxShadow: `0 0 60px ${C.yellow}18, 0 8px 40px rgba(0,0,0,0.95)`, overflow: 'hidden', maxHeight: '92vh', display: 'flex', flexDirection: 'column' }}>
+        <div style={{ position: 'fixed', inset: 0, zIndex: 500, background: 'rgba(0,0,0,0.85)', backdropFilter: 'blur(7px)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '16px' }}
+          onClick={e => { if (e.target === e.currentTarget) setShowForm(false); }}>
+          <div style={{ width: 'min(680px,100%)', background: C.surface, border: `1px solid ${C.yellow}44`, borderRadius: '6px', boxShadow: `0 0 60px ${C.yellow}18,0 8px 40px rgba(0,0,0,0.95)`, overflow: 'hidden', maxHeight: '94vh', display: 'flex', flexDirection: 'column' }}>
 
             {/* Modal header */}
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '13px 16px', borderBottom: `1px solid ${C.yellow}22`, background: `${C.yellow}08` }}>
-              <span style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '10px', color: C.yellow, letterSpacing: '0.15em' }}>
-                {editing ? '📝 تعديل مهمة / جائزة' : '⭐ إضافة مهمة / جائزة جديدة'}
-              </span>
-              <button onClick={() => setShowForm(false)} style={{ background: 'none', border: 'none', color: C.dim, fontSize: '20px', cursor: 'pointer', padding: '0 4px', lineHeight: 1 }}>×</button>
+              <span style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '10px', color: C.yellow, letterSpacing: '0.15em' }}>⭐ إطلاق مهمة كنز مزدوجة جديدة</span>
+              <button onClick={() => setShowForm(false)} style={{ background: 'none', border: 'none', color: C.dim, fontSize: '20px', cursor: 'pointer' }}>×</button>
             </div>
 
             {/* Form body */}
             <div style={{ padding: '18px 16px', display: 'flex', flexDirection: 'column', gap: '14px', overflowY: 'auto', flex: 1 }}>
 
-              {/* Title */}
-              <div>
-                <label style={LBL}>عنوان المهمة *</label>
-                <input value={form.title} onChange={f('title')} onFocus={ff} onBlur={fb}
-                  placeholder="مثال: صندوق حديقة مصطفى جواد"
-                  style={FLD} />
-              </div>
-
-              {/* Description */}
-              <div>
-                <label style={LBL}>وصف / تلميح المهمة</label>
-                <textarea
-                  value={form.description}
-                  onChange={f('description') as any}
-                  onFocus={ff} onBlur={fb}
-                  placeholder="مثال: ابحث عن الكود السري بجانب النافورة الرئيسية"
-                  rows={3}
-                  style={{ ...FLD, resize: 'vertical', minHeight: '72px', lineHeight: 1.55 }}
-                />
-              </div>
-
-              {/* Reward */}
-              <div>
-                <label style={LBL}>قيمة الجائزة (دينار عراقي) *</label>
-                <input
-                  value={form.reward}
-                  onChange={f('reward')}
-                  onFocus={ff} onBlur={fb}
-                  type="number" min="1" placeholder="مثال: 25000"
-                  style={{ ...FLD, fontFamily: 'Orbitron, monospace', fontSize: '13px', color: C.yellow, letterSpacing: '0.04em', borderColor: `${C.yellow}55` }}
-                />
-              </div>
-
-              {/* ── Map Picker ─────────────────────────────────────────────── */}
-              <div>
-                <label style={{ ...LBL, marginBottom: '6px', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                  📍 تحديد موقع الجائزة على الخريطة *
-                  <span style={{ color: C.dim, fontFamily: 'Rajdhani, sans-serif', fontSize: '11px', fontWeight: 400 }}>
-                    — اضغط أي مكان أو اسحب الـ Pin ⭐
-                  </span>
-                </label>
-
-                {/* Map container */}
-                <div
-                  ref={mapContainerRef}
-                  style={{
-                    width:        '100%',
-                    height:       '280px',
-                    borderRadius: '3px',
-                    border:       `1px solid ${C.yellow}44`,
-                    overflow:     'hidden',
-                    background:   '#0a0d14',
-                    boxShadow:    `inset 0 0 28px rgba(0,0,0,0.7), 0 0 16px ${C.yellow}14`,
-                    cursor:       'crosshair',
-                  }}
-                />
-
-                {/* Lat / Lng readout */}
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', marginTop: '8px' }}>
-                  <div>
-                    <label style={{ ...LBL, color: `${C.yellow}88` }}>Latitude (خط العرض)</label>
-                    <input
-                      value={form.latitude} onChange={f('latitude')} onFocus={ff} onBlur={fb}
-                      type="number" step="0.000001" placeholder="33.744000"
-                      style={{ ...FLD, fontFamily: 'Orbitron, monospace', fontSize: '11px', color: C.yellow, letterSpacing: '0.04em', borderColor: `${C.yellow}55` }}
-                    />
-                  </div>
-                  <div>
-                    <label style={{ ...LBL, color: `${C.yellow}88` }}>Longitude (خط الطول)</label>
-                    <input
-                      value={form.longitude} onChange={f('longitude')} onFocus={ff} onBlur={fb}
-                      type="number" step="0.000001" placeholder="44.653000"
-                      style={{ ...FLD, fontFamily: 'Orbitron, monospace', fontSize: '11px', color: C.yellow, letterSpacing: '0.04em', borderColor: `${C.yellow}55` }}
-                    />
-                  </div>
+              {/* Sponsor + Duration */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: '10px' }}>
+                <div>
+                  <label style={LBL}>🏪 اسم الراعي (Sponsor) *</label>
+                  <input value={form.sponsor_name} onChange={f('sponsor_name')} onFocus={ff} onBlur={fb}
+                    placeholder="مثال: مطعم كوكو جيكن"
+                    style={FLD} />
                 </div>
-                {!form.latitude && !form.longitude && (
-                  <div style={{ fontFamily: 'Rajdhani, sans-serif', fontSize: '12px', color: C.red, marginTop: '4px' }}>
-                    ⚠ يرجى تحديد موقع الجائزة على الخريطة
+                <div>
+                  <label style={LBL}>⏱ المدة (دقائق) *</label>
+                  <input value={form.duration_minutes} onChange={f('duration_minutes')} onFocus={ff} onBlur={fb}
+                    type="number" min="1" placeholder="30"
+                    style={{ ...FLD, width: '90px', textAlign: 'center', color: C.yellow, fontFamily: 'Orbitron, monospace' }} />
+                </div>
+              </div>
+
+              {/* Rewards */}
+              <div>
+                <label style={LBL}>🏆 جوائز المراكز الثلاثة</label>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '8px', marginTop: '6px' }}>
+                  {[
+                    { key: 'first_reward' as const, ph: '🥇 مثال: 15,000 دينار كاش', color: '#FFD700', lbl: 'المركز الأول *' },
+                    { key: 'second_reward' as const, ph: '🥈 مثال: 5,000 دينار كاش', color: '#C0C0C0', lbl: 'المركز الثاني' },
+                    { key: 'third_reward' as const, ph: '🥉 مثال: 3,000 دينار كاش', color: '#CD7F32', lbl: 'المركز الثالث' },
+                  ].map(r => (
+                    <div key={r.key}>
+                      <label style={{ ...LBL, color: r.color + 'cc' }}>{r.lbl}</label>
+                      <input value={form[r.key]} onChange={f(r.key)} onFocus={ff} onBlur={fb}
+                        placeholder={r.ph}
+                        style={{ ...FLD, borderColor: r.color + '44', color: r.color, fontSize: '12px' }} />
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Fake message */}
+              <div>
+                <label style={LBL}>🎭 رسالة المقلب (تظهر لمن يصل الموقع الوهمي)</label>
+                <textarea value={form.fake_message} onChange={f('fake_message') as any} onFocus={ff} onBlur={fb}
+                  placeholder='مثال: "أكلت المقلب خوية! صاحب المحل استغرب منك 😂.. اركض للموقع الثاني بسرعة!"'
+                  rows={2}
+                  style={{ ...FLD, resize: 'vertical', minHeight: '60px', lineHeight: 1.55, borderColor: `${C.red}44` }} />
+              </div>
+
+              {/* ── Dual Map Picker ── */}
+              <div>
+                <label style={{ ...LBL, marginBottom: '8px' }}>📍 تحديد المواقع على الخريطة *</label>
+
+                {/* Mode selector buttons */}
+                <div style={{ display: 'flex', gap: '8px', marginBottom: '8px' }}>
+                  <button onClick={() => setPickMode('real')} style={{
+                    flex: 1, padding: '9px 12px', cursor: 'pointer', borderRadius: '4px', fontFamily: 'Orbitron, sans-serif', fontSize: '9px', letterSpacing: '0.1em',
+                    background: pickMode === 'real' ? `${C.yellow}22` : 'transparent',
+                    border: pickMode === 'real' ? `2px solid ${C.yellow}` : `1px solid ${C.yellow}44`,
+                    color: pickMode === 'real' ? C.yellow : C.dim,
+                    boxShadow: pickMode === 'real' ? neon(C.yellow, 8) : 'none',
+                  }}>
+                    ⭐ تحديد الموقع الحقيقي
+                    {form.realLat && <span style={{ display: 'block', fontFamily: 'monospace', fontSize: '8px', marginTop: '2px', color: C.yellow + '88' }}>{parseFloat(form.realLat).toFixed(4)}, {parseFloat(form.realLng).toFixed(4)}</span>}
+                  </button>
+                  <button onClick={() => setPickMode('fake')} style={{
+                    flex: 1, padding: '9px 12px', cursor: 'pointer', borderRadius: '4px', fontFamily: 'Orbitron, sans-serif', fontSize: '9px', letterSpacing: '0.1em',
+                    background: pickMode === 'fake' ? `${C.red}20` : 'transparent',
+                    border: pickMode === 'fake' ? `2px solid ${C.red}` : `1px solid ${C.red}44`,
+                    color: pickMode === 'fake' ? C.red : C.dim,
+                    boxShadow: pickMode === 'fake' ? neon(C.red, 8) : 'none',
+                  }}>
+                    🎭 تحديد الموقع الوهمي
+                    {form.fakeLat && <span style={{ display: 'block', fontFamily: 'monospace', fontSize: '8px', marginTop: '2px', color: C.red + '88' }}>{parseFloat(form.fakeLat).toFixed(4)}, {parseFloat(form.fakeLng).toFixed(4)}</span>}
+                  </button>
+                </div>
+
+                <div style={{ fontFamily: 'Rajdhani, sans-serif', fontSize: '12px', color: C.dim, marginBottom: '6px', padding: '6px 10px', background: 'rgba(255,255,255,0.03)', borderRadius: '3px' }}>
+                  {pickMode === 'real'
+                    ? '▶ انقر على الخريطة أو اسحب Pin ⭐ الذهبي لتحديد المكان الحقيقي'
+                    : '▶ انقر على الخريطة أو اسحب Pin 🎭 الأحمر لتحديد المكان الوهمي'}
+                </div>
+
+                {/* Map */}
+                <div ref={mapContainerRef} style={{ width: '100%', height: '300px', borderRadius: '4px', border: `1px solid ${pickMode === 'real' ? C.yellow : C.red}55`, overflow: 'hidden', background: '#0a0d14', cursor: 'crosshair', boxShadow: `0 0 16px ${pickMode === 'real' ? C.yellow : C.red}18` }} />
+
+                {/* Validation */}
+                {(!form.realLat || !form.fakeLat) && (
+                  <div style={{ fontFamily: 'Rajdhani, sans-serif', fontSize: '12px', color: C.red, marginTop: '5px' }}>
+                    ⚠ {!form.realLat ? 'حدد الموقع الحقيقي ⭐' : 'حدد الموقع الوهمي 🎭'} على الخريطة
                   </div>
                 )}
               </div>
 
-              {/* Firestore path */}
+              {/* Firestore info */}
               <div style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '8px', color: `${C.yellow}55`, letterSpacing: '0.1em', padding: '8px 10px', background: `${C.yellow}06`, border: `1px solid ${C.yellow}15`, borderRadius: '2px' }}>
-                📂 Firestore: bounty_missions / {editing ? editing.id : '<auto-id>'} · status: active
+                📂 bounties/&lt;pairId&gt;_real · bounties/&lt;pairId&gt;_fake — نفس pairId، نفس المكافآت، مواقع مختلفة
               </div>
 
               {/* Actions */}
               <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end', paddingTop: '4px' }}>
-                <button onClick={() => setShowForm(false)}
-                  style={{ padding: '9px 20px', background: 'none', border: `1px solid ${C.border}`, color: C.dim, fontFamily: 'Orbitron, sans-serif', fontSize: '9px', letterSpacing: '0.1em', cursor: 'pointer', borderRadius: '3px' }}>
-                  إلغاء
-                </button>
-                <button onClick={save} disabled={saving}
-                  style={{ padding: '9px 22px', background: saving ? `${C.yellow}08` : `${C.yellow}18`, border: `1px solid ${C.yellow}88`, color: C.yellow, fontFamily: 'Orbitron, sans-serif', fontSize: '9px', letterSpacing: '0.1em', cursor: saving ? 'wait' : 'pointer', borderRadius: '3px', boxShadow: neon(C.yellow, 6), display: 'flex', alignItems: 'center', gap: '6px' }}>
+                <button onClick={() => setShowForm(false)} style={{ padding: '9px 20px', background: 'none', border: `1px solid ${C.border}`, color: C.dim, fontFamily: 'Orbitron, sans-serif', fontSize: '9px', letterSpacing: '0.1em', cursor: 'pointer', borderRadius: '3px' }}>إلغاء</button>
+                <button onClick={save} disabled={saving} style={{ padding: '9px 22px', background: saving ? `${C.yellow}08` : `${C.yellow}18`, border: `1px solid ${C.yellow}88`, color: C.yellow, fontFamily: 'Orbitron, sans-serif', fontSize: '9px', letterSpacing: '0.1em', cursor: saving ? 'wait' : 'pointer', borderRadius: '3px', boxShadow: neon(C.yellow, 6), display: 'flex', alignItems: 'center', gap: '6px' }}>
                   {saving
-                    ? <><svg width="12" height="12" viewBox="0 0 28 28" fill="none" style={{ animation: 'spin 0.9s linear infinite' }}><circle cx="14" cy="14" r="10" stroke={C.yellow} strokeWidth="2.5" strokeDasharray="22 14" strokeLinecap="round"/></svg>جاري الحفظ</>
-                    : editing ? '💾 حفظ التعديلات' : '✓ حفظ وتفعيل المهمة'
-                  }
+                    ? <><svg width="12" height="12" viewBox="0 0 28 28" fill="none" style={{ animation: 'spin 0.9s linear infinite' }}><circle cx="14" cy="14" r="10" stroke={C.yellow} strokeWidth="2.5" strokeDasharray="22 14" strokeLinecap="round"/></svg>جاري الإطلاق...</>
+                    : '🚀 إطلاق المهمة المزدوجة'}
                 </button>
               </div>
             </div>
@@ -2063,116 +2096,99 @@ function BountyMissionsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
         </div>
       )}
 
-      {/* ── Missions Table ──────────────────────────────────────────────── */}
+      {/* ── Pairs Table ── */}
       {loading ? (
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '12px', padding: '60px', color: C.dim }}>
           <svg width="22" height="22" viewBox="0 0 28 28" fill="none" style={{ animation: 'spin 0.9s linear infinite' }}><circle cx="14" cy="14" r="10" stroke={C.yellow} strokeWidth="2.5" strokeDasharray="22 14" strokeLinecap="round"/></svg>
-          <span style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '11px', color: C.yellow }}>جاري تحميل المهمات من Firestore...</span>
+          <span style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '11px', color: C.yellow }}>جاري التحميل...</span>
         </div>
-      ) : missions.length === 0 ? (
+      ) : pairList.length === 0 ? (
         <div style={{ textAlign: 'center', padding: '60px', color: C.dim }}>
-          <div style={{ fontSize: '44px', marginBottom: '12px' }}>⭐</div>
-          <div style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '11px', letterSpacing: '0.12em' }}>لا توجد مهمات مسجلة بعد</div>
-          <div style={{ fontFamily: 'Rajdhani, sans-serif', fontSize: '13px', marginTop: '6px' }}>اضغط "+ إضافة مهمة / جائزة جديدة" للبدء</div>
+          <div style={{ fontSize: '44px', marginBottom: '12px' }}>⭐🎭</div>
+          <div style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '11px', letterSpacing: '0.12em' }}>لا توجد مهمات مزدوجة بعد</div>
+          <div style={{ fontFamily: 'Rajdhani, sans-serif', fontSize: '13px', marginTop: '6px' }}>اضغط "+ إطلاق مهمة كنز جديدة" للبدء</div>
         </div>
       ) : (
         <div style={{ overflowX: 'auto' }}>
           <table style={{ width: '100%', borderCollapse: 'collapse', fontFamily: 'Rajdhani, sans-serif' }}>
             <thead>
               <tr style={{ borderBottom: `1px solid ${C.border}` }}>
-                {['#', 'عنوان المهمة', 'الوصف / التلميح', 'الجائزة', 'Latitude', 'Longitude', 'الحالة', 'إجراءات'].map(h => (
+                {['#','الراعي','🥇🥈🥉 الجوائز','⭐ الحقيقي','🎭 الوهمي','الفائزون','الحالة','إجراءات'].map(h => (
                   <th key={h} style={{ padding: '10px 12px', textAlign: 'right', fontFamily: 'Orbitron, sans-serif', fontSize: '8px', color: C.yellow, letterSpacing: '0.1em', whiteSpace: 'nowrap', background: `${C.yellow}06` }}>{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
-              {missions.map((m, idx) => {
-                const isActive    = m.status === 'active';
-                const isDeleting  = confirmDel === m.id;
-                const rowBg       = idx % 2 === 0 ? 'transparent' : `${C.yellow}02`;
+              {pairList.map((pair, idx) => {
+                const isActive  = pair.status === 'active';
+                const isDel     = confirmDel === pair.pairId;
+                const rowBg     = idx % 2 === 0 ? 'transparent' : `${C.yellow}02`;
+                const wCount    = pair.winners_log.length;
                 return (
-                  <tr key={m.id}
-                    style={{ borderBottom: `1px solid ${C.border}44`, background: rowBg, transition: 'background 0.15s', opacity: isActive ? 1 : 0.55 }}
+                  <tr key={pair.pairId}
+                    style={{ borderBottom: `1px solid ${C.border}44`, background: rowBg, transition: 'background 0.15s', opacity: isActive ? 1 : 0.5 }}
                     onMouseEnter={e => (e.currentTarget.style.background = `${C.yellow}06`)}
                     onMouseLeave={e => (e.currentTarget.style.background = rowBg)}>
 
-                    {/* # */}
-                    <td style={{ padding: '10px 12px', fontFamily: 'Orbitron, sans-serif', fontSize: '9px', color: `${C.yellow}55`, whiteSpace: 'nowrap' }}>{idx + 1}</td>
+                    <td style={{ padding: '10px 12px', fontFamily: 'Orbitron, sans-serif', fontSize: '9px', color: `${C.yellow}55` }}>{idx + 1}</td>
 
-                    {/* Title */}
-                    <td style={{ padding: '10px 12px', color: isActive ? C.text : C.dim, fontWeight: 600, fontSize: '15px', minWidth: '150px' }}>
-                      {m.title}
+                    <td style={{ padding: '10px 12px', minWidth: '120px' }}>
+                      <div style={{ fontSize: '15px', fontWeight: 700, color: C.text }}>{pair.sponsor_name}</div>
+                      <div style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '8px', color: C.dim, marginTop: '2px' }}>{pair.title}</div>
                     </td>
 
-                    {/* Description */}
-                    <td style={{ padding: '10px 12px', color: C.dim, fontSize: '12px', minWidth: '160px', maxWidth: '220px' }}>
-                      <span title={m.description} style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
-                        {m.description || '—'}
-                      </span>
+                    <td style={{ padding: '10px 12px', minWidth: '150px' }}>
+                      <div style={{ fontFamily: 'Rajdhani, sans-serif', fontSize: '11px', color: '#FFD700' }}>🥇 {pair.first_reward || '—'}</div>
+                      <div style={{ fontFamily: 'Rajdhani, sans-serif', fontSize: '11px', color: '#C0C0C0' }}>🥈 {pair.second_reward || '—'}</div>
+                      <div style={{ fontFamily: 'Rajdhani, sans-serif', fontSize: '11px', color: '#CD7F32' }}>🥉 {pair.third_reward || '—'}</div>
                     </td>
 
-                    {/* Reward */}
+                    <td style={{ padding: '10px 12px', fontFamily: 'Orbitron, sans-serif', fontSize: '9px', color: C.yellow, whiteSpace: 'nowrap' }}>
+                      {pair.realDoc ? `${pair.realDoc.latitude.toFixed(4)},${pair.realDoc.longitude.toFixed(4)}` : '—'}
+                    </td>
+
+                    <td style={{ padding: '10px 12px', fontFamily: 'Orbitron, sans-serif', fontSize: '9px', color: C.red, whiteSpace: 'nowrap' }}>
+                      {pair.fakeDoc ? `${pair.fakeDoc.latitude.toFixed(4)},${pair.fakeDoc.longitude.toFixed(4)}` : '—'}
+                    </td>
+
                     <td style={{ padding: '10px 12px', whiteSpace: 'nowrap' }}>
-                      <span style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '11px', color: C.yellow, textShadow: `0 0 10px ${C.yellow}66` }}>
-                        🎁 {m.reward.toLocaleString('ar-IQ')}
-                      </span>
-                      <span style={{ fontFamily: 'Rajdhani, sans-serif', fontSize: '11px', color: C.dim, marginRight: '3px' }}>د.ع</span>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        <div style={{ display: 'flex', gap: '2px' }}>
+                          {[0,1,2].map(i => (
+                            <div key={i} style={{ width: '14px', height: '14px', borderRadius: '50%', background: i < wCount ? C.yellow : 'rgba(255,255,255,0.1)', border: `1px solid ${i < wCount ? C.yellow : 'rgba(255,255,255,0.15)'}`, boxShadow: i < wCount ? `0 0 6px ${C.yellow}88` : 'none' }} />
+                          ))}
+                        </div>
+                        <span style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '9px', color: C.dim }}>{wCount}/3</span>
+                      </div>
                     </td>
 
-                    {/* Lat */}
-                    <td style={{ padding: '10px 12px', fontFamily: 'Orbitron, sans-serif', fontSize: '9px', color: C.blue, whiteSpace: 'nowrap' }}>{m.latitude.toFixed(4)}</td>
-
-                    {/* Lng */}
-                    <td style={{ padding: '10px 12px', fontFamily: 'Orbitron, sans-serif', fontSize: '9px', color: C.blue, whiteSpace: 'nowrap' }}>{m.longitude.toFixed(4)}</td>
-
-                    {/* Status badge */}
                     <td style={{ padding: '10px 12px', whiteSpace: 'nowrap' }}>
                       {isActive ? (
-                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', padding: '4px 10px', background: `${C.green}14`, border: `1px solid ${C.green}55`, color: C.green, borderRadius: '3px', fontSize: '12px', fontWeight: 600 }}>
-                          <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: C.green, display: 'inline-block', boxShadow: `0 0 6px ${C.green}` }} />
-                          نشطة · ACTIVE
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', padding: '4px 10px', background: `${C.green}14`, border: `1px solid ${C.green}55`, color: C.green, borderRadius: '3px', fontSize: '11px', fontWeight: 600 }}>
+                          <span style={{ width: '5px', height: '5px', borderRadius: '50%', background: C.green, boxShadow: `0 0 5px ${C.green}` }} />
+                          نشطة
                         </span>
+                      ) : pair.status === 'closed' ? (
+                        <span style={{ padding: '4px 10px', background: `${C.yellow}10`, border: `1px solid ${C.yellow}44`, color: C.yellow, borderRadius: '3px', fontSize: '11px' }}>🏆 مكتملة</span>
                       ) : (
-                        <div>
-                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', padding: '4px 10px', background: `${C.yellow}10`, border: `1px solid ${C.yellow}44`, color: C.yellow, borderRadius: '3px', fontSize: '12px', fontWeight: 600, marginBottom: m.claimedBy ? '4px' : 0 }}>
-                            🏆 تم الاستلام
-                          </span>
-                          {m.claimedBy && (
-                            <div style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '8px', color: C.dim, letterSpacing: '0.06em', marginTop: '3px' }}>
-                              بواسطة: {m.claimedBy}
-                            </div>
-                          )}
-                        </div>
+                        <span style={{ padding: '4px 10px', background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.15)', color: C.dim, borderRadius: '3px', fontSize: '11px' }}>⏰ منتهية</span>
                       )}
                     </td>
 
-                    {/* Actions */}
                     <td style={{ padding: '10px 12px', whiteSpace: 'nowrap' }}>
-                      {isDeleting ? (
+                      {isDel ? (
                         <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                          <span style={{ fontFamily: 'Rajdhani, sans-serif', fontSize: '12px', color: C.red }}>تأكيد الحذف؟</span>
-                          <button onClick={() => doDelete(m.id)}
-                            style={{ padding: '4px 10px', background: `${C.red}18`, border: `1px solid ${C.red}`, color: C.red, fontFamily: 'Orbitron, sans-serif', fontSize: '8px', cursor: 'pointer', borderRadius: '2px' }}>نعم 🗑️</button>
-                          <button onClick={() => setConfirmDel(null)}
-                            style={{ padding: '4px 10px', background: 'none', border: `1px solid ${C.border}`, color: C.dim, fontFamily: 'Orbitron, sans-serif', fontSize: '8px', cursor: 'pointer', borderRadius: '2px' }}>لا</button>
+                          <span style={{ fontFamily: 'Rajdhani, sans-serif', fontSize: '12px', color: C.red }}>حذف الاثنين؟</span>
+                          <button onClick={() => deletePair(pair)} style={{ padding: '4px 10px', background: `${C.red}18`, border: `1px solid ${C.red}`, color: C.red, fontFamily: 'Orbitron, sans-serif', fontSize: '8px', cursor: 'pointer', borderRadius: '2px' }}>نعم 🗑️</button>
+                          <button onClick={() => setConfirmDel(null)} style={{ padding: '4px 10px', background: 'none', border: `1px solid ${C.border}`, color: C.dim, fontFamily: 'Orbitron, sans-serif', fontSize: '8px', cursor: 'pointer', borderRadius: '2px' }}>لا</button>
                         </div>
                       ) : (
-                        <div style={{ display: 'flex', gap: '6px' }}>
-                          {isActive && (
-                            <button onClick={() => openEdit(m)}
-                              style={{ padding: '5px 12px', background: `${C.blue}12`, border: `1px solid ${C.blue}55`, color: C.blue, fontFamily: 'Orbitron, sans-serif', fontSize: '8px', letterSpacing: '0.08em', cursor: 'pointer', borderRadius: '2px', transition: 'background 0.15s' }}
-                              onMouseEnter={e => (e.currentTarget.style.background = `${C.blue}22`)}
-                              onMouseLeave={e => (e.currentTarget.style.background = `${C.blue}12`)}>
-                              📝 تعديل
-                            </button>
-                          )}
-                          <button onClick={() => setConfirmDel(m.id)}
-                            style={{ padding: '5px 12px', background: `${C.red}10`, border: `1px solid ${C.red}44`, color: C.red, fontFamily: 'Orbitron, sans-serif', fontSize: '8px', letterSpacing: '0.08em', cursor: 'pointer', borderRadius: '2px', transition: 'background 0.15s' }}
-                            onMouseEnter={e => (e.currentTarget.style.background = `${C.red}20`)}
-                            onMouseLeave={e => (e.currentTarget.style.background = `${C.red}10`)}>
-                            🗑️ حذف
-                          </button>
-                        </div>
+                        <button onClick={() => setConfirmDel(pair.pairId)}
+                          style={{ padding: '5px 12px', background: `${C.red}10`, border: `1px solid ${C.red}44`, color: C.red, fontFamily: 'Orbitron, sans-serif', fontSize: '8px', letterSpacing: '0.08em', cursor: 'pointer', borderRadius: '2px', transition: 'background 0.15s' }}
+                          onMouseEnter={e => (e.currentTarget.style.background = `${C.red}20`)}
+                          onMouseLeave={e => (e.currentTarget.style.background = `${C.red}10`)}>
+                          🗑️ حذف الزوج
+                        </button>
                       )}
                     </td>
                   </tr>
