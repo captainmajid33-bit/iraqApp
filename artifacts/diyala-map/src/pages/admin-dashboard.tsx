@@ -2,6 +2,11 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { useLocation } from "wouter";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
+import {
+  collection, onSnapshot, addDoc, updateDoc, deleteDoc,
+  doc, serverTimestamp,
+} from "firebase/firestore";
+import { db } from "@/lib/firebase";
 
 // ── Design tokens ─────────────────────────────────────────────────────────────
 const C = {
@@ -1439,10 +1444,305 @@ function TaxiTab({ toast }: { toast: ReturnType<typeof useToast> }) {
   );
 }
 
+// ══════════════════════════════════════════════════════════════════════════════
+// ── FuelStationsTab — إدارة محطات الوقود (Firestore CRUD) ────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+type QueueStatus = 'green' | 'yellow' | 'red';
+interface FuelStation {
+  id:           string;
+  name:         string;
+  address:      string;
+  latitude:     number;
+  longitude:    number;
+  queue_status: QueueStatus;
+}
+
+const QUEUE_LABELS: Record<QueueStatus, { label: string; color: string; emoji: string }> = {
+  green:  { label: 'فارغة · تعبئة سريعة', color: '#00dc64', emoji: '🟢' },
+  yellow: { label: 'ازدحام خفيف',          color: '#f5c518', emoji: '🟡' },
+  red:    { label: 'مزدحمة · قافلة',       color: '#ff2d50', emoji: '🔴' },
+};
+
+const EMPTY_FORM = { name: '', address: '', latitude: '', longitude: '', queue_status: 'green' as QueueStatus };
+
+function FuelStationsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
+  const [stations,     setStations]     = useState<FuelStation[]>([]);
+  const [loading,      setLoading]      = useState(true);
+  const [showForm,     setShowForm]     = useState(false);
+  const [editing,      setEditing]      = useState<FuelStation | null>(null);
+  const [form,         setForm]         = useState({ ...EMPTY_FORM });
+  const [saving,       setSaving]       = useState(false);
+  const [confirmDel,   setConfirmDel]   = useState<string | null>(null);
+
+  // ── Live Firestore listener ──────────────────────────────────────────────
+  useEffect(() => {
+    const unsub = onSnapshot(
+      collection(db, 'fuel_stations'),
+      snap => {
+        setStations(
+          snap.docs.map(d => ({ id: d.id, ...(d.data() as Omit<FuelStation, 'id'>) }))
+        );
+        setLoading(false);
+      },
+      err => { console.error('[FuelStationsTab] Firestore error:', err); setLoading(false); }
+    );
+    return () => unsub();
+  }, []);
+
+  // ── Open add form ────────────────────────────────────────────────────────
+  function openAdd() {
+    setEditing(null);
+    setForm({ ...EMPTY_FORM });
+    setShowForm(true);
+  }
+
+  // ── Open edit form ───────────────────────────────────────────────────────
+  function openEdit(s: FuelStation) {
+    setEditing(s);
+    setForm({ name: s.name, address: s.address ?? '', latitude: String(s.latitude), longitude: String(s.longitude), queue_status: s.queue_status });
+    setShowForm(true);
+  }
+
+  // ── Save (add or update) ─────────────────────────────────────────────────
+  async function save() {
+    const lat = parseFloat(form.latitude);
+    const lng = parseFloat(form.longitude);
+    if (!form.name.trim())            { toast.show('اسم المحطة مطلوب', false); return; }
+    if (isNaN(lat) || isNaN(lng))     { toast.show('الإحداثيات غير صحيحة', false); return; }
+    if (lat < 30 || lat > 38)         { toast.show('خط العرض يجب أن يكون بين 30 و 38', false); return; }
+    if (lng < 38 || lng > 50)         { toast.show('خط الطول يجب أن يكون بين 38 و 50', false); return; }
+
+    setSaving(true);
+    try {
+      const payload = {
+        name:         form.name.trim(),
+        address:      form.address.trim(),
+        latitude:     lat,
+        longitude:    lng,
+        queue_status: form.queue_status,
+        last_updated: serverTimestamp(),
+        updater_name: 'admin',
+      };
+      if (editing) {
+        await updateDoc(doc(db, 'fuel_stations', editing.id), payload);
+        toast.show('تم تحديث المحطة ✓');
+      } else {
+        await addDoc(collection(db, 'fuel_stations'), payload);
+        toast.show('تمت إضافة المحطة ✓');
+      }
+      setShowForm(false);
+    } catch (e: any) {
+      toast.show(`فشل الحفظ: ${e?.message ?? e}`, false);
+    } finally { setSaving(false); }
+  }
+
+  // ── Delete ───────────────────────────────────────────────────────────────
+  async function confirmDelete(id: string) {
+    try {
+      await deleteDoc(doc(db, 'fuel_stations', id));
+      toast.show('تم حذف المحطة');
+    } catch (e: any) {
+      toast.show(`فشل الحذف: ${e?.message ?? e}`, false);
+    } finally { setConfirmDel(null); }
+  }
+
+  const f = (field: keyof typeof form) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>
+    setForm(p => ({ ...p, [field]: e.target.value }));
+
+  // ── Render ───────────────────────────────────────────────────────────────
+  return (
+    <div style={{ direction: 'rtl' }}>
+      {/* Section header */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '20px', flexWrap: 'wrap', gap: '10px' }}>
+        <div>
+          <div style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '11px', color: C.yellow, letterSpacing: '0.18em', marginBottom: '4px' }}>⛽ FUEL STATIONS MANAGEMENT</div>
+          <div style={{ fontFamily: 'Rajdhani, sans-serif', fontSize: '13px', color: C.dim }}>
+            جميع التغييرات تُطبَّق فوراً على خريطة الزبائن عبر Firestore
+            {!loading && <span style={{ marginRight: '8px', color: C.green }}>· {stations.length} محطة مسجلة</span>}
+          </div>
+        </div>
+        <button
+          onClick={openAdd}
+          style={{ padding: '10px 20px', background: `${C.yellow}18`, border: `1px solid ${C.yellow}88`, color: C.yellow, fontFamily: 'Orbitron, sans-serif', fontSize: '10px', letterSpacing: '0.1em', cursor: 'pointer', borderRadius: '3px', boxShadow: neon(C.yellow, 8), display: 'flex', alignItems: 'center', gap: '6px' }}
+          onMouseEnter={e => (e.currentTarget.style.background = `${C.yellow}28`)}
+          onMouseLeave={e => (e.currentTarget.style.background = `${C.yellow}18`)}
+        >
+          ＋ إضافة محطة جديدة
+        </button>
+      </div>
+
+      {/* Add/Edit form modal */}
+      {showForm && (
+        <div style={{ position: 'fixed', inset: 0, zIndex: 500, background: 'rgba(0,0,0,0.78)', backdropFilter: 'blur(6px)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '16px' }}
+          onClick={e => { if (e.target === e.currentTarget) setShowForm(false); }}>
+          <div style={{ width: 'min(520px, 100%)', background: C.surface, border: `1px solid ${C.yellow}44`, borderRadius: '4px', boxShadow: `0 0 48px ${C.yellow}18, 0 8px 32px rgba(0,0,0,0.9)`, overflow: 'hidden' }}>
+            {/* Modal header */}
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 16px', borderBottom: `1px solid ${C.yellow}22`, background: `${C.yellow}08` }}>
+              <span style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '10px', color: C.yellow, letterSpacing: '0.15em' }}>
+                {editing ? '📝 تعديل محطة وقود' : '⛽ إضافة محطة جديدة'}
+              </span>
+              <button onClick={() => setShowForm(false)} style={{ background: 'none', border: 'none', color: C.dim, fontSize: '18px', cursor: 'pointer', padding: '0 4px' }}>×</button>
+            </div>
+
+            {/* Form body */}
+            <div style={{ padding: '18px 16px', display: 'flex', flexDirection: 'column', gap: '14px' }}>
+              {/* Name */}
+              <div>
+                <label style={LBL}>اسم المحطة *</label>
+                <input value={form.name} onChange={f('name')} onFocus={ff} onBlur={fb}
+                  placeholder="مثال: محطة باقوبة المركزية"
+                  style={FLD} />
+              </div>
+
+              {/* Address */}
+              <div>
+                <label style={LBL}>العنوان التفصيلي</label>
+                <input value={form.address} onChange={f('address')} onFocus={ff} onBlur={fb}
+                  placeholder="مثال: شارع المدينة، باقوبة"
+                  style={FLD} />
+              </div>
+
+              {/* Lat / Lng row */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+                <div>
+                  <label style={LBL}>خط العرض Latitude *</label>
+                  <input value={form.latitude} onChange={f('latitude')} onFocus={ff} onBlur={fb}
+                    type="number" step="0.0001" placeholder="33.7440"
+                    style={FLD} />
+                </div>
+                <div>
+                  <label style={LBL}>خط الطول Longitude *</label>
+                  <input value={form.longitude} onChange={f('longitude')} onFocus={ff} onBlur={fb}
+                    type="number" step="0.0001" placeholder="44.6530"
+                    style={FLD} />
+                </div>
+              </div>
+
+              {/* Queue status */}
+              <div>
+                <label style={LBL}>حالة الازدحام الافتراضية</label>
+                <select value={form.queue_status} onChange={f('queue_status')} onFocus={ff} onBlur={fb} style={FLD}>
+                  {(Object.entries(QUEUE_LABELS) as [QueueStatus, typeof QUEUE_LABELS[QueueStatus]][]).map(([k, v]) => (
+                    <option key={k} value={k}>{v.emoji} {v.label}</option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Firestore path hint */}
+              <div style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '8px', color: `${C.yellow}55`, letterSpacing: '0.1em', padding: '8px 10px', background: `${C.yellow}06`, border: `1px solid ${C.yellow}15`, borderRadius: '2px' }}>
+                📂 Firestore: fuel_stations/{editing ? editing.id : '<auto-id>'}
+              </div>
+
+              {/* Actions */}
+              <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end', paddingTop: '4px' }}>
+                <button onClick={() => setShowForm(false)} style={{ padding: '8px 18px', background: 'none', border: `1px solid ${C.border}`, color: C.dim, fontFamily: 'Orbitron, sans-serif', fontSize: '9px', letterSpacing: '0.1em', cursor: 'pointer', borderRadius: '3px' }}>إلغاء</button>
+                <button onClick={save} disabled={saving}
+                  style={{ padding: '8px 20px', background: saving ? `${C.yellow}08` : `${C.yellow}18`, border: `1px solid ${C.yellow}88`, color: C.yellow, fontFamily: 'Orbitron, sans-serif', fontSize: '9px', letterSpacing: '0.1em', cursor: saving ? 'wait' : 'pointer', borderRadius: '3px', boxShadow: neon(C.yellow, 6), display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  {saving
+                    ? <><svg width="12" height="12" viewBox="0 0 28 28" fill="none" style={{ animation: 'spin 0.9s linear infinite' }}><circle cx="14" cy="14" r="10" stroke={C.yellow} strokeWidth="2.5" strokeDasharray="22 14" strokeLinecap="round"/></svg>جاري الحفظ</>
+                    : (editing ? '💾 حفظ التعديلات' : '✓ إضافة المحطة')
+                  }
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Stations table */}
+      {loading ? (
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '12px', padding: '60px', color: C.dim }}>
+          <svg width="22" height="22" viewBox="0 0 28 28" fill="none" style={{ animation: 'spin 0.9s linear infinite' }}><circle cx="14" cy="14" r="10" stroke={C.yellow} strokeWidth="2.5" strokeDasharray="22 14" strokeLinecap="round"/></svg>
+          <span style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '11px', color: C.yellow }}>جاري تحميل البيانات من Firestore...</span>
+        </div>
+      ) : stations.length === 0 ? (
+        <div style={{ textAlign: 'center', padding: '60px', color: C.dim }}>
+          <div style={{ fontSize: '40px', marginBottom: '12px' }}>⛽</div>
+          <div style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '11px', letterSpacing: '0.12em' }}>لا توجد محطات مسجلة بعد</div>
+          <div style={{ fontFamily: 'Rajdhani, sans-serif', fontSize: '13px', marginTop: '6px' }}>اضغط "+ إضافة محطة جديدة" للبدء</div>
+        </div>
+      ) : (
+        <div style={{ overflowX: 'auto' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontFamily: 'Rajdhani, sans-serif' }}>
+            <thead>
+              <tr style={{ borderBottom: `1px solid ${C.border}` }}>
+                {['#', 'اسم المحطة', 'العنوان', 'Latitude', 'Longitude', 'حالة الازدحام', 'إجراءات'].map(h => (
+                  <th key={h} style={{ padding: '10px 12px', textAlign: 'right', fontFamily: 'Orbitron, sans-serif', fontSize: '8px', color: C.yellow, letterSpacing: '0.1em', whiteSpace: 'nowrap', background: `${C.yellow}06` }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {stations.map((s, idx) => {
+                const qs = QUEUE_LABELS[s.queue_status] ?? QUEUE_LABELS.green;
+                const isDeleting = confirmDel === s.id;
+                return (
+                  <tr key={s.id} style={{ borderBottom: `1px solid ${C.border}44`, background: idx % 2 === 0 ? 'transparent' : `${C.yellow}03`, transition: 'background 0.15s' }}
+                    onMouseEnter={e => (e.currentTarget.style.background = `${C.yellow}07`)}
+                    onMouseLeave={e => (e.currentTarget.style.background = idx % 2 === 0 ? 'transparent' : `${C.yellow}03`)}>
+                    {/* # */}
+                    <td style={{ padding: '10px 12px', fontFamily: 'Orbitron, sans-serif', fontSize: '9px', color: `${C.yellow}55`, whiteSpace: 'nowrap' }}>{idx + 1}</td>
+                    {/* Name */}
+                    <td style={{ padding: '10px 12px', color: C.text, fontWeight: 600, fontSize: '15px', minWidth: '160px' }}>{s.name}</td>
+                    {/* Address */}
+                    <td style={{ padding: '10px 12px', color: C.dim, fontSize: '13px', minWidth: '130px' }}>{s.address || '—'}</td>
+                    {/* Lat */}
+                    <td style={{ padding: '10px 12px', fontFamily: 'Orbitron, sans-serif', fontSize: '9px', color: C.blue, whiteSpace: 'nowrap' }}>{s.latitude.toFixed(4)}</td>
+                    {/* Lng */}
+                    <td style={{ padding: '10px 12px', fontFamily: 'Orbitron, sans-serif', fontSize: '9px', color: C.blue, whiteSpace: 'nowrap' }}>{s.longitude.toFixed(4)}</td>
+                    {/* Queue status */}
+                    <td style={{ padding: '10px 12px', whiteSpace: 'nowrap' }}>
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', padding: '4px 10px', background: `${qs.color}15`, border: `1px solid ${qs.color}55`, color: qs.color, borderRadius: '3px', fontSize: '12px', fontWeight: 600 }}>
+                        {qs.emoji} {qs.label}
+                      </span>
+                    </td>
+                    {/* Actions */}
+                    <td style={{ padding: '10px 12px', whiteSpace: 'nowrap' }}>
+                      {isDeleting ? (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                          <span style={{ fontFamily: 'Rajdhani, sans-serif', fontSize: '12px', color: C.red }}>تأكيد الحذف؟</span>
+                          <button onClick={() => confirmDelete(s.id)}
+                            style={{ padding: '4px 10px', background: `${C.red}18`, border: `1px solid ${C.red}`, color: C.red, fontFamily: 'Orbitron, sans-serif', fontSize: '8px', cursor: 'pointer', borderRadius: '2px' }}>نعم 🗑️</button>
+                          <button onClick={() => setConfirmDel(null)}
+                            style={{ padding: '4px 10px', background: 'none', border: `1px solid ${C.border}`, color: C.dim, fontFamily: 'Orbitron, sans-serif', fontSize: '8px', cursor: 'pointer', borderRadius: '2px' }}>لا</button>
+                        </div>
+                      ) : (
+                        <div style={{ display: 'flex', gap: '6px' }}>
+                          <button onClick={() => openEdit(s)}
+                            style={{ padding: '5px 12px', background: `${C.blue}12`, border: `1px solid ${C.blue}55`, color: C.blue, fontFamily: 'Orbitron, sans-serif', fontSize: '8px', letterSpacing: '0.08em', cursor: 'pointer', borderRadius: '2px', transition: 'background 0.15s' }}
+                            onMouseEnter={e => (e.currentTarget.style.background = `${C.blue}22`)}
+                            onMouseLeave={e => (e.currentTarget.style.background = `${C.blue}12`)}>
+                            📝 تعديل
+                          </button>
+                          <button onClick={() => setConfirmDel(s.id)}
+                            style={{ padding: '5px 12px', background: `${C.red}10`, border: `1px solid ${C.red}44`, color: C.red, fontFamily: 'Orbitron, sans-serif', fontSize: '8px', letterSpacing: '0.08em', cursor: 'pointer', borderRadius: '2px', transition: 'background 0.15s' }}
+                            onMouseEnter={e => (e.currentTarget.style.background = `${C.red}20`)}
+                            onMouseLeave={e => (e.currentTarget.style.background = `${C.red}10`)}>
+                            🗑️ حذف
+                          </button>
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* Live sync badge */}
+      <div style={{ marginTop: '16px', display: 'flex', alignItems: 'center', gap: '8px', padding: '8px 12px', background: `${C.green}08`, border: `1px solid ${C.green}25`, borderRadius: '3px', width: 'fit-content' }}>
+        <div style={{ width: '7px', height: '7px', borderRadius: '50%', background: C.green, boxShadow: neon(C.green, 6), animation: 'spin 2s linear infinite' }} />
+        <span style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '8px', color: C.green, letterSpacing: '0.15em' }}>LIVE SYNC · Firestore onSnapshot · التحديثات فورية على خريطة الزبائن</span>
+      </div>
+    </div>
+  );
+}
+
 // ── Admin Dashboard ───────────────────────────────────────────────────────────
 export function AdminDashboard() {
   const [, navigate] = useLocation();
-  const [tab, setTab] = useState<"merchants" | "map" | "categories" | "settings" | "taxi" | "drivers">("merchants");
+  const [tab, setTab] = useState<"merchants" | "map" | "categories" | "settings" | "taxi" | "drivers" | "fuel">("merchants");
   const [cats, setCats] = useState<Cat[]>([]);
   const [authChecked, setAuthChecked] = useState(false);
   const toast = useToast();
@@ -1483,6 +1783,7 @@ export function AdminDashboard() {
     { key: "categories" as const, en: "CATEGORIES",  ar: "الفئات" },
     { key: "drivers"    as const, en: "DRIVERS",     ar: "🚗 السائقون" },
     { key: "taxi"       as const, en: "TAXI",        ar: "🚕 التكسي" },
+    { key: "fuel"       as const, en: "FUEL",        ar: "⛽ محطات الوقود" },
     { key: "settings"   as const, en: "SETTINGS",    ar: "الإعدادات" },
   ];
 
@@ -1532,6 +1833,7 @@ export function AdminDashboard() {
         {tab === "categories" && <CategoriesTab cats={cats} onRefresh={loadCats} toast={toast} />}
         {tab === "drivers"    && <DriversTab toast={toast} />}
         {tab === "taxi"       && <TaxiTab toast={toast} />}
+        {tab === "fuel"       && <FuelStationsTab toast={toast} />}
         {tab === "settings"   && <SettingsTab toast={toast} />}
       </main>
 
