@@ -58,8 +58,9 @@ type Phase =
   | 'missions';   // Show missions list (reward earned)
 
 interface Props {
-  mapRef: React.MutableRefObject<L.Map | null>;
-  isDay?: boolean;
+  mapRef:    React.MutableRefObject<L.Map | null>;
+  isDay?:    boolean;
+  onUnlock?: () => void;
 }
 
 // ── Colors ──────────────────────────────────────────────────────────────────
@@ -448,7 +449,7 @@ function MissionCard({
 // ════════════════════════════════════════════════════════════════════════════
 // ── Main Component ────────────────────────────────────────────────────────
 // ════════════════════════════════════════════════════════════════════════════
-export function BountyShortcutButton({ mapRef, isDay = false }: Props) {
+export function BountyShortcutButton({ mapRef, isDay = false, onUnlock }: Props) {
   const [phase,    setPhase]    = useState<Phase>('idle');
   const [bounties, setBounties] = useState<ActiveBounty[]>([]);
   const [pressed,  setPressed]  = useState(false);
@@ -511,7 +512,10 @@ export function BountyShortcutButton({ mapRef, isDay = false }: Props) {
     if (!TEST_MODE) {
       // Production: GPT handles the overlay itself
       showRewardedAd(
-        () => { rewardEarnedRef.current = true; },
+        () => {
+          rewardEarnedRef.current = true;
+          onUnlock?.();   // ← فكّ قفل الماركرات عند منح المكافأة (GPT)
+        },
         (earned) => {
           if (earned) {
             setPhase('missions');
@@ -527,8 +531,9 @@ export function BountyShortcutButton({ mapRef, isDay = false }: Props) {
   // ── Simulated ad: reward earned (watched to end) ──────────────────────────
   const handleSimRewardEarned = useCallback(() => {
     rewardEarnedRef.current = true;
+    onUnlock?.();           // ← فكّ قفل الماركرات على الخريطة فوراً
     setPhase('missions');
-  }, []);
+  }, [onUnlock]);
 
   // ── Simulated ad: user closed early ───────────────────────────────────────
   const handleSimClosedEarly = useCallback(() => {

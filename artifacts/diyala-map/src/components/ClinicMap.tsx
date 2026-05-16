@@ -280,6 +280,8 @@ export function ClinicMap({
   adminMode = false, onMapClick, onAdminDelete,
 }: ClinicMapProps) {
   const theme        = useMapTheme();
+  const [isBountyUnlocked, setIsBountyUnlocked] = useState(false);
+
   const mapContainer      = useRef<HTMLDivElement>(null);
   const mapRef            = useRef<L.Map|null>(null);
   const tileLayerRef      = useRef<L.TileLayer|null>(null);
@@ -4910,12 +4912,14 @@ export function ClinicMap({
         userLocation={userLocation}
         isDay={theme.isDay}
         filterActive={!!activeFilter}
+        markersVisible={isBountyUnlocked}
       />
 
       {/* ── Bounty Shortcut FAB — زر المهمة العائم ── */}
       <BountyShortcutButton
         mapRef={mapRef}
         isDay={theme.isDay}
+        onUnlock={() => setIsBountyUnlocked(true)}
       />
 
       {/* ── Live Market Ticker ── */}

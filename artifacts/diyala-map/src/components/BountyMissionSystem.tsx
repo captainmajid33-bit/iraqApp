@@ -44,7 +44,8 @@ interface Props {
   mapRef:       React.MutableRefObject<L.Map | null>;
   userLocation: { lat: number; lng: number } | null;
   isDay?:       boolean;
-  filterActive?: boolean;
+  filterActive?:    boolean;
+  markersVisible?:  boolean;
 }
 
 // ── Constants ──────────────────────────────────────────────────────────────────
@@ -113,7 +114,7 @@ function makeMissionIcon(): L.DivIcon {
 
 // ── Component ──────────────────────────────────────────────────────────────────
 export function BountyMissionSystem({
-  mapRef, userLocation, isDay = false, filterActive = false,
+  mapRef, userLocation, isDay = false, filterActive = false, markersVisible = false,
 }: Props) {
   const [mapReady,    setMapReady]    = useState(false);
   const [bounties,    setBounties]    = useState<BountyDoc[]>([]);
@@ -175,7 +176,8 @@ export function BountyMissionSystem({
     if (!mapReady) return;
     const map = mapRef.current; if (!map) return;
 
-    if (filterActive) {
+    // ── Strict Visibility Lock: markers hidden until user watches the ad ──────
+    if (filterActive || !markersVisible) {
       markersRef.current.forEach(m => m.remove());
       markersRef.current.clear();
       return;
@@ -190,7 +192,7 @@ export function BountyMissionSystem({
       marker.on('click', () => { setSelected(b); setPhase('idle'); });
       markersRef.current.set(b.id, marker);
     });
-  }, [bounties, mapReady, mapRef, filterActive]);
+  }, [bounties, mapReady, mapRef, filterActive, markersVisible]);
 
   // ── Countdown overlays ─────────────────────────────────────────────────────
   useEffect(() => {
@@ -200,7 +202,7 @@ export function BountyMissionSystem({
       const now = Date.now();
       const next: Array<{id:string;x:number;y:number;ms:number}> = [];
       bounties.forEach(b => {
-        if (!b.expiresAt || filterActive) return;
+        if (!b.expiresAt || filterActive || !markersVisible) return;
         const ms = b.expiresAt.toMillis() - now;
         if (ms <= 0) {
           updateDoc(doc(db, 'bounties', b.id), { status: 'expired' }).catch(() => {});
@@ -220,7 +222,7 @@ export function BountyMissionSystem({
       clearInterval(iv);
       if (map) map.off('move zoom resize', updateOverlays);
     };
-  }, [bounties, mapReady, mapRef, filterActive]);
+  }, [bounties, mapReady, mapRef, filterActive, markersVisible]);
 
   // ── Sync selected ──────────────────────────────────────────────────────────
   useEffect(() => {
