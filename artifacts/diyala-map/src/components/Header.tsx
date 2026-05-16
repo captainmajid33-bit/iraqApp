@@ -1,11 +1,15 @@
 import { useEffect, useState, useRef } from "react";
 
 const API      = "/api";
-const HEADER_H = 190;
 const CLOCK_W  = 154;
 const INTERVAL = 5000; // ms between slides
 
-type MediaItem = { type: "image" | "video"; url: string };
+type MediaItem = {
+  type:          "image" | "video";
+  url:           string;
+  customHeight?: number;
+  objectFit?:    "cover" | "contain" | "fill";
+};
 
 function parseMediaItems(raw: string): MediaItem[] {
   if (!raw) return [];
@@ -77,15 +81,18 @@ export function Header() {
     return () => { timerRef.current && clearInterval(timerRef.current); };
   }, [items.length]);
 
-  const current   = items[idx] ?? null;
-  const showMedia = Boolean(current);
-  const hh        = time.slice(0, 5);
-  const ss        = time.slice(5);
+  const current    = items[idx] ?? null;
+  const showMedia  = Boolean(current);
+  const headerH    = current?.customHeight ?? 190;
+  const mediaFit   = current?.objectFit   ?? "cover";
+  const hh         = time.slice(0, 5);
+  const ss         = time.slice(5);
 
   return (
     <header
       style={{
-        height:        `${HEADER_H}px`,
+        height:        `${headerH}px`,
+        transition:    "height 0.4s ease",
         display:       "flex",
         flexDirection: "row",
         flexShrink:    0,
@@ -130,7 +137,7 @@ export function Header() {
                   style={{
                     position: "absolute", inset: 0,
                     width: "100%", height: "100%",
-                    objectFit: "cover", objectPosition: "center",
+                    objectFit: mediaFit, objectPosition: "center",
                     display: "block",
                   }}
                 />
@@ -142,7 +149,7 @@ export function Header() {
                   style={{
                     position: "absolute", inset: 0,
                     width: "100%", height: "100%",
-                    objectFit: "cover", objectPosition: "center",
+                    objectFit: mediaFit, objectPosition: "center",
                     display: "block",
                   }}
                 />

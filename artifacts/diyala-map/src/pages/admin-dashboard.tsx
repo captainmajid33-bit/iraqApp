@@ -562,7 +562,12 @@ function CategoriesTab({ cats, onRefresh, toast }: { cats: Cat[]; onRefresh: () 
 }
 
 // ── MediaItem type ────────────────────────────────────────────────────────────
-type MediaItem = { type: "image" | "video"; url: string };
+type MediaItem = {
+  type:         "image" | "video";
+  url:          string;
+  customHeight?: number;
+  objectFit?:   "cover" | "contain" | "fill";
+};
 
 function parseMediaItems(raw: string): MediaItem[] {
   if (!raw) return [];
@@ -577,6 +582,13 @@ function parseMediaItems(raw: string): MediaItem[] {
   return [];
 }
 
+const DEFAULT_HEIGHT = 190;
+const FIT_OPTIONS: { value: "cover" | "contain" | "fill"; label: string }[] = [
+  { value: "cover",   label: "Cover 📐 — ملء الشاشة مع قص الأطراف" },
+  { value: "contain", label: "Contain 📺 — إظهار كامل مع حواف" },
+  { value: "fill",    label: "Fill 🔄 — تمديد لملء الأبعاد بالكامل" },
+];
+
 function detectType(file: File): "image" | "video" {
   if (file.type.startsWith("video/")) return "video";
   return "image";
@@ -590,7 +602,12 @@ function SettingsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
   const [uploadProgress, setUploadProgress] = useState(0);
   const [urlInput,       setUrlInput]       = useState("");
   const [urlType,        setUrlType]        = useState<"image" | "video">("image");
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [newHeight,      setNewHeight]      = useState<number>(DEFAULT_HEIGHT);
+  const [newFit,         setNewFit]         = useState<"cover" | "contain" | "fill">("cover");
+  const [previewUrl,     setPreviewUrl]     = useState<string>("");
+  const [previewType,    setPreviewType]    = useState<"image" | "video">("image");
+  const fileInputRef     = useRef<HTMLInputElement>(null);
+  const previewVideoRef  = useRef<HTMLVideoElement>(null);
 
   // Load on mount
   useEffect(() => {
@@ -651,7 +668,7 @@ function SettingsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
       setUploadProgress(95);
 
       const servingUrl = `/api/storage${objectPath}`;
-      const next = [...items, { type: mediaType, url: servingUrl }];
+      const next = [...items, { type: mediaType, url: servingUrl, customHeight: newHeight, objectFit: newFit }];
       await persistItems(next, `✓ تم رفع ${isVideo ? "الفيديو" : "الصورة"} وإضافته للسلايدر`);
       setUploadProgress(100);
     } catch (err: any) {
@@ -665,15 +682,22 @@ function SettingsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files ?? []);
     e.target.value = "";
+    if (files.length > 0) {
+      const f = files[0];
+      const objUrl = URL.createObjectURL(f);
+      setPreviewUrl(objUrl);
+      setPreviewType(detectType(f));
+    }
     for (const f of files) await uploadFile(f);
   };
 
   const handleAddUrl = async () => {
     const url = urlInput.trim();
     if (!url) return;
-    const next = [...items, { type: urlType, url }];
+    const next = [...items, { type: urlType, url, customHeight: newHeight, objectFit: newFit }];
     await persistItems(next, "✓ تمت إضافة الرابط للسلايدر");
     setUrlInput("");
+    setPreviewUrl("");
   };
 
   const handleDelete = (idx: number) => {
@@ -759,7 +783,11 @@ function SettingsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
           <input
             style={{ ...FLD, flex: 1, minWidth: "200px" }}
             value={urlInput}
-            onChange={e => setUrlInput(e.target.value)}
+            onChange={e => {
+              setUrlInput(e.target.value);
+              setPreviewUrl(e.target.value.trim());
+              setPreviewType(urlType);
+            }}
             placeholder="https://example.com/media.jpg"
             onFocus={ff} onBlur={fb}
             onKeyDown={e => e.key === "Enter" && !busy && handleAddUrl()}
@@ -778,6 +806,193 @@ function SettingsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
           >
             + إضافة
           </button>
+        </div>
+      </div>
+
+      {/* ══════════════════════════════════════════════════════════
+          DIMENSION CONTROLS + LIVE PREVIEW
+      ══════════════════════════════════════════════════════════ */}
+      <div style={{ background: C.surf2, border: `1px solid ${C.border}`, borderRadius: "4px", padding: "18px", marginBottom: "16px" }}>
+
+        {/* Section label */}
+        <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "16px" }}>
+          <span style={{ fontFamily: "Orbitron, sans-serif", fontSize: "9px", color: C.blue, letterSpacing: "0.14em" }}>DIMENSION CONTROLS · أبعاد العرض</span>
+          <div style={{ flex: 1, height: "1px", background: C.border }} />
+        </div>
+
+        {/* Height slider */}
+        <div style={{ marginBottom: "14px" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
+            <label style={{ ...LBL, marginBottom: 0 }}>ارتفاع البانر (Height)</label>
+            <span style={{
+              fontFamily: "Orbitron, sans-serif", fontSize: "11px",
+              color: C.blue, background: `${C.blue}12`,
+              border: `1px solid ${C.blue}44`,
+              padding: "2px 10px", borderRadius: "2px", letterSpacing: "0.08em",
+            }}>
+              {newHeight}px
+            </span>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+            <span style={{ fontFamily: "Rajdhani, sans-serif", fontSize: "10px", color: C.dim, flexShrink: 0 }}>100px</span>
+            <input
+              type="range"
+              min={100}
+              max={400}
+              step={5}
+              value={newHeight}
+              onChange={e => setNewHeight(Number(e.target.value))}
+              style={{ flex: 1, accentColor: C.blue, cursor: "pointer" }}
+            />
+            <span style={{ fontFamily: "Rajdhani, sans-serif", fontSize: "10px", color: C.dim, flexShrink: 0 }}>400px</span>
+          </div>
+        </div>
+
+        {/* Object-fit dropdown */}
+        <div style={{ marginBottom: "16px" }}>
+          <label style={LBL}>طريقة ملء الميديا (Object Fit)</label>
+          <select
+            value={newFit}
+            onChange={e => setNewFit(e.target.value as "cover" | "contain" | "fill")}
+            style={{ ...FLD, width: "100%", cursor: "pointer" }}
+          >
+            {FIT_OPTIONS.map(o => (
+              <option key={o.value} value={o.value}>{o.label}</option>
+            ))}
+          </select>
+        </div>
+
+        {/* ── Live Preview Box ── */}
+        <div>
+          <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "10px" }}>
+            <span style={{ fontFamily: "Orbitron, sans-serif", fontSize: "9px", color: C.purple, letterSpacing: "0.14em" }}>LIVE PREVIEW · معاينة البانر</span>
+            <div style={{ flex: 1, height: "1px", background: C.border }} />
+            {previewUrl && (
+              <button
+                onClick={() => setPreviewUrl("")}
+                style={{ padding: "2px 8px", background: `${C.red}10`, border: `1px solid ${C.red}33`, color: C.red, fontSize: "9px", fontFamily: "Orbitron, sans-serif", borderRadius: "2px", cursor: "pointer", letterSpacing: "0.06em" }}
+              >
+                ✕ إغلاق
+              </button>
+            )}
+          </div>
+
+          {/* The preview frame — exact dimensions and look of the real header */}
+          <div style={{
+            width: "100%",
+            height: `${newHeight}px`,
+            transition: "height 0.3s ease",
+            background: "#05080f",
+            border: `1px solid rgba(123,47,247,0.5)`,
+            borderRadius: "4px",
+            overflow: "hidden",
+            position: "relative",
+            boxShadow: "0 0 20px rgba(123,47,247,0.12)",
+            display: "flex",
+            flexDirection: "row",
+          }}>
+            {/* Top neon edge */}
+            <div style={{
+              position: "absolute", top: 0, left: 0, right: 0, height: "2px", zIndex: 3,
+              background: "linear-gradient(90deg,transparent 0%,#7b2ff7 30%,#00d4ff 70%,transparent 100%)",
+            }} />
+
+            {/* Left — media area */}
+            <div style={{ flex: 1, position: "relative", overflow: "hidden" }}>
+              {previewUrl ? (
+                <>
+                  {previewType === "video" ? (
+                    <video
+                      ref={previewVideoRef}
+                      key={previewUrl}
+                      src={previewUrl}
+                      autoPlay
+                      muted
+                      loop
+                      playsInline
+                      style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: newFit, objectPosition: "center", display: "block" }}
+                    />
+                  ) : (
+                    <img
+                      key={previewUrl}
+                      src={previewUrl}
+                      alt="preview"
+                      style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: newFit, objectPosition: "center", display: "block" }}
+                    />
+                  )}
+                  {/* Right-edge fade */}
+                  <div style={{
+                    position: "absolute", inset: 0, zIndex: 1,
+                    background: "linear-gradient(to right, rgba(5,8,15,0.05) 60%, rgba(5,8,15,0.75) 100%)",
+                    pointerEvents: "none",
+                  }} />
+                  {/* Fit label overlay */}
+                  <div style={{
+                    position: "absolute", top: "8px", right: "8px", zIndex: 4,
+                    fontFamily: "Orbitron, sans-serif", fontSize: "8px", letterSpacing: "0.1em",
+                    color: "#fff", background: "rgba(0,0,0,0.55)",
+                    padding: "3px 8px", borderRadius: "2px",
+                    border: `1px solid ${C.blue}44`,
+                    backdropFilter: "blur(4px)",
+                  }}>
+                    {newFit.toUpperCase()}
+                  </div>
+                </>
+              ) : (
+                <div style={{
+                  position: "absolute", inset: 0,
+                  background: "radial-gradient(ellipse at 40% 50%, rgba(123,47,247,0.07) 0%, rgba(5,8,15,0) 68%)",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                }}>
+                  <div style={{
+                    border: "1px dashed rgba(123,47,247,0.25)",
+                    padding: "8px 20px",
+                    fontFamily: "Orbitron, sans-serif", fontSize: "8px",
+                    color: "rgba(123,47,247,0.35)", letterSpacing: "0.14em",
+                    textAlign: "center",
+                  }}>
+                    اختر ملفاً أو ادخل رابطاً<br />
+                    <span style={{ opacity: 0.5 }}>لتظهر المعاينة هنا</span>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Right — clock placeholder */}
+            <div style={{
+              width: "154px", flexShrink: 0,
+              background: "rgba(5,8,15,0.92)",
+              display: "flex", flexDirection: "column",
+              alignItems: "center", justifyContent: "center", gap: "2px",
+              position: "relative",
+            }}>
+              <div style={{
+                position: "absolute", top: 0, bottom: 0, left: 0, width: "1px",
+                background: "linear-gradient(180deg,transparent 0%,#7b2ff788 25%,#00d4ff88 75%,transparent 100%)",
+              }} />
+              <span style={{ fontFamily: "Orbitron, sans-serif", fontSize: "6px", color: "rgba(0,212,255,0.4)", letterSpacing: "0.2em" }}>SYSTEM TIME</span>
+              <span style={{ fontFamily: "Orbitron, sans-serif", fontSize: "28px", fontWeight: 700, color: "#7b2ff7", textShadow: "0 0 14px rgba(123,47,247,0.8)", lineHeight: 1 }}>00:00</span>
+              <span style={{ fontFamily: "Orbitron, sans-serif", fontSize: "16px", color: "#00d4ff", textShadow: "0 0 10px rgba(0,212,255,0.6)", lineHeight: 1 }}>:00</span>
+            </div>
+
+            {/* Bottom neon edge */}
+            <div style={{
+              position: "absolute", bottom: 0, left: 0, right: 0, height: "1px", zIndex: 3,
+              background: "linear-gradient(90deg,transparent 0%,rgba(123,47,247,0.6) 40%,rgba(0,212,255,0.6) 60%,transparent 100%)",
+            }} />
+          </div>
+
+          <div style={{ marginTop: "8px", display: "flex", gap: "12px", flexWrap: "wrap" }}>
+            <span style={{ fontFamily: "Rajdhani, sans-serif", fontSize: "11px", color: C.dim }}>
+              الارتفاع المختار: <span style={{ color: C.blue, fontFamily: "Orbitron, sans-serif", fontSize: "10px" }}>{newHeight}px</span>
+            </span>
+            <span style={{ fontFamily: "Rajdhani, sans-serif", fontSize: "11px", color: C.dim }}>
+              طريقة الملء: <span style={{ color: C.purple, fontFamily: "Orbitron, sans-serif", fontSize: "10px" }}>{newFit.toUpperCase()}</span>
+            </span>
+            <span style={{ fontFamily: "Rajdhani, sans-serif", fontSize: "11px", color: `${C.green}aa` }}>
+              ✓ سيُحفظ مع العنصر التالي الذي تضيفه
+            </span>
+          </div>
         </div>
       </div>
 
@@ -841,6 +1056,31 @@ function SettingsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
                 <div style={{ flex: 1, fontFamily: "Rajdhani, sans-serif", fontSize: "11px", color: C.dim, wordBreak: "break-all", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                   {item.url}
                 </div>
+
+                {/* Height badge */}
+                {item.customHeight && (
+                  <div style={{
+                    flexShrink: 0, padding: "2px 7px",
+                    background: `${C.blue}12`, border: `1px solid ${C.blue}44`,
+                    borderRadius: "2px", fontFamily: "Orbitron, sans-serif",
+                    fontSize: "8px", color: C.blue, letterSpacing: "0.06em",
+                  }}>
+                    {item.customHeight}px
+                  </div>
+                )}
+
+                {/* ObjectFit badge */}
+                {item.objectFit && (
+                  <div style={{
+                    flexShrink: 0, padding: "2px 7px",
+                    background: `${C.purple}12`, border: `1px solid ${C.purple}44`,
+                    borderRadius: "2px", fontFamily: "Orbitron, sans-serif",
+                    fontSize: "8px", color: C.purple, letterSpacing: "0.06em",
+                    textTransform: "uppercase",
+                  }}>
+                    {item.objectFit}
+                  </div>
+                )}
 
                 {/* Index badge */}
                 <div style={{
