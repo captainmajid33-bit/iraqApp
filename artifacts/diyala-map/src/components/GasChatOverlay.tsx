@@ -84,6 +84,9 @@ export function GasChatOverlay({ gasOrderId, agentPhone, onMinimize, onNewMessag
   // ── 1. Firestore real-time listener ─────────────────────────────────────
   useEffect(() => {
     if (!safeId) return;
+    const fsPath = `orders/${safeId}/messages`;
+    console.log(`🔥 CUSTOMER CHAT PATH -> ${fsPath}`);
+
     const q = query(
       collection(db, 'orders', String(safeId), 'messages'),
       orderBy('timestamp', 'asc'),
@@ -92,6 +95,7 @@ export function GasChatOverlay({ gasOrderId, agentPhone, onMinimize, onNewMessag
     const unsub = onSnapshot(
       q,
       (snap) => {
+        console.log(`🔥 onSnapshot fired — ${snap.docs.length} doc(s) at ${fsPath}`);
         setLiveOk(true);
         const msgs: GasMsg[] = snap.docs.map(d => {
           const data = d.data();
@@ -171,15 +175,18 @@ export function GasChatOverlay({ gasOrderId, agentPhone, onMinimize, onNewMessag
     const text = input.trim();
     if (!text || sending || !safeId) return;
     setSending(true);
+    const fsPath = `orders/${safeId}/messages`;
+    console.log(`🔥 SEND -> ${fsPath}`, { text, sender: 'customer' });
     try {
       await addDoc(collection(db, 'orders', String(safeId), 'messages'), {
         text,
         sender:    'customer',
         timestamp: serverTimestamp(),
       });
+      console.log(`🔥 SEND SUCCESS -> ${fsPath}`);
       setInput('');
     } catch (e: any) {
-      console.error('[GasChat] addDoc failed:', e?.code, e?.message);
+      console.error(`🔥 SEND FAILED -> ${fsPath}`, e?.code, e?.message);
     } finally {
       setSending(false);
     }
