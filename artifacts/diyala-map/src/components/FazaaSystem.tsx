@@ -101,9 +101,10 @@ function injectFazaaCSS() {
   const s = document.createElement('style');
   s.id = 'fazaa-styles';
   s.textContent = `
-    @keyframes fz-bob  { 0%,100%{transform:translateY(0) scale(1)} 50%{transform:translateY(-6px) scale(1.1)} }
-    @keyframes fz-ring { 0%{transform:scale(0.5);opacity:0.9}       100%{transform:scale(2.8);opacity:0} }
-    @keyframes fz-spin { from{transform:rotate(0deg)} to{transform:rotate(360deg)} }
+    @keyframes fz-bob      { 0%,100%{transform:translateY(0) scale(1)} 50%{transform:translateY(-6px) scale(1.1)} }
+    @keyframes fz-ring     { 0%{transform:scale(0.5);opacity:0.9}       100%{transform:scale(2.8);opacity:0} }
+    @keyframes fz-spin     { from{transform:rotate(0deg)} to{transform:rotate(360deg)} }
+    @keyframes fz-progress { 0%{transform:translateX(250%)} 100%{transform:translateX(-250%)} }
     .fz-wrap { position:relative; animation:fz-bob 2s ease-in-out infinite; cursor:pointer; display:inline-block; }
     .fz-ring { position:absolute; top:50%; left:50%; width:48px; height:48px; margin:-24px 0 0 -24px;
                border-radius:50%; border:2.5px solid #ff2d78;
@@ -506,23 +507,73 @@ export function FazaaSystem({ mapRef, userLocation, clearMapForRescue }: FazaaSy
         </div>
       )}
 
-      {/* ── Waiting screen (requester) ── */}
+      {/* ── Waiting banner (requester) — thin, non-blocking ── */}
       {phase === 'waiting' && (
-        <div style={{ ...S.overlay, alignItems:'center', justifyContent:'center' }}>
-          <div style={S.centerCard}>
-            <div style={{ fontSize:'52px', marginBottom:'14px', animation:'fz-bob 2s ease-in-out infinite' }}>🤝</div>
-            <div style={{ ...S.title, color:'#ff8fa0' }}>جاري نداء النشامى القريبين...</div>
-            <div style={S.sub}>{ISSUE_MAP[selectedIssue] ?? selectedIssue}</div>
-            <div style={{ display:'flex', justifyContent:'center', margin:'18px 0' }}>
+        <div style={{
+          position:       'fixed',
+          top:            '0',
+          left:           '0',
+          right:          '0',
+          zIndex:         1300,
+          display:        'flex',
+          flexDirection:  'column',
+          pointerEvents:  'none',
+        }}>
+          {/* Progress bar */}
+          <div style={{ height: '3px', background: 'rgba(255,45,80,0.15)', overflow: 'hidden' }}>
+            <div style={{
+              height:     '100%',
+              width:      '40%',
+              background: 'linear-gradient(90deg, transparent, #ff2d50, transparent)',
+              animation:  'fz-progress 1.6s ease-in-out infinite',
+            }} />
+          </div>
+
+          {/* Banner row */}
+          <div style={{
+            display:        'flex',
+            alignItems:     'center',
+            justifyContent: 'space-between',
+            padding:        '9px 16px',
+            background:     'rgba(8,10,20,0.94)',
+            borderBottom:   '1px solid rgba(255,45,80,0.28)',
+            backdropFilter: 'blur(10px)',
+            boxShadow:      '0 4px 24px rgba(255,45,80,0.18)',
+            direction:      'rtl',
+            pointerEvents:  'auto',
+          }}>
+            {/* Right: spinner + text */}
+            <div style={{ display:'flex', alignItems:'center', gap:'10px' }}>
               <div style={{
-                width:'38px', height:'38px',
-                border:'3px solid rgba(255,45,80,0.2)',
-                borderTop:'3px solid #ff2d50',
+                width:'16px', height:'16px', flexShrink:0,
+                border:'2px solid rgba(255,45,80,0.25)',
+                borderTop:'2px solid #ff2d50',
                 borderRadius:'50%',
                 animation:'fz-spin 0.9s linear infinite',
               }} />
+              <div style={{ fontFamily:"'Tajawal',sans-serif", fontSize:'13px', color:'#ffb3be', lineHeight:1.4 }}>
+                جاري نداء النشامى لـ {ISSUE_MAP[selectedIssue] ?? selectedIssue}
+              </div>
             </div>
-            <button onClick={handleCancelWaiting} style={S.cancelBtn}>إلغاء الطلب</button>
+
+            {/* Left: cancel */}
+            <button
+              onClick={handleCancelWaiting}
+              style={{
+                background:   'none',
+                border:       '1px solid rgba(255,45,80,0.35)',
+                borderRadius: '6px',
+                color:        'rgba(255,130,150,0.85)',
+                fontFamily:   "'Tajawal',sans-serif",
+                fontSize:     '12px',
+                padding:      '4px 10px',
+                cursor:       'pointer',
+                whiteSpace:   'nowrap',
+                flexShrink:   0,
+              }}
+            >
+              إلغاء ✕
+            </button>
           </div>
         </div>
       )}
