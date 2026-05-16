@@ -28,6 +28,7 @@ interface BountyMission {
 interface Props {
   mapRef:       React.MutableRefObject<L.Map | null>;
   userLocation: { lat: number; lng: number } | null;
+  isDay?:       boolean;
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -120,7 +121,7 @@ function makeMissionIcon(): L.DivIcon {
 }
 
 // ── Component ─────────────────────────────────────────────────────────────────
-export function BountyMissionSystem({ mapRef, userLocation }: Props) {
+export function BountyMissionSystem({ mapRef, userLocation, isDay = false }: Props) {
   const [mapReady,       setMapReady]       = useState(false);
   const [missions,       setMissions]       = useState<BountyMission[]>([]);
   const [selected,       setSelected]       = useState<BountyMission | null>(null);
@@ -480,7 +481,7 @@ export function BountyMissionSystem({ mapRef, userLocation }: Props) {
       {/* Bottom Sheet */}
       <div style={{
         position: 'absolute', bottom: 0, left: 0, right: 0, zIndex: 3001,
-        background: 'rgba(5,8,15,0.99)',
+        background: isDay ? 'rgba(248,249,252,0.98)' : 'rgba(5,8,15,0.99)',
         borderTop: '2px solid #f5c518',
         boxShadow: '0 -8px 48px rgba(245,197,24,0.28), 0 -2px 16px rgba(245,197,24,0.14)',
         backdropFilter: 'blur(20px)',
@@ -498,12 +499,12 @@ export function BountyMissionSystem({ mapRef, userLocation }: Props) {
           style={{
             position: 'absolute', top: '12px', left: '16px',
             background: 'none', border: 'none',
-            color: 'rgba(255,255,255,0.35)', fontSize: '22px',
+            color: isDay ? 'rgba(13,17,23,0.35)' : 'rgba(255,255,255,0.35)', fontSize: '22px',
             cursor: 'pointer', padding: '4px', lineHeight: 1,
             transition: 'color 0.2s',
           }}
-          onMouseEnter={e => (e.currentTarget.style.color = '#fff')}
-          onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.35)')}
+          onMouseEnter={e => (e.currentTarget.style.color = isDay ? '#0d1117' : '#fff')}
+          onMouseLeave={e => (e.currentTarget.style.color = isDay ? 'rgba(13,17,23,0.35)' : 'rgba(255,255,255,0.35)')}
         >×</button>
 
         {/* ── Mission header ── */}
@@ -514,7 +515,7 @@ export function BountyMissionSystem({ mapRef, userLocation }: Props) {
               fontFamily: 'Orbitron, sans-serif', fontSize: '8px',
               color: '#f5c518', letterSpacing: '0.2em', marginBottom: '4px',
             }}>⚡ BOUNTY MISSION · مهمة جائزة</div>
-            <div style={{ fontSize: '19px', fontWeight: 800, color: '#fff', lineHeight: 1.25 }}>
+            <div style={{ fontSize: '19px', fontWeight: 800, color: isDay ? '#0d1117' : '#fff', lineHeight: 1.25 }}>
               {selected.title}
             </div>
           </div>
@@ -522,7 +523,7 @@ export function BountyMissionSystem({ mapRef, userLocation }: Props) {
 
         {/* Description */}
         <div style={{
-          fontSize: '14px', color: 'rgba(255,255,255,0.55)',
+          fontSize: '14px', color: isDay ? 'rgba(13,17,23,0.6)' : 'rgba(255,255,255,0.55)',
           lineHeight: 1.7, marginBottom: '16px',
           paddingBottom: '14px',
           borderBottom: '1px solid rgba(245,197,24,0.1)',
@@ -535,7 +536,7 @@ export function BountyMissionSystem({ mapRef, userLocation }: Props) {
           display: 'flex', alignItems: 'center',
           justifyContent: 'space-between', marginBottom: '14px',
         }}>
-          <div style={{ fontSize: '13px', color: 'rgba(255,255,255,0.4)' }}>قيمة الجائزة</div>
+          <div style={{ fontSize: '13px', color: isDay ? 'rgba(13,17,23,0.45)' : 'rgba(255,255,255,0.4)' }}>قيمة الجائزة</div>
           <div style={{
             fontFamily: 'Orbitron, sans-serif', fontSize: '17px',
             color: '#f5c518', fontWeight: 700,

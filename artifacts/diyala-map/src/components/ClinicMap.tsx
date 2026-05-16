@@ -9,6 +9,7 @@ import { FazaaSystem } from './FazaaSystem';
 import { MarketTicker } from './MarketTicker';
 import { FuelStationRadar } from './FuelStationRadar';
 import { BountyMissionSystem } from './BountyMissionSystem';
+import { useMapTheme } from '@/lib/mapTheme';
 import { collection, query, where, getDocs, onSnapshot, orderBy, limit } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 
@@ -275,8 +276,10 @@ export function ClinicMap({
   routeTarget, onNavigate, onClearRoute,
   adminMode = false, onMapClick, onAdminDelete,
 }: ClinicMapProps) {
+  const theme        = useMapTheme();
   const mapContainer = useRef<HTMLDivElement>(null);
   const mapRef       = useRef<L.Map|null>(null);
+  const tileLayerRef = useRef<L.TileLayer|null>(null);
   const markersRef   = useRef<{[id:number]:L.Marker}>({});
   const userMarkerRef  = useRef<L.Marker|null>(null);
   const userCircleRef  = useRef<L.Circle|null>(null);
@@ -912,10 +915,11 @@ export function ClinicMap({
     `;
     document.head.appendChild(style);
     mapRef.current=L.map(mapContainer.current,{center:[33.7451,44.6488],zoom:13,zoomControl:true});
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',{
+    tileLayerRef.current = L.tileLayer(theme.tileUrl,{
       attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/">CARTO</a>',
       subdomains:'abcd',maxZoom:20,
-    }).addTo(mapRef.current);
+    });
+    tileLayerRef.current.addTo(mapRef.current);
     mapRef.current.on('click',(e:L.LeafletMouseEvent)=>{
       if (adminModeRef.current) { onMapClickRef.current?.({lat:e.latlng.lat,lng:e.latlng.lng}); return; }
       taxiPickPointRef.current?.(e.latlng.lat, e.latlng.lng);
@@ -1090,6 +1094,23 @@ export function ClinicMap({
       catStyleRef.current?.remove(); catStyleRef.current=null;
     };
   },[]);
+
+  // ── Swap tile layer when day/night mode changes ───────────────────────────
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    // Remove old tile layer and add the new one
+    if (tileLayerRef.current) {
+      map.removeLayer(tileLayerRef.current);
+    }
+    tileLayerRef.current = L.tileLayer(theme.tileUrl, {
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/">CARTO</a>',
+      subdomains: 'abcd', maxZoom: 20,
+    });
+    tileLayerRef.current.addTo(map);
+    // Push to back so markers stay on top
+    tileLayerRef.current.bringToBack();
+  }, [theme.tileUrl]);
 
   // Build popup DOM — reads catMapRef so no stale closure
   const buildPopup = useCallback((item: MapItem)=>{
@@ -4853,6 +4874,7 @@ export function ClinicMap({
       <BountyMissionSystem
         mapRef={mapRef}
         userLocation={userLocation}
+        isDay={theme.isDay}
       />
 
       {/* ── Live Market Ticker ── */}
