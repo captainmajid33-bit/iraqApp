@@ -9,8 +9,8 @@ import { getUserFromStorage, type DiyalaUser } from './UserLoginOverlay';
 
 const STORAGE_KEY = 'diyala_user';
 
-// ── Admin WhatsApp — change this number to the real admin line ────────────────
-const ADMIN_WA = '9647700000000';
+// ── Admin WhatsApp ─────────────────────────────────────────────────────────────
+const ADMIN_WA = '9647742533658';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function encodeWA(text: string) {
@@ -19,8 +19,8 @@ function encodeWA(text: string) {
 
 function buildWALink(userId: string, balance: number) {
   const text =
-    `مرحباً أدمن تطبيق ديالى، أريد سحب رصيد محفظتي. ` +
-    `رقم حسابي: ${userId} والمبلغ الحالي: ${balance.toLocaleString('ar-IQ')} دينار.`;
+    `مرحباً أدمن تطبيق ديالى، لقد حققت المهمة بنجاح وأريد سحب رصيد محفظتي. ` +
+    `معرف حسابي: ${userId} والرصيد الحالي المطلوب سحبه: ${balance.toLocaleString('ar-IQ')} دينار.`;
   return `https://wa.me/${ADMIN_WA}?text=${encodeWA(text)}`;
 }
 

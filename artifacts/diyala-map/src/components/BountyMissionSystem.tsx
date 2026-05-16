@@ -9,9 +9,9 @@ import L from 'leaflet';
 import {
   collection, onSnapshot, query, where,
   runTransaction, doc, serverTimestamp,
-  setDoc, getDoc,
+  setDoc, getDoc, increment,
 } from 'firebase/firestore';
-import { db } from '@/lib/firebase';
+import { db, auth } from '@/lib/firebase';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 interface BountyMission {
@@ -218,24 +218,40 @@ export function BountyMissionSystem({ mapRef, userLocation }: Props) {
   }, [selected, userLocation]);
 
   // ── Claim handler — Firestore atomic transaction ──────────────────────────
+  // Single transaction:
+  //   1. Verify mission is still 'active' (prevents double-claim)
+  //   2. Mark mission as 'claimed'
+  //   3. Credit reward to user's wallet (users/{uid}.balance += reward)
+  // Balance only increases here — no other code path touches it.
   const handleClaim = useCallback(async () => {
     if (!selected) return;
-    const user   = getUser();
-    const userId = user?.phone ?? user?.name ?? 'anonymous';
+    const user      = getUser();
+    const userId    = user?.phone ?? user?.name ?? 'anonymous';
+    const firebaseUid = auth.currentUser?.uid;
     setClaiming(true);
     setClaimResult(null);
     try {
       const missionRef = doc(db, 'bounty_missions', selected.id);
       await runTransaction(db, async txn => {
-        const snap = await txn.get(missionRef);
-        if (!snap.exists() || snap.data()?.status !== 'active') {
+        // ① Verify mission is still active
+        const missionSnap = await txn.get(missionRef);
+        if (!missionSnap.exists() || missionSnap.data()?.status !== 'active') {
           throw new Error('already_claimed');
         }
+        const prizeAmount = Number(missionSnap.data()?.reward ?? 0);
+
+        // ② Claim the mission
         txn.update(missionRef, {
           status:    'claimed',
           claimedBy: userId,
           claimedAt: serverTimestamp(),
         });
+
+        // ③ Credit reward to wallet — only if we have a valid Firebase UID
+        if (firebaseUid && prizeAmount > 0) {
+          const userRef = doc(db, 'users', firebaseUid);
+          txn.set(userRef, { balance: increment(prizeAmount) }, { merge: true });
+        }
       });
       setClaimResult('success');
       setTimeout(() => { setSelected(null); setClaimResult(null); }, 3500);
