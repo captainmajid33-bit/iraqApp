@@ -561,51 +561,82 @@ function CategoriesTab({ cats, onRefresh, toast }: { cats: Cat[]; onRefresh: () 
   );
 }
 
-// ── Settings Tab (banner + future global settings) ───────────────────────────
+// ── MediaItem type ────────────────────────────────────────────────────────────
+type MediaItem = { type: "image" | "video"; url: string };
+
+function parseMediaItems(raw: string): MediaItem[] {
+  if (!raw) return [];
+  const t = raw.trim();
+  if (t.startsWith("[")) {
+    try {
+      const p = JSON.parse(t);
+      if (Array.isArray(p)) return p as MediaItem[];
+    } catch { /* */ }
+  }
+  if (t) return [{ type: "image", url: t }];
+  return [];
+}
+
+function detectType(file: File): "image" | "video" {
+  if (file.type.startsWith("video/")) return "video";
+  return "image";
+}
+
+// ── Settings Tab (banner carousel) ───────────────────────────────────────────
 function SettingsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
-  const [bannerUrl,       setBannerUrl]       = useState("");
-  const [previewUrl,      setPreviewUrl]      = useState("");
-  const [imgErr,          setImgErr]          = useState(false);
-  const [saving,          setSaving]          = useState(false);
-  const [uploading,       setUploading]       = useState(false);
-  const [uploadProgress,  setUploadProgress]  = useState(0);
+  const [items,          setItems]          = useState<MediaItem[]>([]);
+  const [saving,         setSaving]         = useState(false);
+  const [uploading,      setUploading]      = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [urlInput,       setUrlInput]       = useState("");
+  const [urlType,        setUrlType]        = useState<"image" | "video">("image");
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Load current value on mount
+  // Load on mount
   useEffect(() => {
     api.get("/api/settings/top_banner").then(d => {
-      if (d?.value) { setBannerUrl(d.value); setPreviewUrl(d.value); setImgErr(false); }
+      if (d?.value) setItems(parseMediaItems(d.value));
     });
   }, []);
 
-  // ── Two-step presigned upload ──────────────────────────────────────────────
-  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    // reset input so same file can be re-selected
-    e.target.value = "";
+  // ── Persist full array ────────────────────────────────────────────────────
+  const persistItems = async (next: MediaItem[], successMsg?: string) => {
+    setSaving(true);
+    const r = await api.patch("/api/settings/top_banner", {
+      value: next.length === 0 ? "" : JSON.stringify(next),
+    });
+    setSaving(false);
+    if (r.ok) {
+      setItems(next);
+      toast.show(successMsg ?? "✓ تم الحفظ — يتحدث فوراً لجميع المستخدمين");
+    } else {
+      toast.show(r.error ?? "فشل الحفظ", false);
+    }
+  };
 
-    // Validate type
-    if (!file.type.startsWith("image/")) {
-      toast.show("يُسمح فقط بملفات الصور (jpg, png, webp, gif)", false);
+  // ── Upload a single file ──────────────────────────────────────────────────
+  const uploadFile = async (file: File) => {
+    const mediaType = detectType(file);
+    const isVideo   = mediaType === "video";
+
+    // Validate
+    if (!file.type.startsWith("image/") && !file.type.startsWith("video/")) {
+      toast.show("يُسمح فقط بملفات الصور أو الفيديو", false);
       return;
     }
 
     setUploading(true);
     setUploadProgress(10);
-
     try {
-      // Step 1 — request presigned URL from our API
       const metaRes = await fetch("/api/storage/uploads/request-url", {
-        method: "POST",
+        method:  "POST",
         headers: admHeaders(),
-        body: JSON.stringify({ name: file.name, size: file.size, contentType: file.type }),
+        body:    JSON.stringify({ name: file.name, size: file.size, contentType: file.type }),
       });
       if (!metaRes.ok) throw new Error("فشل الحصول على رابط الرفع");
       const { uploadURL, objectPath } = await metaRes.json();
       setUploadProgress(30);
 
-      // Step 2 — upload file directly to GCS presigned URL
       const xhr = new XMLHttpRequest();
       xhr.upload.addEventListener("progress", ev => {
         if (ev.lengthComputable) setUploadProgress(30 + Math.round((ev.loaded / ev.total) * 60));
@@ -613,203 +644,240 @@ function SettingsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
       await new Promise<void>((resolve, reject) => {
         xhr.open("PUT", uploadURL);
         xhr.setRequestHeader("Content-Type", file.type);
-        xhr.onload = () => (xhr.status >= 200 && xhr.status < 300 ? resolve() : reject(new Error(`GCS ${xhr.status}`)));
+        xhr.onload  = () => (xhr.status >= 200 && xhr.status < 300 ? resolve() : reject(new Error(`GCS ${xhr.status}`)));
         xhr.onerror = () => reject(new Error("فشل الاتصال بالتخزين"));
         xhr.send(file);
       });
       setUploadProgress(95);
 
-      // Step 3 — build serving URL and auto-save to settings
       const servingUrl = `/api/storage${objectPath}`;
-      setBannerUrl(servingUrl);
-
-      // Save the new URL immediately
-      const r = await api.patch("/api/settings/top_banner", { value: servingUrl });
-      if (r.ok) {
-        setPreviewUrl(servingUrl);
-        setImgErr(false);
-        setUploadProgress(100);
-        toast.show("✓ تم رفع الصورة وتطبيق البنر — يتحدث فوراً لجميع المستخدمين");
-      } else {
-        toast.show(r.error ?? "رُفعت الصورة لكن فشل حفظ الرابط", false);
-      }
+      const next = [...items, { type: mediaType, url: servingUrl }];
+      await persistItems(next, `✓ تم رفع ${isVideo ? "الفيديو" : "الصورة"} وإضافته للسلايدر`);
+      setUploadProgress(100);
     } catch (err: any) {
-      toast.show(err?.message ?? "فشل رفع الصورة", false);
+      toast.show(err?.message ?? "فشل رفع الملف", false);
     } finally {
       setUploading(false);
       setTimeout(() => setUploadProgress(0), 1200);
     }
   };
 
-  const handleSave = async () => {
-    setSaving(true);
-    const r = await api.patch("/api/settings/top_banner", { value: bannerUrl.trim() });
-    setSaving(false);
-    if (r.ok) {
-      setPreviewUrl(bannerUrl.trim());
-      setImgErr(false);
-      toast.show("تم تحديث بنر الهيدر بنجاح — يتحدث فوراً لجميع المستخدمين");
-    } else {
-      toast.show(r.error ?? "فشل الحفظ", false);
-    }
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files ?? []);
+    e.target.value = "";
+    for (const f of files) await uploadFile(f);
   };
 
-  const handleClear = async () => {
-    setBannerUrl("");
-    setSaving(true);
-    const r = await api.patch("/api/settings/top_banner", { value: "" });
-    setSaving(false);
-    if (r.ok) { setPreviewUrl(""); toast.show("تم مسح البنر — سيظهر الهيدر الافتراضي"); }
+  const handleAddUrl = async () => {
+    const url = urlInput.trim();
+    if (!url) return;
+    const next = [...items, { type: urlType, url }];
+    await persistItems(next, "✓ تمت إضافة الرابط للسلايدر");
+    setUrlInput("");
   };
+
+  const handleDelete = (idx: number) => {
+    const next = items.filter((_, i) => i !== idx);
+    persistItems(next, "✓ تم حذف العنصر");
+  };
+
+  const handleClearAll = () => persistItems([], "تم مسح جميع عناصر البنر");
 
   const busy = saving || uploading;
 
   return (
-    <div style={{ maxWidth: "720px" }}>
+    <div style={{ maxWidth: "760px" }}>
       {/* Section title */}
       <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "20px" }}>
         <div style={{ width: "3px", height: "26px", background: C.purple, boxShadow: neon(C.purple) }} />
         <div>
-          <div style={{ fontFamily: "Orbitron, sans-serif", fontSize: "12px", color: C.purple, letterSpacing: "0.14em" }}>TOP BANNER · بنر الهيدر العلوي</div>
+          <div style={{ fontFamily: "Orbitron, sans-serif", fontSize: "12px", color: C.purple, letterSpacing: "0.14em" }}>MEDIA CAROUSEL · سلايدر البنر العلوي</div>
           <div style={{ fontFamily: "Rajdhani, sans-serif", fontSize: "12px", color: C.dim, marginTop: "2px" }}>
-            ارفع صورة من جهازك أو أدخل رابط URL — تتحدث فوراً لجميع المستخدمين عبر SSE
+            أضف صوراً وفيديوهات متعددة — تتنقل تلقائياً كل 5 ثوانٍ لجميع المستخدمين
           </div>
         </div>
       </div>
 
-      {/* Upload zone */}
+      {/* ── Upload zone ── */}
       <div style={{ background: C.surf2, border: `1px solid ${C.border}`, borderRadius: "4px", padding: "18px", marginBottom: "16px" }}>
-
-        {/* Upload button */}
-        <div style={{ marginBottom: "16px" }}>
-          <label style={LBL}>رفع صورة من الجهاز</label>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="image/*"
-            style={{ display: "none" }}
-            onChange={handleFileChange}
-          />
-          <button
-            onClick={() => !busy && fileInputRef.current?.click()}
-            disabled={busy}
-            style={{
-              display: "flex", alignItems: "center", gap: "10px",
-              padding: "11px 20px",
-              background: uploading ? `${C.green}0a` : `${C.green}12`,
-              border: `1px solid ${uploading ? C.green : `${C.green}66`}`,
-              color: uploading ? C.green : `${C.green}cc`,
-              fontFamily: "Orbitron, sans-serif", fontSize: "10px", letterSpacing: "0.1em",
-              cursor: busy ? "wait" : "pointer", borderRadius: "3px",
-              boxShadow: uploading ? neon(C.green, 10) : "none",
-              transition: "all 0.2s", width: "100%", justifyContent: "center",
-            }}
-          >
-            {uploading
-              ? <><span style={{ display: "inline-block", animation: "spin 1s linear infinite" }}>⟳</span> جاري رفع الصورة...</>
-              : <><span style={{ fontSize: "14px" }}>📁</span> تحميل صورة البنر من جهازك</>
-            }
-          </button>
-
-          {/* Progress bar */}
-          {uploadProgress > 0 && (
-            <div style={{ marginTop: "8px", height: "3px", background: `${C.green}18`, borderRadius: "2px", overflow: "hidden" }}>
-              <div style={{ height: "100%", width: `${uploadProgress}%`, background: C.green, boxShadow: neon(C.green, 6), transition: "width 0.3s ease", borderRadius: "2px" }} />
-            </div>
-          )}
-        </div>
-
-        {/* Divider */}
-        <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "14px" }}>
-          <div style={{ flex: 1, height: "1px", background: C.border }} />
-          <span style={{ fontFamily: "Rajdhani, sans-serif", fontSize: "11px", color: C.dim }}>أو أدخل رابطاً مباشراً</span>
-          <div style={{ flex: 1, height: "1px", background: C.border }} />
-        </div>
-
-        {/* URL input */}
-        <label style={LBL}>رابط الصورة (URL)</label>
+        <label style={LBL}>رفع ملفات (صور أو فيديو) من الجهاز</label>
         <input
-          style={{ ...FLD, marginBottom: "12px" }}
-          value={bannerUrl}
-          onChange={e => setBannerUrl(e.target.value)}
-          placeholder="https://example.com/banner.jpg"
-          onFocus={ff} onBlur={fb}
-          onKeyDown={e => e.key === "Enter" && handleSave()}
-          disabled={busy}
+          ref={fileInputRef}
+          type="file"
+          accept="image/*,video/mp4,video/webm"
+          multiple
+          style={{ display: "none" }}
+          onChange={handleFileChange}
         />
-
-        {/* Action buttons */}
-        <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
-          <button
-            onClick={handleSave}
-            disabled={busy}
-            style={{ padding: "9px 22px", background: saving ? `${C.purple}0a` : `${C.purple}18`, border: `1px solid ${C.purple}`, color: C.purple, fontFamily: "Orbitron, sans-serif", fontSize: "10px", letterSpacing: "0.1em", cursor: busy ? "wait" : "pointer", borderRadius: "3px", boxShadow: saving ? "none" : neon(C.purple, 8), transition: "all 0.2s" }}
-          >
-            {saving ? "⟳ جاري الحفظ..." : "✓ حفظ الرابط"}
-          </button>
-          <button
-            onClick={() => { setPreviewUrl(bannerUrl); setImgErr(false); }}
-            disabled={busy}
-            style={{ padding: "9px 18px", background: `${C.blue}10`, border: `1px solid ${C.blue}55`, color: C.blue, fontFamily: "Orbitron, sans-serif", fontSize: "10px", letterSpacing: "0.1em", cursor: busy ? "default" : "pointer", borderRadius: "3px" }}
-          >
-            👁 معاينة
-          </button>
-          <button
-            onClick={handleClear}
-            disabled={busy}
-            style={{ padding: "9px 18px", background: `${C.red}10`, border: `1px solid ${C.red}55`, color: C.red, fontFamily: "Orbitron, sans-serif", fontSize: "10px", letterSpacing: "0.1em", cursor: busy ? "default" : "pointer", borderRadius: "3px" }}
-          >
-            ✕ مسح البنر
-          </button>
-        </div>
-      </div>
-
-      {/* Live preview */}
-      <div style={{ background: C.surf2, border: `1px solid ${C.border}`, borderRadius: "4px", overflow: "hidden" }}>
-        <div style={{ padding: "10px 14px", borderBottom: `1px solid ${C.border}`, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-          <span style={{ fontFamily: "Orbitron, sans-serif", fontSize: "9px", color: C.dim, letterSpacing: "0.12em" }}>PREVIEW — معاينة الهيدر الحالي</span>
-          {previewUrl && !imgErr && (
-            <span style={{ fontFamily: "Rajdhani, sans-serif", fontSize: "10px", color: C.green }}>● مُطبَّق الآن</span>
-          )}
-        </div>
-        {/* Simulated header */}
-        <div style={{ height: "72px", position: "relative", background: "rgba(5,8,15,0.92)", display: "flex", alignItems: "center", justifyContent: "space-between", overflow: "hidden" }}>
-          <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: "2px", background: `linear-gradient(90deg, transparent, ${C.purple}, ${C.blue}, transparent)`, opacity: 0.7 }} />
-          {previewUrl && !imgErr && (
-            <div style={{ position: "absolute", inset: 0 }}>
-              <img
-                src={previewUrl} alt="" onError={() => setImgErr(true)}
-                style={{ width: "100%", height: "100%", objectFit: "cover", objectPosition: "center" }}
-              />
-              <div style={{ position: "absolute", inset: 0, background: "linear-gradient(90deg, rgba(5,8,15,0.82) 0%, rgba(5,8,15,0.4) 50%, rgba(5,8,15,0.72) 100%)" }} />
-            </div>
-          )}
-          <div style={{ position: "relative", zIndex: 1, display: "flex", alignItems: "center", gap: "10px", padding: "0 16px" }}>
-            <div style={{ width: "32px", height: "32px", border: `1px solid ${C.purple}99`, display: "flex", alignItems: "center", justifyContent: "center", background: `${C.purple}18` }}>
-              <span style={{ color: C.purple, fontSize: "15px" }}>📍</span>
-            </div>
-            {!previewUrl && (
-              <div>
-                <div style={{ fontFamily: "Orbitron, sans-serif", fontSize: "13px", color: C.purple }}>ديالى GTA MAP</div>
-                <div style={{ fontFamily: "Rajdhani, sans-serif", fontSize: "9px", color: `${C.blue}bb`, letterSpacing: "0.14em" }}>DIYALA · SYSTEM ONLINE</div>
-              </div>
-            )}
-          </div>
-          <div style={{ position: "relative", zIndex: 1, padding: "0 16px", fontFamily: "Orbitron, sans-serif", fontSize: "14px", color: C.purple }}>
-            {new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" })}
-          </div>
-          <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, height: "1px", background: `linear-gradient(90deg, transparent, ${C.purple}99, ${C.blue}99, transparent)` }} />
-        </div>
-
-        {/* Current URL display */}
-        {previewUrl && !imgErr && (
-          <div style={{ padding: "8px 14px", borderTop: `1px solid ${C.border}`, fontFamily: "Rajdhani, sans-serif", fontSize: "11px", color: C.dim, wordBreak: "break-all" }}>
-            🔗 {previewUrl}
+        <button
+          onClick={() => !busy && fileInputRef.current?.click()}
+          disabled={busy}
+          style={{
+            display: "flex", alignItems: "center", gap: "10px",
+            padding: "11px 20px", width: "100%", justifyContent: "center",
+            background:  uploading ? `${C.green}0a` : `${C.green}12`,
+            border:      `1px solid ${uploading ? C.green : `${C.green}66`}`,
+            color:       uploading ? C.green : `${C.green}cc`,
+            fontFamily:  "Orbitron, sans-serif", fontSize: "10px", letterSpacing: "0.1em",
+            cursor:      busy ? "wait" : "pointer", borderRadius: "3px",
+            boxShadow:   uploading ? neon(C.green, 10) : "none",
+            transition:  "all 0.2s",
+          }}
+        >
+          {uploading
+            ? <><span style={{ display: "inline-block", animation: "spin 1s linear infinite" }}>⟳</span> جاري الرفع...</>
+            : <><span style={{ fontSize: "14px" }}>📁</span> اختر صور أو فيديوهات للإضافة</>
+          }
+        </button>
+        {uploadProgress > 0 && (
+          <div style={{ marginTop: "8px", height: "3px", background: `${C.green}18`, borderRadius: "2px", overflow: "hidden" }}>
+            <div style={{ height: "100%", width: `${uploadProgress}%`, background: C.green, boxShadow: neon(C.green, 6), transition: "width 0.3s ease", borderRadius: "2px" }} />
           </div>
         )}
-        {imgErr && (
-          <div style={{ padding: "10px 14px", background: `${C.red}0a`, color: C.red, fontFamily: "Rajdhani, sans-serif", fontSize: "12px" }}>
-            ⚠ تعذّر تحميل الصورة — تأكد من صحة الرابط
+
+        {/* ── Divider ── */}
+        <div style={{ display: "flex", alignItems: "center", gap: "10px", margin: "16px 0 14px" }}>
+          <div style={{ flex: 1, height: "1px", background: C.border }} />
+          <span style={{ fontFamily: "Rajdhani, sans-serif", fontSize: "11px", color: C.dim }}>أو أضف رابطاً مباشراً</span>
+          <div style={{ flex: 1, height: "1px", background: C.border }} />
+        </div>
+
+        {/* ── URL input row ── */}
+        <div style={{ display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" }}>
+          <select
+            value={urlType}
+            onChange={e => setUrlType(e.target.value as "image" | "video")}
+            disabled={busy}
+            style={{
+              ...FLD, width: "110px", flexShrink: 0, cursor: "pointer",
+              padding: "8px 10px",
+            }}
+          >
+            <option value="image">🖼 صورة</option>
+            <option value="video">🎬 فيديو</option>
+          </select>
+          <input
+            style={{ ...FLD, flex: 1, minWidth: "200px" }}
+            value={urlInput}
+            onChange={e => setUrlInput(e.target.value)}
+            placeholder="https://example.com/media.jpg"
+            onFocus={ff} onBlur={fb}
+            onKeyDown={e => e.key === "Enter" && !busy && handleAddUrl()}
+            disabled={busy}
+          />
+          <button
+            onClick={handleAddUrl}
+            disabled={busy || !urlInput.trim()}
+            style={{
+              padding: "9px 18px", flexShrink: 0,
+              background: `${C.blue}12`, border: `1px solid ${C.blue}66`,
+              color: C.blue, fontFamily: "Orbitron, sans-serif", fontSize: "10px",
+              letterSpacing: "0.1em", cursor: (busy || !urlInput.trim()) ? "default" : "pointer",
+              borderRadius: "3px",
+            }}
+          >
+            + إضافة
+          </button>
+        </div>
+      </div>
+
+      {/* ── Current media items list ── */}
+      <div style={{ background: C.surf2, border: `1px solid ${C.border}`, borderRadius: "4px", overflow: "hidden", marginBottom: "12px" }}>
+        <div style={{ padding: "10px 14px", borderBottom: `1px solid ${C.border}`, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <span style={{ fontFamily: "Orbitron, sans-serif", fontSize: "9px", color: C.dim, letterSpacing: "0.12em" }}>
+            MEDIA ITEMS · {items.length} عنصر في السلايدر
+          </span>
+          {items.length > 0 && (
+            <button
+              onClick={handleClearAll}
+              disabled={busy}
+              style={{ padding: "4px 12px", background: `${C.red}10`, border: `1px solid ${C.red}44`, color: C.red, fontFamily: "Orbitron, sans-serif", fontSize: "8px", letterSpacing: "0.1em", cursor: busy ? "default" : "pointer", borderRadius: "3px" }}
+            >
+              ✕ مسح الكل
+            </button>
+          )}
+        </div>
+
+        {items.length === 0 ? (
+          <div style={{ padding: "28px", textAlign: "center", fontFamily: "Rajdhani, sans-serif", fontSize: "13px", color: C.dim }}>
+            لا توجد عناصر بعد — أضف صورة أو فيديو من الأعلى
+          </div>
+        ) : (
+          <div style={{ padding: "10px 14px", display: "flex", flexDirection: "column", gap: "8px" }}>
+            {items.map((item, i) => (
+              <div key={i} style={{
+                display: "flex", alignItems: "center", gap: "10px",
+                background: "#05080f", border: `1px solid ${C.border}`,
+                borderRadius: "3px", padding: "8px 10px",
+              }}>
+                {/* Type badge */}
+                <div style={{
+                  flexShrink: 0, width: "56px", textAlign: "center",
+                  padding: "3px 0",
+                  background: item.type === "video" ? `${C.blue}18` : `${C.purple}18`,
+                  border: `1px solid ${item.type === "video" ? C.blue : C.purple}55`,
+                  borderRadius: "2px",
+                  fontFamily: "Orbitron, sans-serif", fontSize: "8px",
+                  color: item.type === "video" ? C.blue : C.purple,
+                  letterSpacing: "0.08em",
+                }}>
+                  {item.type === "video" ? "🎬 VIDEO" : "🖼 IMAGE"}
+                </div>
+
+                {/* Thumbnail / icon */}
+                <div style={{
+                  width: "48px", height: "32px", flexShrink: 0,
+                  background: "#0a0f1a", border: `1px solid ${C.border}`,
+                  borderRadius: "2px", overflow: "hidden",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                }}>
+                  {item.type === "image"
+                    ? <img src={item.url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                    : <span style={{ fontSize: "18px" }}>🎬</span>
+                  }
+                </div>
+
+                {/* URL */}
+                <div style={{ flex: 1, fontFamily: "Rajdhani, sans-serif", fontSize: "11px", color: C.dim, wordBreak: "break-all", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {item.url}
+                </div>
+
+                {/* Index badge */}
+                <div style={{
+                  flexShrink: 0, width: "22px", height: "22px",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  background: `${C.purple}18`, border: `1px solid ${C.purple}44`,
+                  borderRadius: "2px", fontFamily: "Orbitron, sans-serif",
+                  fontSize: "9px", color: C.purple,
+                }}>
+                  {i + 1}
+                </div>
+
+                {/* Delete */}
+                <button
+                  onClick={() => handleDelete(i)}
+                  disabled={busy}
+                  style={{
+                    flexShrink: 0, width: "26px", height: "26px",
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    background: `${C.red}0a`, border: `1px solid ${C.red}44`,
+                    color: C.red, fontSize: "12px",
+                    cursor: busy ? "default" : "pointer", borderRadius: "2px",
+                    transition: "all 0.15s",
+                  }}
+                  title="حذف"
+                >
+                  ✕
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Status bar */}
+        {saving && (
+          <div style={{ padding: "8px 14px", borderTop: `1px solid ${C.border}`, fontFamily: "Rajdhani, sans-serif", fontSize: "11px", color: C.green, display: "flex", alignItems: "center", gap: "6px" }}>
+            <span style={{ display: "inline-block", animation: "spin 1s linear infinite" }}>⟳</span> جاري الحفظ...
           </div>
         )}
       </div>
