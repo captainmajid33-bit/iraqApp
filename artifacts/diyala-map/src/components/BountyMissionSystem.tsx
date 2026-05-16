@@ -384,12 +384,26 @@ export function BountyMissionSystem({ mapRef, userLocation }: Props) {
     }
   }, [selected, effectivePos, mapRef]);
 
-  // ── Stop navigation ───────────────────────────────────────────────────────
+  // ── Stop navigation — clear polyline + reset camera ─────────────────────
   const handleStopNav = useCallback(() => {
     clearPolyline();
     setNavigating(false);
     setRouteInfo(null);
-  }, []);
+
+    // Reset camera: zoom back to fit user + mission without the route
+    if (mapRef.current && effectivePos && selected) {
+      const pts: L.LatLngTuple[] = [
+        [effectivePos.lat, effectivePos.lng],
+        [selected.latitude, selected.longitude],
+      ];
+      mapRef.current.fitBounds(L.latLngBounds(pts), {
+        padding: [90, 90],
+        maxZoom: 15,
+        animate: true,
+        duration: 0.7,
+      });
+    }
+  }, [mapRef, effectivePos, selected]);
 
   // ── Claim handler — Firestore atomic transaction ──────────────────────────
   const handleClaim = useCallback(async () => {
@@ -636,20 +650,50 @@ export function BountyMissionSystem({ mapRef, userLocation }: Props) {
                 </span>
               </div>
             ) : (
-              <button
-                onClick={handleStopNav}
-                style={{
-                  width: '100%', padding: '11px 16px',
-                  background: 'rgba(255,255,255,0.04)',
-                  border: '1px solid rgba(255,255,255,0.12)',
-                  color: 'rgba(255,255,255,0.45)',
-                  fontFamily: 'Orbitron, sans-serif', fontSize: '9px',
-                  letterSpacing: '0.12em', cursor: 'pointer',
-                  borderRadius: '3px', marginBottom: '10px',
-                }}
-              >
-                ✕ إلغاء الملاحة
-              </button>
+              <div style={{ display: 'flex', gap: '8px', marginBottom: '10px' }}>
+                {/* Active route indicator */}
+                <div style={{
+                  flex: 1, padding: '11px 14px',
+                  background: 'rgba(0,212,255,0.06)',
+                  border: `1px solid ${C.blue}33`,
+                  borderRadius: '3px',
+                  display: 'flex', alignItems: 'center', gap: '8px',
+                }}>
+                  <div style={{
+                    width: '7px', height: '7px', borderRadius: '50%', flexShrink: 0,
+                    background: C.yellow, boxShadow: `0 0 7px ${C.yellow}`,
+                    animation: 'lf-ping 1.4s ease-in-out infinite',
+                  }} />
+                  <span style={{
+                    fontFamily: 'Orbitron, sans-serif', fontSize: '8px',
+                    color: C.blue, letterSpacing: '0.1em',
+                  }}>المسار نشط على الخريطة</span>
+                </div>
+                {/* Cancel route button */}
+                <button
+                  onClick={handleStopNav}
+                  style={{
+                    padding: '11px 16px', flexShrink: 0,
+                    background: 'rgba(255,45,80,0.09)',
+                    border: `1px solid ${C.red}55`,
+                    color: C.red,
+                    fontFamily: 'Orbitron, sans-serif', fontSize: '9px',
+                    letterSpacing: '0.1em', cursor: 'pointer',
+                    borderRadius: '3px', transition: 'all 0.18s',
+                    display: 'flex', alignItems: 'center', gap: '5px',
+                  }}
+                  onMouseEnter={e => {
+                    e.currentTarget.style.background = `rgba(255,45,80,0.18)`;
+                    e.currentTarget.style.boxShadow  = `0 0 14px ${C.red}33`;
+                  }}
+                  onMouseLeave={e => {
+                    e.currentTarget.style.background = `rgba(255,45,80,0.09)`;
+                    e.currentTarget.style.boxShadow  = 'none';
+                  }}
+                >
+                  ❌ إلغاء المسار
+                </button>
+              </div>
             )}
 
             {/* ── Travel info card ── */}
