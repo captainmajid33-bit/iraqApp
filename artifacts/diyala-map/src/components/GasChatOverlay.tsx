@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import {
   collection, addDoc, onSnapshot,
-  query, orderBy, serverTimestamp,
+  query, serverTimestamp,
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 
@@ -87,25 +87,32 @@ export function GasChatOverlay({ gasOrderId, agentPhone, onMinimize, onNewMessag
     const fsPath = `orders/${safeId}/messages`;
     console.log(`🔥 CUSTOMER CHAT PATH -> ${fsPath}`);
 
+    // No orderBy — serverTimestamp() is null locally before sync,
+    // which causes Firestore to drop the doc from an ordered query.
+    // We sort client-side instead so messages appear immediately.
     const q = query(
       collection(db, 'orders', String(safeId), 'messages'),
-      orderBy('timestamp', 'asc'),
     );
 
     const unsub = onSnapshot(
       q,
+      { includeMetadataChanges: true },
       (snap) => {
-        console.log(`🔥 onSnapshot fired — ${snap.docs.length} doc(s) at ${fsPath}`);
+        console.log(`🔥 onSnapshot fired — ${snap.docs.length} doc(s) at ${fsPath} (fromCache=${snap.metadata.fromCache})`);
         setLiveOk(true);
-        const msgs: GasMsg[] = snap.docs.map(d => {
-          const data = d.data();
-          return {
-            id:         d.id,
-            content:    data.text ?? '',
-            senderRole: (data.sender === 'agent' ? 'agent' : 'customer') as GasMsg['senderRole'],
-            createdAt:  data.timestamp?.toDate?.() ?? new Date(),
-          };
-        });
+        const msgs: GasMsg[] = snap.docs
+          .map(d => {
+            const data = d.data();
+            // Timestamp may be null for pending local writes — fall back to now
+            const ts: Date = data.timestamp?.toDate?.() ?? (d.metadata.hasPendingWrites ? new Date() : new Date(0));
+            return {
+              id:         d.id,
+              content:    data.text ?? '',
+              senderRole: (data.sender === 'agent' ? 'agent' : 'customer') as GasMsg['senderRole'],
+              createdAt:  ts,
+            };
+          })
+          .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
 
         // Fire onNewMessage for new agent messages
         msgs.forEach(m => {
