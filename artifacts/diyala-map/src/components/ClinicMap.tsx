@@ -639,7 +639,7 @@ export function ClinicMap({
 
   // ── Online drivers (all open taxis visible on map) ────────────────────────
   type OnlineDriver = { id:number; locationId:number; driverName:string; phone:string; lat:number; lng:number; isOnline:boolean; isBusy?:boolean; updatedAt?:string|null };
-  const onlineDriverMarkersRef = useRef<Map<number, L.Marker>>(new Map());
+  // onlineDriverMarkersRef removed — drivers are never shown on the public map
 
   // Leaflet object refs for taxi routing visuals
   const taxiRouteLineRef  = useRef<L.Polyline|null>(null);
@@ -2050,87 +2050,10 @@ export function ClinicMap({
     });
   }
 
-  // ── Update / create an online-driver marker with smooth animation ─────────
-  const upsertOnlineDriverMarker = useCallback((driver: {
-    locationId:number; driverName:string; phone:string; lat:number; lng:number; isOnline:boolean;
-  })=>{
-    if (!mapRef.current) return;
-    const existing = onlineDriverMarkersRef.current.get(driver.locationId);
-    if (!driver.isOnline) {
-      existing?.remove();
-      onlineDriverMarkersRef.current.delete(driver.locationId);
-      return;
-    }
-    // Auto-dispatch mode: driver markers are hidden from customer view.
-    // The search algorithm still uses /api/drivers-online data.
-    return;
-    if (existing) {
-      existing.setLatLng([driver.lat, driver.lng]);
-      const el = existing.getElement();
-      if (el) el.style.transition = 'transform 1.0s linear';
-    } else {
-      const m = L.marker([driver.lat, driver.lng],{
-        icon: makeOnlineDriverIcon(driver.driverName),
-        zIndexOffset: 800,
-      }).addTo(mapRef.current);
-      // Tooltip with driver name + phone
-      m.bindTooltip(
-        `<div style="font-family:Rajdhani,sans-serif;font-size:12px;color:#00d4ff;background:rgba(5,8,15,0.93);border:1px solid rgba(0,212,255,0.3);padding:4px 8px;">
-          <b>${driver.driverName || 'سائق متصل'}</b>${driver.phone ? `<br/><span style="color:rgba(0,212,255,0.7)">${driver.phone}</span>` : ''}
-        </div>`,
-        { permanent: false, direction: 'top', offset: [0, -62], className: 'online-driver-tooltip', opacity: 1 }
-      );
-      // Enable smooth transitions
-      const el = m.getElement();
-      if (el) el.style.transition = 'transform 1.0s linear';
-      onlineDriverMarkersRef.current.set(driver.locationId, m);
-    }
-  }, []);
-
-  // ── Fetch all online drivers and render their markers ─────────────────────
-  const refreshOnlineDrivers = useCallback(async ()=>{
-    if (!mapRef.current) return;
-    try {
-      const res = await fetch('/api/drivers-online');
-      if (!res.ok) return;
-      const drivers: {
-        id:number; locationId:number; driverName:string;
-        phone:string; lat:number; lng:number; isOnline:boolean;
-      }[] = await res.json();
-      // Determine which locationIds are currently present in the new list
-      const incomingIds = new Set(drivers.map(d=>d.locationId));
-      // Remove markers for drivers no longer online
-      for (const [locId, m] of onlineDriverMarkersRef.current.entries()) {
-        if (!incomingIds.has(locId)) { m.remove(); onlineDriverMarkersRef.current.delete(locId); }
-      }
-      // Upsert all incoming drivers
-      drivers.forEach(d => upsertOnlineDriverMarker(d));
-    } catch { /* silent */ }
-  }, [upsertOnlineDriverMarker]);
-
-  // ── Poll online drivers every 8 s ─────────────────────────────────────────
-  useEffect(()=>{
-    refreshOnlineDrivers();
-    const iv = setInterval(refreshOnlineDrivers, 8000);
-    return ()=> clearInterval(iv);
-  },[refreshOnlineDrivers]);
-
-  // ── SSE listener for instant driver_update events ─────────────────────────
-  useEffect(()=>{
-    const es = new EventSource('/api/events');
-    es.addEventListener('driver_update', (e: MessageEvent)=>{
-      try {
-        const { driver } = JSON.parse(e.data) as { driver: {
-          id:number; locationId:number; driverName:string;
-          phone:string; lat:number; lng:number; isOnline:boolean;
-        }};
-        if (driver) upsertOnlineDriverMarker(driver);
-      } catch { /* */ }
-    });
-    es.onerror = ()=> es.close();
-    return ()=> es.close();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  },[]);
+  // ── Driver markers are intentionally removed from the public map ─────────
+  // Drivers are only shown via ActiveOrderTracker (Firestore) when an order
+  // reaches status 'accepted'. No polling, no SSE driver_update, no public map
+  // markers. The booking flow still fetches /api/drivers-online for search only.
 
   // ── SSE listener for system messages (works even when chat panel is closed) ─
   // Shows a Snackbar notification for any incoming message with isSystemMsg=true,
