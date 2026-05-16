@@ -1445,6 +1445,256 @@ function TaxiTab({ toast }: { toast: ReturnType<typeof useToast> }) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
+// ── UsersTab — إدارة المستخدمين وتصفير أرصدة المحافظ (Firestore) ─────────────
+// ══════════════════════════════════════════════════════════════════════════════
+interface AppUser {
+  id:       string;   // Firestore doc ID (= Firebase UID)
+  name:     string;
+  phone:    string;
+  uid?:     string;
+  balance:  number;
+}
+
+function UsersTab({ toast }: { toast: ReturnType<typeof useToast> }) {
+  const [users,      setUsers]      = useState<AppUser[]>([]);
+  const [loading,    setLoading]    = useState(true);
+  const [confirmReset, setConfirmReset] = useState<AppUser | null>(null);
+  const [resetting,  setResetting]  = useState<string | null>(null);
+
+  // ── Live Firestore listener ───────────────────────────────────────────────
+  useEffect(() => {
+    const unsub = onSnapshot(
+      collection(db, 'users'),
+      snap => {
+        const docs: AppUser[] = [];
+        snap.forEach(d => {
+          const raw = d.data();
+          docs.push({
+            id:      d.id,
+            name:    String(raw.name  ?? '—'),
+            phone:   String(raw.phone ?? '—'),
+            uid:     String(raw.uid   ?? d.id),
+            balance: Number(raw.balance ?? 0),
+          });
+        });
+        // Sort: users with balance first, then alphabetically
+        docs.sort((a, b) => b.balance - a.balance || a.name.localeCompare(b.name));
+        setUsers(docs);
+        setLoading(false);
+      },
+      err => { console.error('[UsersTab]', err); setLoading(false); }
+    );
+    return () => unsub();
+  }, []);
+
+  // ── Reset balance → 0 ────────────────────────────────────────────────────
+  async function doReset(user: AppUser) {
+    setResetting(user.id);
+    try {
+      await updateDoc(doc(db, 'users', user.id), { balance: 0 });
+      toast.show(`✅ تم تصفير رصيد ${user.name} — تحديث فوري في تطبيق الزبون`);
+    } catch (e: any) {
+      toast.show(`فشل التصفير: ${e?.message ?? e}`, false);
+    } finally {
+      setResetting(null);
+      setConfirmReset(null);
+    }
+  }
+
+  const withBalance = users.filter(u => u.balance > 0).length;
+
+  // ── Render ────────────────────────────────────────────────────────────────
+  return (
+    <div style={{ direction: 'rtl' }}>
+
+      {/* Section header */}
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: '20px', flexWrap: 'wrap', gap: '10px' }}>
+        <div>
+          <div style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '11px', color: C.blue, letterSpacing: '0.18em', marginBottom: '4px' }}>
+            👥 USERS MANAGEMENT · إدارة المستخدمين
+          </div>
+          <div style={{ fontFamily: 'Rajdhani, sans-serif', fontSize: '13px', color: C.dim }}>
+            مراقبة أرصدة المحافظ وتصفير الرصيد بعد تسليم الأموال
+            {!loading && (
+              <span style={{ marginRight: '8px' }}>
+                <span style={{ color: C.text }}>· {users.length} مستخدم</span>
+                {withBalance > 0 && (
+                  <span style={{ color: C.yellow, marginRight: '6px' }}>
+                    · {withBalance} لديهم رصيد
+                  </span>
+                )}
+              </span>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* ── Confirmation modal ───────────────────────────────────────────── */}
+      {confirmReset && (
+        <div
+          style={{ position: 'fixed', inset: 0, zIndex: 600, background: 'rgba(0,0,0,0.82)', backdropFilter: 'blur(7px)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '16px' }}
+          onClick={e => { if (e.target === e.currentTarget) setConfirmReset(null); }}
+        >
+          <div style={{ width: 'min(420px, 100%)', background: C.surface, border: `1px solid ${C.yellow}55`, borderRadius: '4px', boxShadow: `0 0 50px ${C.yellow}14, 0 8px 40px rgba(0,0,0,0.95)`, overflow: 'hidden' }}>
+
+            {/* Header */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px', padding: '16px 18px', borderBottom: `1px solid ${C.yellow}22`, background: `${C.yellow}07` }}>
+              <span style={{ fontSize: '24px' }}>⚠️</span>
+              <span style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '10px', color: C.yellow, letterSpacing: '0.14em' }}>
+                تأكيد تصفير الرصيد
+              </span>
+            </div>
+
+            {/* Body */}
+            <div style={{ padding: '20px 18px' }}>
+              <div style={{ fontFamily: 'Rajdhani, sans-serif', fontSize: '15px', color: C.text, lineHeight: 1.7, marginBottom: '16px' }}>
+                هل أنت متأكد من تصفير رصيد هذا المستخدم بعد تسليمه المبلغ كاش؟
+              </div>
+
+              {/* User card */}
+              <div style={{ padding: '12px 14px', background: `${C.yellow}07`, border: `1px solid ${C.yellow}25`, borderRadius: '3px', marginBottom: '18px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px', flexWrap: 'wrap' }}>
+                  <div>
+                    <div style={{ fontFamily: 'Rajdhani, sans-serif', fontSize: '17px', fontWeight: 700, color: C.text }}>{confirmReset.name}</div>
+                    <div style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '9px', color: C.dim, marginTop: '2px', letterSpacing: '0.06em' }}>{confirmReset.phone}</div>
+                  </div>
+                  <div style={{ textAlign: 'left' }}>
+                    <div style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '8px', color: `${C.yellow}88`, letterSpacing: '0.1em', marginBottom: '2px' }}>الرصيد الحالي</div>
+                    <div style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '18px', color: C.yellow, textShadow: `0 0 14px ${C.yellow}88` }}>
+                      {confirmReset.balance.toLocaleString('ar-IQ')}
+                      <span style={{ fontSize: '10px', opacity: 0.6, marginRight: '4px' }}>د.ع</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Warning */}
+              <div style={{ fontFamily: 'Rajdhani, sans-serif', fontSize: '12px', color: C.red, marginBottom: '18px', padding: '8px 12px', background: `${C.red}08`, border: `1px solid ${C.red}30`, borderRadius: '3px' }}>
+                ⚠ سيتحول رصيد المستخدم إلى (0 د.ع) فوراً في تطبيقه — لا يمكن التراجع.
+              </div>
+
+              {/* Buttons */}
+              <div style={{ display: 'flex', gap: '10px' }}>
+                <button
+                  onClick={() => setConfirmReset(null)}
+                  style={{ flex: 1, padding: '11px', background: 'none', border: `1px solid ${C.border}`, color: C.dim, fontFamily: 'Orbitron, sans-serif', fontSize: '9px', letterSpacing: '0.1em', cursor: 'pointer', borderRadius: '3px' }}
+                  onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.04)')}
+                  onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                >
+                  إلغاء
+                </button>
+                <button
+                  onClick={() => doReset(confirmReset)}
+                  disabled={resetting === confirmReset.id}
+                  style={{ flex: 2, padding: '11px', background: `${C.green}15`, border: `1px solid ${C.green}77`, color: C.green, fontFamily: 'Orbitron, sans-serif', fontSize: '9px', letterSpacing: '0.1em', cursor: 'pointer', borderRadius: '3px', boxShadow: neon(C.green, 6), display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '7px' }}
+                  onMouseEnter={e => (e.currentTarget.style.background = `${C.green}25`)}
+                  onMouseLeave={e => (e.currentTarget.style.background = `${C.green}15`)}
+                >
+                  {resetting === confirmReset.id ? (
+                    <><svg width="12" height="12" viewBox="0 0 28 28" fill="none" style={{ animation: 'spin 0.9s linear infinite' }}><circle cx="14" cy="14" r="10" stroke={C.green} strokeWidth="2.5" strokeDasharray="22 14" strokeLinecap="round"/></svg>جاري التصفير...</>
+                  ) : (
+                    '✅ نعم، تم الدفع — صفّر الرصيد'
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Users Table ──────────────────────────────────────────────────── */}
+      {loading ? (
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '12px', padding: '60px', color: C.dim }}>
+          <svg width="22" height="22" viewBox="0 0 28 28" fill="none" style={{ animation: 'spin 0.9s linear infinite' }}><circle cx="14" cy="14" r="10" stroke={C.blue} strokeWidth="2.5" strokeDasharray="22 14" strokeLinecap="round"/></svg>
+          <span style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '11px', color: C.blue }}>جاري تحميل المستخدمين من Firestore...</span>
+        </div>
+      ) : users.length === 0 ? (
+        <div style={{ textAlign: 'center', padding: '60px', color: C.dim }}>
+          <div style={{ fontSize: '40px', marginBottom: '12px' }}>👥</div>
+          <div style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '11px', letterSpacing: '0.12em' }}>لا يوجد مستخدمون مسجلون بعد</div>
+        </div>
+      ) : (
+        <div style={{ overflowX: 'auto' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontFamily: 'Rajdhani, sans-serif' }}>
+            <thead>
+              <tr style={{ borderBottom: `1px solid ${C.border}` }}>
+                {['#', 'الاسم', 'رقم الهاتف', 'معرّف الحساب (UID)', 'الرصيد الحالي', 'إجراء التسوية'].map(h => (
+                  <th key={h} style={{ padding: '10px 12px', textAlign: 'right', fontFamily: 'Orbitron, sans-serif', fontSize: '8px', color: C.blue, letterSpacing: '0.1em', whiteSpace: 'nowrap', background: `${C.blue}07` }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {users.map((u, idx) => {
+                const hasBalance = u.balance > 0;
+                const rowBg      = idx % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.01)';
+                return (
+                  <tr key={u.id}
+                    style={{ borderBottom: `1px solid ${C.border}44`, background: rowBg, transition: 'background 0.15s' }}
+                    onMouseEnter={e => (e.currentTarget.style.background = `${C.blue}07`)}
+                    onMouseLeave={e => (e.currentTarget.style.background = rowBg)}
+                  >
+                    {/* # */}
+                    <td style={{ padding: '10px 12px', fontFamily: 'Orbitron, sans-serif', fontSize: '9px', color: `${C.blue}55`, whiteSpace: 'nowrap' }}>{idx + 1}</td>
+
+                    {/* Name */}
+                    <td style={{ padding: '10px 12px', fontSize: '15px', fontWeight: 600, color: C.text, minWidth: '120px' }}>{u.name}</td>
+
+                    {/* Phone */}
+                    <td style={{ padding: '10px 12px', fontFamily: 'Orbitron, monospace', fontSize: '12px', color: '#00f5d4', letterSpacing: '0.04em', whiteSpace: 'nowrap' }}>
+                      {u.phone}
+                    </td>
+
+                    {/* UID */}
+                    <td style={{ padding: '10px 12px', fontFamily: 'Orbitron, monospace', fontSize: '9px', color: C.dim, maxWidth: '160px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {u.id}
+                    </td>
+
+                    {/* Balance */}
+                    <td style={{ padding: '10px 12px', whiteSpace: 'nowrap' }}>
+                      {hasBalance ? (
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', padding: '5px 12px', background: `${C.yellow}12`, border: `1px solid ${C.yellow}55`, color: C.yellow, borderRadius: '3px', fontFamily: 'Orbitron, sans-serif', fontSize: '12px', boxShadow: `0 0 10px ${C.yellow}22` }}>
+                          <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: C.yellow, boxShadow: `0 0 6px ${C.yellow}`, display: 'inline-block', animation: 'spin 3s linear infinite' }} />
+                          🎁 {u.balance.toLocaleString('ar-IQ')} د.ع
+                        </span>
+                      ) : (
+                        <span style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '11px', color: 'rgba(255,255,255,0.18)' }}>
+                          0 د.ع
+                        </span>
+                      )}
+                    </td>
+
+                    {/* Reset action */}
+                    <td style={{ padding: '10px 12px', whiteSpace: 'nowrap' }}>
+                      {hasBalance ? (
+                        <button
+                          onClick={() => setConfirmReset(u)}
+                          disabled={resetting === u.id}
+                          style={{ padding: '6px 14px', background: `${C.green}12`, border: `1px solid ${C.green}55`, color: C.green, fontFamily: 'Orbitron, sans-serif', fontSize: '8px', letterSpacing: '0.08em', cursor: 'pointer', borderRadius: '2px', transition: 'all 0.15s', display: 'flex', alignItems: 'center', gap: '5px' }}
+                          onMouseEnter={e => (e.currentTarget.style.background = `${C.green}22`)}
+                          onMouseLeave={e => (e.currentTarget.style.background = `${C.green}12`)}
+                        >
+                          {resetting === u.id ? (
+                            <><svg width="10" height="10" viewBox="0 0 28 28" fill="none" style={{ animation: 'spin 0.9s linear infinite' }}><circle cx="14" cy="14" r="10" stroke={C.green} strokeWidth="2.5" strokeDasharray="22 14" strokeLinecap="round"/></svg>جاري...</>
+                          ) : (
+                            '✅ تم الدفع — تصفير الرصيد'
+                          )}
+                        </button>
+                      ) : (
+                        <span style={{ fontFamily: 'Rajdhani, sans-serif', fontSize: '12px', color: 'rgba(255,255,255,0.15)' }}>لا يوجد رصيد</span>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
 // ── BountyMissionsTab — إدارة مهمات الجوائز الصفراء (Firestore CRUD) ─────────
 // ══════════════════════════════════════════════════════════════════════════════
 interface BountyMission {
@@ -2358,7 +2608,7 @@ function FuelStationsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
 // ── Admin Dashboard ───────────────────────────────────────────────────────────
 export function AdminDashboard() {
   const [, navigate] = useLocation();
-  const [tab, setTab] = useState<"merchants" | "map" | "categories" | "settings" | "taxi" | "drivers" | "fuel" | "bounty">("merchants");
+  const [tab, setTab] = useState<"merchants" | "map" | "categories" | "settings" | "taxi" | "drivers" | "fuel" | "bounty" | "users">("merchants");
   const [cats, setCats] = useState<Cat[]>([]);
   const [authChecked, setAuthChecked] = useState(false);
   const toast = useToast();
@@ -2401,6 +2651,7 @@ export function AdminDashboard() {
     { key: "taxi"       as const, en: "TAXI",        ar: "🚕 التكسي" },
     { key: "fuel"       as const, en: "FUEL",        ar: "⛽ محطات الوقود" },
     { key: "bounty"     as const, en: "BOUNTY",      ar: "⭐ المهمات والجوائز" },
+    { key: "users"      as const, en: "USERS",       ar: "👥 المستخدمون" },
     { key: "settings"   as const, en: "SETTINGS",    ar: "الإعدادات" },
   ];
 
@@ -2452,6 +2703,7 @@ export function AdminDashboard() {
         {tab === "taxi"       && <TaxiTab toast={toast} />}
         {tab === "fuel"       && <FuelStationsTab toast={toast} />}
         {tab === "bounty"     && <BountyMissionsTab toast={toast} />}
+        {tab === "users"      && <UsersTab toast={toast} />}
         {tab === "settings"   && <SettingsTab toast={toast} />}
       </main>
 
