@@ -9,6 +9,7 @@ import { FazaaSystem } from './FazaaSystem';
 import { MarketTicker } from './MarketTicker';
 import { FuelStationRadar } from './FuelStationRadar';
 import { BountyMissionSystem } from './BountyMissionSystem';
+import { BountyShortcutButton } from './BountyShortcutButton';
 import { ActiveOrderTracker } from './ActiveOrderTracker';
 import TrafficLayer from './TrafficLayer';
 import { useMapTheme } from '@/lib/mapTheme';
@@ -4909,6 +4910,12 @@ export function ClinicMap({
         userLocation={userLocation}
         isDay={theme.isDay}
         filterActive={!!activeFilter}
+      />
+
+      {/* ── Bounty Shortcut FAB — زر المهمة العائم ── */}
+      <BountyShortcutButton
+        mapRef={mapRef}
+        isDay={theme.isDay}
       />
 
       {/* ── Live Market Ticker ── */}
