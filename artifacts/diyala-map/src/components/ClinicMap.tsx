@@ -887,10 +887,10 @@ export function ClinicMap({
       .leaflet-control-zoom a:hover{background:#00f5d422!important;}
       .leaflet-control-attribution{background:rgba(0,0,0,0.7)!important;color:#00f5d488!important;font-size:10px;}
       .leaflet-control-attribution a{color:#00f5d4!important;}
-      .map-popup .leaflet-popup-content-wrapper{background:rgba(5,8,15,0.97)!important;border-radius:2px!important;padding:0!important;min-width:220px;}
+      .map-popup .leaflet-popup-content-wrapper{background:rgba(5,8,15,0.97)!important;border-radius:2px!important;padding:0!important;min-width:220px;max-height:52vh!important;overflow-y:auto!important;}
       .map-popup .leaflet-popup-content{margin:0!important;width:auto!important;}
       .map-popup .leaflet-popup-tip-container{display:none;}
-      .map-popup .leaflet-popup-close-button{color:#aaa!important;font-size:18px!important;top:6px!important;right:8px!important;}
+      .map-popup .leaflet-popup-close-button{color:rgba(255,255,255,0.7)!important;font-size:22px!important;top:4px!important;right:6px!important;width:28px!important;height:28px!important;display:flex!important;align-items:center!important;justify-content:center!important;background:rgba(255,45,120,0.12)!important;border-radius:3px!important;transition:all 0.15s!important;}
       .mission-popup .leaflet-popup-content-wrapper{background:rgba(5,8,15,0.97)!important;border:1px solid #f5c518!important;box-shadow:0 0 32px #f5c51844,0 0 64px #f5c51822!important;border-radius:2px!important;padding:0!important;}
       .mission-popup .leaflet-popup-tip{background:#f5c518!important;}
       .mission-popup .leaflet-popup-tip-container{display:block;}
@@ -2958,7 +2958,15 @@ export function ClinicMap({
       )}
 
       {/* ── GTA V GPS Button ── */}
-      <div style={{position:'absolute',bottom:'100px',left:'20px',zIndex:1001,display:'flex',flexDirection:'column',alignItems:'center',gap:'8px'}}>
+      {/* bottom shifts up dynamically when Selected Place Panel is visible */}
+      <div style={{
+        position:'absolute',
+        bottom: selectedPlace ? (placeRouteInfo ? '262px' : '208px') : '100px',
+        left:'20px',
+        zIndex:1001,
+        display:'flex',flexDirection:'column',alignItems:'center',gap:'8px',
+        transition:'bottom 0.32s cubic-bezier(0.4,0,0.2,1)',
+      }}>
         {/* Error toast */}
         {locateError && (
           <div style={{background:'rgba(5,8,15,0.97)',border:'1px solid #ff2d78',color:'#ff2d78',fontSize:'11px',padding:'8px 12px',fontFamily:'Rajdhani,sans-serif',maxWidth:'180px',marginBottom:'4px',boxShadow:'0 0 18px rgba(255,45,120,0.3)',backdropFilter:'blur(12px)'}}>
@@ -4520,6 +4528,7 @@ export function ClinicMap({
       {selectedPlace && (
         <div style={{
           position:'absolute', bottom:'80px', left:0, right:0, zIndex:1010,
+          maxHeight:'58vh', overflowY:'auto',
           background:'rgba(5,8,15,0.98)',
           borderTop:'2px solid #00d4ff',
           boxShadow:'0 -6px 40px rgba(0,212,255,0.25)',
@@ -4551,13 +4560,20 @@ export function ClinicMap({
               )}
             </div>
             <button onClick={clearSelectedPlace} style={{
-              background:'none',border:'1px solid rgba(255,45,120,0.3)',
-              color:'rgba(255,45,120,0.6)',fontFamily:'Orbitron,sans-serif',
-              fontSize:'10px',padding:'6px 10px',cursor:'pointer',flexShrink:0,
+              background:'rgba(255,45,120,0.1)',
+              border:'1.5px solid rgba(255,45,120,0.55)',
+              color:'#ff2d78',
+              fontFamily:'Orbitron,sans-serif',
+              fontSize:'16px',lineHeight:1,
+              width:'34px',height:'34px',
+              display:'flex',alignItems:'center',justifyContent:'center',
+              cursor:'pointer',flexShrink:0,
+              borderRadius:'3px',
+              boxShadow:'0 0 10px rgba(255,45,120,0.2)',
               transition:'all 0.2s',
             }}
-            onMouseEnter={e=>{(e.currentTarget as HTMLElement).style.background='rgba(255,45,120,0.1)';(e.currentTarget as HTMLElement).style.color='#ff2d78';}}
-            onMouseLeave={e=>{(e.currentTarget as HTMLElement).style.background='none';(e.currentTarget as HTMLElement).style.color='rgba(255,45,120,0.6)';}}
+            onMouseEnter={e=>{(e.currentTarget as HTMLElement).style.background='rgba(255,45,120,0.22)';(e.currentTarget as HTMLElement).style.boxShadow='0 0 16px rgba(255,45,120,0.5)';}}
+            onMouseLeave={e=>{(e.currentTarget as HTMLElement).style.background='rgba(255,45,120,0.1)';(e.currentTarget as HTMLElement).style.boxShadow='0 0 10px rgba(255,45,120,0.2)';}}
             >✕</button>
           </div>
 
