@@ -8,7 +8,7 @@ import { RatingDialog } from './RatingDialog';
 import { FazaaSystem } from './FazaaSystem';
 import { MarketTicker } from './MarketTicker';
 import { FuelStationRadar } from './FuelStationRadar';
-import { collection, query, where, getDocs } from 'firebase/firestore';
+import { collection, query, where, getDocs, onSnapshot, orderBy, limit } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 
 // ── Fetch phones of AVAILABLE agents from Firestore (cross-check filter) ──
@@ -556,6 +556,8 @@ export function ClinicMap({
   // ── Gas order chat ────────────────────────────────────────────────────────
   const [showGasChat,          setShowGasChat]          = useState(false);
   const [gasUnread,            setGasUnread]            = useState(false);
+  const [hasUnreadChat,        setHasUnreadChat]        = useState(false);
+  const showChatRef = useRef(false);
   const [showGasCancelConfirm, setShowGasCancelConfirm] = useState(false);
 
   // ── Rating dialog (auto-opens when ride finishes) ─────────────────────────
@@ -880,6 +882,9 @@ export function ClinicMap({
       @keyframes lf-ping{75%,100%{transform:scale(2.5);opacity:0;}}
       @keyframes lf-ping-subtle{0%,100%{box-shadow:0 0 22px rgba(123,47,247,0.55),0 0 8px rgba(123,47,247,0.3);}50%{box-shadow:0 0 36px rgba(123,47,247,0.85),0 0 16px rgba(123,47,247,0.5);}}
       @keyframes lf-spin{to{transform:rotate(360deg);}}
+      @keyframes chat-unread-pulse{0%,100%{opacity:1;transform:scale(1);}50%{opacity:0.7;transform:scale(1.35);}}
+      @keyframes chat-unread-shake{0%{transform:rotate(-8deg) scale(1.04);}100%{transform:rotate(8deg) scale(1.04);}}
+      @keyframes fuel-top-pulse{0%,100%{opacity:1;transform:scale(1);}50%{opacity:0.6;transform:scale(1.4);}}
       @keyframes mission-pulse{0%,100%{transform:scale(1);opacity:1;}50%{transform:scale(1.15);opacity:0.8;}}
       @keyframes traffic-flow{0%{stroke-dashoffset:30;}100%{stroke-dashoffset:0;}}
       .leaflet-container{background:#0a0d14!important;font-family:'Rajdhani',sans-serif;}
@@ -2286,6 +2291,29 @@ export function ClinicMap({
     return ()=> es.close();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   },[]);
+
+  // ── Keep showChatRef in sync with showChat ────────────────────────────────
+  useEffect(()=>{ showChatRef.current = showChat; }, [showChat]);
+
+  // ── Taxi chat unread: Firestore live listener ─────────────────────────────
+  useEffect(()=>{
+    if (!activeOrderId) { setHasUnreadChat(false); return; }
+    const q = query(
+      collection(db, 'chats', String(activeOrderId), 'messages'),
+      orderBy('timestamp', 'desc'),
+      limit(1),
+    );
+    const unsub = onSnapshot(q, snap => {
+      if (snap.empty) return;
+      const last = snap.docs[0].data();
+      const sender: string = last.senderId ?? last.sender ?? '';
+      if (sender !== 'customer' && !showChatRef.current) {
+        setHasUnreadChat(true);
+      }
+    }, () => {/* ignore errors */});
+    return () => unsub();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeOrderId]);
 
   // ── Poll gas order status every 4 s ───────────────────────────────────────
   useEffect(()=>{
@@ -4160,7 +4188,7 @@ export function ClinicMap({
             {/* Chat toggle button */}
             {activeOrderId && activeOrderStatus !== 'done' && activeOrderStatus !== 'cancelled' && (
               <button
-                onClick={()=>setShowChat(true)}
+                onClick={()=>{ setShowChat(true); setHasUnreadChat(false); }}
                 style={{
                   background: showChat ? 'rgba(123,47,247,0.25)' : 'rgba(123,47,247,0.1)',
                   border:'1px solid rgba(123,47,247,0.5)',
@@ -4168,11 +4196,22 @@ export function ClinicMap({
                   letterSpacing:'0.1em',padding:'6px 10px',cursor:'pointer',
                   flexShrink:0,transition:'all 0.2s',
                   boxShadow: showChat ? '0 0 14px rgba(123,47,247,0.3)' : 'none',
+                  position:'relative',
                 }}
                 onMouseEnter={e=>{(e.currentTarget as HTMLElement).style.background='rgba(123,47,247,0.3)';}}
                 onMouseLeave={e=>{(e.currentTarget as HTMLElement).style.background=showChat?'rgba(123,47,247,0.25)':'rgba(123,47,247,0.1)';}}
               >
                 💬 دردشة
+                {hasUnreadChat && (
+                  <span style={{
+                    position:'absolute', top:'-4px', right:'-4px',
+                    width:'10px', height:'10px', borderRadius:'50%',
+                    background:'#ff2d50',
+                    boxShadow:'0 0 8px #ff2d50, 0 0 16px rgba(255,45,80,0.6)',
+                    animation:'chat-unread-pulse 1.4s ease-in-out infinite',
+                    display:'block',
+                  }}/>
+                )}
               </button>
             )}
 
@@ -4222,7 +4261,7 @@ export function ClinicMap({
             </div>
           </div>
           {/* Open chat button */}
-          <button onClick={()=>{ setShowChat(true); setSysMsgSnack(null); if(sysMsgTimerRef.current) clearTimeout(sysMsgTimerRef.current); }}
+          <button onClick={()=>{ setShowChat(true); setHasUnreadChat(false); setSysMsgSnack(null); if(sysMsgTimerRef.current) clearTimeout(sysMsgTimerRef.current); }}
             style={{
               flexShrink:0, padding:'6px 11px',
               background:'rgba(245,197,24,0.2)', border:'1px solid rgba(245,197,24,0.6)',
@@ -4345,25 +4384,40 @@ export function ClinicMap({
       {/* ── Floating Chat Icon (shown when chat is minimized and trip is active) ── */}
       {activeOrderId && !showChat && ['pending','accepted','driving'].includes(activeOrderStatus) && (
         <button
-          onClick={()=> setShowChat(true)}
+          onClick={()=>{ setShowChat(true); setHasUnreadChat(false); }}
           title="فتح الدردشة"
           style={{
             position:'absolute', bottom:'90px', left:'16px', zIndex:4001,
             width:'54px', height:'54px', borderRadius:'50%',
-            background:'rgba(5,8,15,0.97)',
-            border:'2px solid #7b2ff7',
-            boxShadow:'0 0 22px rgba(123,47,247,0.55), 0 0 8px rgba(123,47,247,0.3)',
+            background: hasUnreadChat ? 'rgba(5,8,15,0.97)' : 'rgba(5,8,15,0.97)',
+            border: hasUnreadChat ? '2px solid #ff2d50' : '2px solid #7b2ff7',
+            boxShadow: hasUnreadChat
+              ? '0 0 22px rgba(255,45,80,0.7), 0 0 8px rgba(255,45,80,0.4)'
+              : '0 0 22px rgba(123,47,247,0.55), 0 0 8px rgba(123,47,247,0.3)',
             cursor:'pointer', display:'flex', flexDirection:'column',
             alignItems:'center', justifyContent:'center', gap:'1px',
-            animation:'lf-ping-subtle 2.5s cubic-bezier(0,0,0.2,1) infinite',
+            animation: hasUnreadChat
+              ? 'chat-unread-shake 0.5s ease-in-out infinite alternate'
+              : 'lf-ping-subtle 2.5s cubic-bezier(0,0,0.2,1) infinite',
             padding:0,
           }}
         >
           <span style={{fontSize:'22px', lineHeight:1}}>💬</span>
           <span style={{
             fontFamily:'Orbitron,sans-serif', fontSize:'6px',
-            color:'#c77dff', letterSpacing:'0.05em',
+            color: hasUnreadChat ? '#ff8099' : '#c77dff', letterSpacing:'0.05em',
           }}>CHAT</span>
+          {hasUnreadChat && (
+            <span style={{
+              position:'absolute', top:'-3px', right:'-3px',
+              width:'16px', height:'16px', borderRadius:'50%',
+              background:'#ff2d50',
+              boxShadow:'0 0 10px #ff2d50, 0 0 20px rgba(255,45,80,0.7)',
+              animation:'chat-unread-pulse 1.4s ease-in-out infinite',
+              display:'flex', alignItems:'center', justifyContent:'center',
+              fontFamily:'Orbitron,sans-serif', fontSize:'7px', color:'#fff', fontWeight:700,
+            }}>!</span>
+          )}
         </button>
       )}
 
