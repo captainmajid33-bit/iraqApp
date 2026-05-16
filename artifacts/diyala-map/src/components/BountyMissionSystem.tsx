@@ -275,11 +275,15 @@ export function BountyMissionSystem({ mapRef, userLocation }: Props) {
     setDistM(d);
   }, [selected, effectivePos]);
 
-  // ── Remove polyline when sheet closes ─────────────────────────────────────
+  // ── Sheet close: reset UI state but KEEP the polyline on the map ──────────
+  // The route line stays visible so the user can follow it after closing the
+  // detail sheet. Only ❌ "إلغاء المسار" (handleStopNav) or a successful
+  // claim (handleClaim) are allowed to remove the polyline.
   useEffect(() => {
     if (!selected) {
-      clearPolyline();
       setNavigating(false);
+      setRouteInfo(null);
+      // ⚠️ Do NOT call clearPolyline() here — route stays on the map.
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected]);
