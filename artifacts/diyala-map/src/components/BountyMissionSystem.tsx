@@ -26,9 +26,11 @@ interface BountyMission {
 }
 
 interface Props {
-  mapRef:       React.MutableRefObject<L.Map | null>;
-  userLocation: { lat: number; lng: number } | null;
-  isDay?:       boolean;
+  mapRef:        React.MutableRefObject<L.Map | null>;
+  userLocation:  { lat: number; lng: number } | null;
+  isDay?:        boolean;
+  /** When true, all bounty map markers are removed (category filter active) */
+  filterActive?: boolean;
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -121,7 +123,7 @@ function makeMissionIcon(): L.DivIcon {
 }
 
 // ── Component ─────────────────────────────────────────────────────────────────
-export function BountyMissionSystem({ mapRef, userLocation, isDay = false }: Props) {
+export function BountyMissionSystem({ mapRef, userLocation, isDay = false, filterActive = false }: Props) {
   const [mapReady,       setMapReady]       = useState(false);
   const [missions,       setMissions]       = useState<BountyMission[]>([]);
   const [selected,       setSelected]       = useState<BountyMission | null>(null);
@@ -199,11 +201,17 @@ export function BountyMissionSystem({ mapRef, userLocation, isDay = false }: Pro
     return () => unsub();
   }, []);
 
-  // ── Draw / update markers when missions or map change ─────────────────────
+  // ── Draw / update markers when missions, map, or filterActive change ────────
   useEffect(() => {
     if (!mapReady) return;
     const map = mapRef.current;
     if (!map) return;
+    // Hide all bounty markers when any category filter is active
+    if (filterActive) {
+      markersRef.current.forEach(m => m.remove());
+      markersRef.current.clear();
+      return;
+    }
     const activeIds = new Set(missions.map(m => m.id));
     markersRef.current.forEach((marker, id) => {
       if (!activeIds.has(id)) { marker.remove(); markersRef.current.delete(id); }
@@ -217,7 +225,7 @@ export function BountyMissionSystem({ mapRef, userLocation, isDay = false }: Pro
       marker.on('click', () => { setSelected(mission); setClaimResult(null); });
       markersRef.current.set(mission.id, marker);
     });
-  }, [missions, mapReady, mapRef]);
+  }, [missions, mapReady, mapRef, filterActive]);
 
   // ── Sync selected with live mission list ─────────────────────────────────
   useEffect(() => {

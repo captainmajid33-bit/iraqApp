@@ -1134,6 +1134,11 @@ export function ClinicMap({
     }
   }, [routeTarget, activeFilter]);
 
+  // ── Sync showFuel from activeFilter (fuel stations auto-show/hide) ────────
+  useEffect(() => {
+    setShowFuel(activeFilter === '__fuel_stations__');
+  }, [activeFilter]);
+
   // Build popup DOM — reads catMapRef so no stale closure
   const buildPopup = useCallback((item: MapItem)=>{
     const cat   = catMapRef.current.get(item.kind);
@@ -2740,18 +2745,22 @@ export function ClinicMap({
               })}
               {/* ── Fuel Stations toggle button ── */}
               <button
-                onClick={() => setShowFuel(v => !v)}
+                onClick={() => {
+                  const next = activeFilter === '__fuel_stations__' ? '' : '__fuel_stations__';
+                  onFilterChange(next);
+                  setShowMoreModal(false);
+                }}
                 style={{
                   padding:'8px 16px',
-                  background: showFuel ? 'rgba(245,197,24,0.18)' : 'rgba(5,8,15,0.92)',
+                  background: activeFilter==='__fuel_stations__' ? 'rgba(245,197,24,0.18)' : 'rgba(5,8,15,0.92)',
                   border:'none',
-                  borderBottom: showFuel ? '2px solid #f5c518' : '2px solid transparent',
-                  color: showFuel ? '#f5c518' : 'rgba(255,255,255,0.35)',
+                  borderBottom: activeFilter==='__fuel_stations__' ? '2px solid #f5c518' : '2px solid transparent',
+                  color: activeFilter==='__fuel_stations__' ? '#f5c518' : 'rgba(255,255,255,0.35)',
                   fontFamily:'Orbitron,sans-serif',fontSize:'10px',letterSpacing:'0.1em',
                   cursor:'pointer',transition:'all 0.2s',
                   display:'flex',flexDirection:'column',alignItems:'center',gap:'3px',
                   minWidth:'90px',flexShrink:0,
-                  boxShadow: showFuel ? 'inset 0 0 20px rgba(245,197,24,0.18)' : 'none',
+                  boxShadow: activeFilter==='__fuel_stations__' ? 'inset 0 0 20px rgba(245,197,24,0.18)' : 'none',
                   position:'relative',
                 }}>
                 <span style={{fontSize:'15px'}}>⛽</span>
@@ -2759,7 +2768,7 @@ export function ClinicMap({
                 <span style={{fontSize:'11px',fontFamily:'Rajdhani,sans-serif',opacity:0.8,whiteSpace:'nowrap'}}>
                   محطات الوقود
                 </span>
-                {showFuel && (
+                {activeFilter==='__fuel_stations__' && (
                   <span style={{
                     position:'absolute',top:'6px',right:'6px',
                     width:'6px',height:'6px',borderRadius:'50%',
@@ -4999,6 +5008,7 @@ export function ClinicMap({
         mapRef={mapRef}
         userLocation={userLocation}
         isDay={theme.isDay}
+        filterActive={!!activeFilter}
       />
 
       {/* ── Live Market Ticker ── */}
