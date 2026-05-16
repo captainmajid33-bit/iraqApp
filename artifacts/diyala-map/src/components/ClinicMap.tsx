@@ -277,10 +277,11 @@ export function ClinicMap({
   adminMode = false, onMapClick, onAdminDelete,
 }: ClinicMapProps) {
   const theme        = useMapTheme();
-  const mapContainer = useRef<HTMLDivElement>(null);
-  const mapRef       = useRef<L.Map|null>(null);
-  const tileLayerRef = useRef<L.TileLayer|null>(null);
-  const markersRef   = useRef<{[id:number]:L.Marker}>({});
+  const mapContainer      = useRef<HTMLDivElement>(null);
+  const mapRef            = useRef<L.Map|null>(null);
+  const tileLayerRef      = useRef<L.TileLayer|null>(null);
+  const navTargetMarkerRef = useRef<L.Marker|null>(null);
+  const markersRef        = useRef<{[id:number]:L.Marker}>({});
   const userMarkerRef  = useRef<L.Marker|null>(null);
   const userCircleRef  = useRef<L.Circle|null>(null);
   const routeGlowRef     = useRef<L.Polyline|null>(null);
@@ -1095,22 +1096,42 @@ export function ClinicMap({
     };
   },[]);
 
-  // ── Swap tile layer when day/night mode changes ───────────────────────────
+  // ── Compute effective tile URL based on map state ─────────────────────────
+  // Focus / Nav → _nolabels (no embedded POI icons in tiles)
+  // All (no filter) → _all (full labels + POIs)
+  const effectiveTileUrl = useMemo(() => {
+    const focused = !!routeTarget || (!!activeFilter && activeFilter !== '');
+    return focused ? theme.tileUrlFocused : theme.tileUrl;
+  }, [routeTarget, activeFilter, theme.tileUrlFocused, theme.tileUrl]);
+
+  // ── Swap tile layer when effective URL changes (day/night OR map state) ───
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
-    // Remove old tile layer and add the new one
     if (tileLayerRef.current) {
       map.removeLayer(tileLayerRef.current);
     }
-    tileLayerRef.current = L.tileLayer(theme.tileUrl, {
+    tileLayerRef.current = L.tileLayer(effectiveTileUrl, {
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/">CARTO</a>',
       subdomains: 'abcd', maxZoom: 20,
     });
     tileLayerRef.current.addTo(map);
-    // Push to back so markers stay on top
     tileLayerRef.current.bringToBack();
-  }, [theme.tileUrl]);
+  }, [effectiveTileUrl]);
+
+  // ── OSM POI overlay visibility (hide when category focused or nav active) ─
+  useEffect(() => {
+    const map   = mapRef.current;
+    const layer = poiLayerRef.current;
+    if (!map || !layer) return;
+    // Show only when there is NO active filter AND no navigation
+    const shouldShow = !routeTarget && (!activeFilter || activeFilter === '');
+    if (shouldShow) {
+      if (!map.hasLayer(layer)) layer.addTo(map);
+    } else {
+      if (map.hasLayer(layer)) map.removeLayer(layer);
+    }
+  }, [routeTarget, activeFilter]);
 
   // Build popup DOM — reads catMapRef so no stale closure
   const buildPopup = useCallback((item: MapItem)=>{
@@ -2527,36 +2548,63 @@ export function ClinicMap({
     return ()=> clearTimeout(t);
   },[loopActive, loopCountdown]);
 
-  // Sync markers whenever items / activeFilter / selectedItem changes
+  // Sync markers — 3 modes:
+  //  NAV   (routeTarget set)  → hide ALL category markers (route + special nav marker handle it)
+  //  FOCUS (activeFilter set) → show only that category
+  //  ALL   (no filter)        → show every item
   useEffect(()=>{
     if (!mapRef.current) return;
+    // Clear existing category markers
     Object.values(markersRef.current).forEach(m=>m.remove());
     markersRef.current={};
-    items
-      .filter(i=>i.kind===activeFilter && i.status!=='معطّل')
-      .forEach(item=>{
-        const isOpen    = item.status==='مفتوح';
-        const isSelected= selectedItem?.id===item.id;
-        const popupClass= `map-popup cat-${item.kind}`;
-        const marker    = L.marker([item.lat,item.lng],{icon:makeIcon(item.kind,catMapRef.current,isOpen,isSelected,item.name)}).addTo(mapRef.current!);
-        marker.bindPopup(L.popup({className:popupClass,offset:[0,-8],closeButton:true,autoClose:true,autoPan:true}).setContent(buildPopup(item)));
-        marker.on('click',()=>{marker.openPopup();mapRef.current?.flyTo([item.lat,item.lng],15,{duration:0.8});});
-        markersRef.current[item.id]=marker;
-      });
+
+    // NAV MODE — no regular markers; navTargetMarkerRef handles the target pin
+    if (routeTarget) return;
+
+    const visible = activeFilter
+      ? items.filter(i=>i.kind===activeFilter && i.status!=='معطّل')
+      : items.filter(i=>i.status!=='معطّل');
+
+    visible.forEach(item=>{
+      const isOpen    = item.status==='مفتوح';
+      const isSelected= selectedItem?.id===item.id;
+      const popupClass= `map-popup cat-${item.kind}`;
+      const marker    = L.marker([item.lat,item.lng],{icon:makeIcon(item.kind,catMapRef.current,isOpen,isSelected,item.name)}).addTo(mapRef.current!);
+      marker.bindPopup(L.popup({className:popupClass,offset:[0,-8],closeButton:true,autoClose:true,autoPan:true}).setContent(buildPopup(item)));
+      marker.on('click',()=>{marker.openPopup();mapRef.current?.flyTo([item.lat,item.lng],15,{duration:0.8});});
+      markersRef.current[item.id]=marker;
+    });
     // After markers are built, open popup for any pending search-jump
     if (pendingJumpRef.current !== null) {
       const jumpId = pendingJumpRef.current;
       pendingJumpRef.current = null;
       setTimeout(()=>{ markersRef.current[jumpId]?.openPopup(); }, 500);
     }
-  },[items,activeFilter,selectedItem,buildPopup]);
+  },[items,activeFilter,selectedItem,buildPopup,routeTarget]);
 
-  // Update selected icon without full re-render
+  // Update selected icon without full re-render (skip in nav mode)
   useEffect(()=>{
-    items.filter(i=>i.kind===activeFilter && i.status!=='معطّل').forEach(item=>{
+    if (routeTarget) return;
+    const visible = activeFilter
+      ? items.filter(i=>i.kind===activeFilter && i.status!=='معطّل')
+      : items.filter(i=>i.status!=='معطّل');
+    visible.forEach(item=>{
       markersRef.current[item.id]?.setIcon(makeIcon(item.kind,catMapRef.current,item.status==='مفتوح',selectedItem?.id===item.id,item.name));
     });
-  },[selectedItem,items,activeFilter]);
+  },[selectedItem,items,activeFilter,routeTarget]);
+
+  // ── Nav target marker — show dedicated pin during navigation ──────────────
+  useEffect(()=>{
+    // Remove old nav target marker
+    navTargetMarkerRef.current?.remove();
+    navTargetMarkerRef.current = null;
+    if (!routeTarget || !mapRef.current) return;
+    // Create a bold target marker (pulse ring via CSS class)
+    const icon = makeIcon(routeTarget.kind, catMapRef.current, routeTarget.status==='مفتوح', true, routeTarget.name);
+    const m = L.marker([routeTarget.lat, routeTarget.lng], { icon, zIndexOffset: 9000 }).addTo(mapRef.current);
+    m.bindPopup(L.popup({className:`map-popup cat-${routeTarget.kind}`,offset:[0,-8],closeButton:true,autoClose:false,autoPan:false}).setContent(buildPopup(routeTarget)));
+    navTargetMarkerRef.current = m;
+  },[routeTarget, buildPopup]);
 
   // ── Manual-pick navigation layer: show ALL saved locations as reference dots ──
   // So user can see doctors, gas stations, landmarks while dragging map
@@ -2598,16 +2646,18 @@ export function ClinicMap({
     // 1. Clear clinic/doctor route
     clearRouteVisuals();
     onClearRoute();
-    // 2. Clear POI route (global overlay)
+    // 2. Clear nav target marker (nav mode pin)
+    navTargetMarkerRef.current?.remove(); navTargetMarkerRef.current = null;
+    // 3. Clear POI route (global overlay)
     poiRouteGlowRef.current?.remove(); poiRouteGlowRef.current = null;
     poiRouteLineRef.current?.remove(); poiRouteLineRef.current = null;
     setHasPoiRoute(false);
-    // 3. Clear Nominatim place route
+    // 4. Clear Nominatim place route
     placeGlowRef.current?.remove(); placeGlowRef.current = null;
     placeLineRef.current?.remove(); placeLineRef.current = null;
-    // 4. Close any open popup
+    // 5. Close any open popup
     mapRef.current?.closePopup();
-    // 5. Fly back to user location
+    // 6. Fly back to user location
     const loc = userLocationRef.current;
     if (loc && mapRef.current) {
       mapRef.current.flyTo([loc.lat, loc.lng], 15, { animate: true, duration: 1.2 });
