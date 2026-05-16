@@ -3207,8 +3207,8 @@ export function ClinicMap({
 
       {/* ── Traffic Toggle Button ── */}
       <div style={{
-        position:'absolute',bottom:'96px',right:'20px',
-        zIndex:1000,display:'flex',flexDirection:'column',alignItems:'center',gap:'4px',
+        position:'absolute',bottom:'90px',right:'16px',
+        zIndex:1000,display:'flex',flexDirection:'column-reverse',alignItems:'center',gap:'4px',
       }}>
         <button
           onClick={()=>setShowTraffic(v=>!v)}
@@ -4950,10 +4950,14 @@ export function ClinicMap({
       </div>
 
       {/* ── Fazaa Rescue System ── */}
+      {/* buttonBottom shifts Fazaa up above the Traffic stack:
+          no legend → 172px (90 + 52btn + 4gap + 14label + 12margin)
+          legend active → 250px (+ 74px legend + 4gap) */}
       <FazaaSystem
         mapRef={mapRef}
         userLocation={userLocation}
         clearMapForRescue={clearMapForRescue}
+        buttonBottom={showTraffic ? 250 : 172}
       />
 
       {/* ── Fuel Station Radar ── */}

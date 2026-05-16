@@ -42,6 +42,8 @@ interface FazaaSystemProps {
   mapRef:            React.MutableRefObject<L.Map | null>;
   userLocation:      { lat: number; lng: number } | null;
   clearMapForRescue: () => void;
+  /** Dynamic bottom offset (px) — keeps Fazaa button above the traffic stack */
+  buttonBottom?:     number;
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -146,7 +148,7 @@ function makeFazaaIcon(): L.DivIcon {
 }
 
 // ── Component ─────────────────────────────────────────────────────────────────
-export function FazaaSystem({ mapRef, userLocation, clearMapForRescue }: FazaaSystemProps) {
+export function FazaaSystem({ mapRef, userLocation, clearMapForRescue, buttonBottom = 172 }: FazaaSystemProps) {
 
   // ── Map readiness — poll until mapRef.current is set ─────────────────────
   const [mapReady, setMapReady] = useState(false);
@@ -412,9 +414,9 @@ export function FazaaSystem({ mapRef, userLocation, clearMapForRescue }: FazaaSy
       {/* ── Floating button (idle only) ── */}
       {phase === 'idle' && (
         <div style={{
-          position:      'fixed',
-          bottom:        '184px',
-          right:         '20px',
+          position:      'absolute',
+          bottom:        `${buttonBottom}px`,
+          right:         '16px',
           zIndex:        1200,
           display:       'flex',
           flexDirection: 'column',
