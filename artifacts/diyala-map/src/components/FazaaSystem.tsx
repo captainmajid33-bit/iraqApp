@@ -1,6 +1,6 @@
 /**
  * FazaaSystem — نظام فزعة ديالى التفاعلي
- * Peer-to-peer rescue system integrated with the main Leaflet map + Firestore
+ * Peer-to-peer rescue system integrated with Leaflet map + Firestore
  */
 import { useEffect, useRef, useState, useCallback } from 'react';
 import L from 'leaflet';
@@ -12,12 +12,12 @@ import { db } from '@/lib/firebase';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 type FazaaPhase =
-  | 'idle'               // nothing active
-  | 'sheet'              // requester: issue selection sheet
-  | 'waiting'            // requester: waiting for a helper
-  | 'requester_helped'   // requester: helper accepted, showing info
-  | 'detail'             // helper: tapped a marker, showing detail sheet
-  | 'helping';           // helper: accepted, rescue route on map
+  | 'idle'
+  | 'sheet'
+  | 'waiting'
+  | 'requester_helped'
+  | 'detail'
+  | 'helping';
 
 interface FazaaDoc {
   id:         string;
@@ -39,17 +39,17 @@ interface RouteInfo {
 }
 
 interface FazaaSystemProps {
-  mapRef:           React.MutableRefObject<L.Map | null>;
-  userLocation:     { lat: number; lng: number } | null;
+  mapRef:            React.MutableRefObject<L.Map | null>;
+  userLocation:      { lat: number; lng: number } | null;
   clearMapForRescue: () => void;
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const ISSUES = [
-  { key: 'flat_tire', label: 'تاير بنكت',         icon: '🚗' },
-  { key: 'no_fuel',   label: 'خلص بنزين',          icon: '⛽' },
-  { key: 'battery',   label: 'عطل بطارية/اشتراك',  icon: '⚡' },
-  { key: 'tow',       label: 'سحب سيارة',           icon: '🚜' },
+  { key: 'flat_tire', label: 'تاير بنكت',          icon: '🚗' },
+  { key: 'no_fuel',   label: 'خلص بنزين',           icon: '⛽' },
+  { key: 'battery',   label: 'عطل بطارية/اشتراك',   icon: '⚡' },
+  { key: 'tow',       label: 'سحب سيارة',            icon: '🚜' },
 ] as const;
 
 const ISSUE_MAP: Record<string, string> = {
@@ -61,8 +61,14 @@ const ISSUE_MAP: Record<string, string> = {
 
 const OSRM = 'https://router.project-osrm.org/route/v1/driving';
 
-function getUser(): { uid: string; name: string; phone: string } | null {
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function getUser(): { uid?: string; name?: string; phone?: string } | null {
   try { return JSON.parse(localStorage.getItem('diyala_user') ?? 'null'); } catch { return null; }
+}
+
+function myId(): string {
+  const u = getUser();
+  return (u?.uid ?? u?.phone ?? '').trim();
 }
 
 function haversine(lat1: number, lng1: number, lat2: number, lng2: number): number {
@@ -71,107 +77,89 @@ function haversine(lat1: number, lng1: number, lat2: number, lng2: number): numb
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
 }
 
-async function fetchRoute(
-  fromLat: number, fromLng: number,
-  toLat:   number, toLng:   number,
-): Promise<RouteInfo | null> {
+async function fetchRoute(fromLat: number, fromLng: number, toLat: number, toLng: number): Promise<RouteInfo | null> {
   try {
-    const r = await fetch(`${OSRM}/${fromLng},${fromLat};${toLng},${toLat}?overview=full&geometries=geojson`);
-    const d = await r.json();
-    const rt = d?.routes?.[0];
+    const res = await fetch(`${OSRM}/${fromLng},${fromLat};${toLng},${toLat}?overview=full&geometries=geojson`);
+    const d   = await res.json();
+    const rt  = d?.routes?.[0];
     if (!rt) return null;
-    const coords = (rt.geometry.coordinates as [number,number][]).map(([lng,lat]) => [lat,lng] as [number,number]);
+    const coords = (rt.geometry.coordinates as [number,number][]).map(([lng, lat]) => [lat, lng] as [number, number]);
     return {
       distKm:      +(rt.distance / 1000).toFixed(2),
       durationMin: Math.max(1, Math.round(rt.duration / 60)),
       coords,
     };
-  } catch { return null; }
+  } catch (e) {
+    console.warn('[Fazaa] OSRM error:', e);
+    return null;
+  }
 }
 
 // ── CSS injection (once) ───────────────────────────────────────────────────────
-const CSS_ID = 'fazaa-styles';
 function injectFazaaCSS() {
-  if (document.getElementById(CSS_ID)) return;
+  if (document.getElementById('fazaa-styles')) return;
   const s = document.createElement('style');
-  s.id = CSS_ID;
+  s.id = 'fazaa-styles';
   s.textContent = `
-    @keyframes fazaa-bob {
-      0%,100% { transform: translateY(0) scale(1); }
-      50%      { transform: translateY(-5px) scale(1.08); }
-    }
-    @keyframes fazaa-ring {
-      0%   { transform: scale(0.6); opacity: 0.9; }
-      100% { transform: scale(2.6); opacity: 0; }
-    }
-    .fazaa-wrap {
-      position: relative;
-      animation: fazaa-bob 2s ease-in-out infinite;
-      cursor: pointer;
-    }
-    .fazaa-ring {
-      position: absolute;
-      top: 50%; left: 50%;
-      width: 44px; height: 44px;
-      margin: -22px 0 0 -22px;
-      border-radius: 50%;
-      border: 2.5px solid #ff2d78;
-      animation: fazaa-ring 1.6s ease-out infinite;
-      pointer-events: none;
-    }
-    .fazaa-ring2 {
-      animation-delay: 0.55s;
-    }
+    @keyframes fz-bob  { 0%,100%{transform:translateY(0) scale(1)} 50%{transform:translateY(-6px) scale(1.1)} }
+    @keyframes fz-ring { 0%{transform:scale(0.5);opacity:0.9}       100%{transform:scale(2.8);opacity:0} }
+    @keyframes fz-spin { from{transform:rotate(0deg)} to{transform:rotate(360deg)} }
+    .fz-wrap { position:relative; animation:fz-bob 2s ease-in-out infinite; cursor:pointer; display:inline-block; }
+    .fz-ring { position:absolute; top:50%; left:50%; width:48px; height:48px; margin:-24px 0 0 -24px;
+               border-radius:50%; border:2.5px solid #ff2d78;
+               animation:fz-ring 1.7s ease-out infinite; pointer-events:none; }
+    .fz-ring2{ animation-delay:0.6s; }
   `;
   document.head.appendChild(s);
 }
 
-function makeFazaaMarkerIcon(): L.DivIcon {
+// ── Marker factory — L.divIcon only, no external images ──────────────────────
+function makeFazaaIcon(): L.DivIcon {
   return L.divIcon({
-    className: '',
-    iconSize:  [80, 70],
-    iconAnchor:[40, 70],
-    html: `
-      <div class="fazaa-wrap">
-        <div class="fazaa-ring"></div>
-        <div class="fazaa-ring fazaa-ring2"></div>
-        <div style="
-          background: rgba(255,45,120,0.92);
-          border: 2px solid #ff2d78;
-          border-radius: 8px;
-          padding: 4px 8px;
-          text-align: center;
-          box-shadow: 0 0 14px rgba(255,45,120,0.7), 0 0 28px rgba(255,45,120,0.35);
-          font-family: 'Tajawal', 'Arial', sans-serif;
-          font-size: 11px;
-          font-weight: 700;
-          color: #fff;
-          white-space: nowrap;
-          direction: rtl;
-        ">فزعة ياشباب! 🤝</div>
-        <div style="
-          margin: 3px auto 0;
-          font-size: 22px;
-          text-align: center;
-          line-height: 1;
-          filter: drop-shadow(0 0 6px rgba(255,45,120,0.8));
-        ">🚘</div>
-        <div style="
-          width: 0; height: 0;
-          border-left: 8px solid transparent;
-          border-right: 8px solid transparent;
-          border-top: 10px solid rgba(255,45,120,0.92);
-          margin: 0 auto;
-          filter: drop-shadow(0 2px 4px rgba(255,45,120,0.5));
-        "></div>
-      </div>`,
+    className:  '',   // prevent leaflet's default white-box class
+    iconSize:   [90, 72],
+    iconAnchor: [45, 72],
+    html: `<div class="fz-wrap">
+      <div class="fz-ring"></div>
+      <div class="fz-ring fz-ring2"></div>
+      <div style="
+        background:rgba(200,20,50,0.93);
+        border:2px solid #ff2d78;
+        border-radius:10px;
+        padding:5px 10px;
+        font-family:'Tajawal','Arial',sans-serif;
+        font-size:12px; font-weight:700;
+        color:#fff; white-space:nowrap; direction:rtl;
+        text-align:center;
+        box-shadow:0 0 14px rgba(255,45,120,0.75),0 0 28px rgba(255,45,120,0.35);
+      ">فزعة ياشباب! 🤝</div>
+      <div style="font-size:24px;text-align:center;line-height:1.1;
+                  filter:drop-shadow(0 0 6px rgba(255,45,120,0.9));">🚘</div>
+      <div style="width:0;height:0;
+                  border-left:9px solid transparent;
+                  border-right:9px solid transparent;
+                  border-top:11px solid rgba(200,20,50,0.93);
+                  margin:0 auto;"></div>
+    </div>`,
   });
 }
 
 // ── Component ─────────────────────────────────────────────────────────────────
 export function FazaaSystem({ mapRef, userLocation, clearMapForRescue }: FazaaSystemProps) {
+
+  // ── Map readiness — poll until mapRef.current is set ─────────────────────
+  const [mapReady, setMapReady] = useState(false);
+  useEffect(() => {
+    if (mapRef.current) { setMapReady(true); return; }
+    const iv = setInterval(() => {
+      if (mapRef.current) { setMapReady(true); clearInterval(iv); }
+    }, 250);
+    return () => clearInterval(iv);
+  }, [mapRef]);
+
+  // ── State ─────────────────────────────────────────────────────────────────
   const [phase,         setPhase]         = useState<FazaaPhase>('idle');
-  const [selectedIssue, setSelectedIssue] = useState<string>('');
+  const [selectedIssue, setSelectedIssue] = useState('');
   const [submitting,    setSubmitting]    = useState(false);
   const [myRequestId,   setMyRequestId]   = useState<string | null>(null);
   const [activeFazaas,  setActiveFazaas]  = useState<FazaaDoc[]>([]);
@@ -179,24 +167,118 @@ export function FazaaSystem({ mapRef, userLocation, clearMapForRescue }: FazaaSy
   const [routeInfo,     setRouteInfo]     = useState<RouteInfo | null>(null);
   const [calcRoute,     setCalcRoute]     = useState(false);
   const [helperInfo,    setHelperInfo]    = useState<{ name: string } | null>(null);
+  const [liveInfo,      setLiveInfo]      = useState<{ distKm: number; durationMin: number } | null>(null);
 
-  // Rescue route refs
-  const rescueGlowRef  = useRef<L.Polyline | null>(null);
-  const rescueLineRef  = useRef<L.Polyline | null>(null);
+  // ── Refs ──────────────────────────────────────────────────────────────────
+  const rescueGlowRef   = useRef<L.Polyline | null>(null);
+  const rescueLineRef   = useRef<L.Polyline | null>(null);
   const fazaaMarkersRef = useRef<Map<string, L.Marker>>(new Map());
-
-  // Live distance for helper panel
   const rescueTargetRef = useRef<{ lat: number; lng: number } | null>(null);
-  const [liveInfo, setLiveInfo] = useState<{ distKm: number; durationMin: number } | null>(null);
+  const listenerUnsub   = useRef<Unsubscribe | null>(null);
+  const myDocUnsub      = useRef<Unsubscribe | null>(null);
 
-  // Unsubscribers
-  const listenerUnsub = useRef<Unsubscribe | null>(null);
-  const myDocUnsub    = useRef<Unsubscribe | null>(null);
-
-  // Inject CSS once
+  // ── CSS injection ─────────────────────────────────────────────────────────
   useEffect(() => { injectFazaaCSS(); }, []);
 
-  // ── Live distance update for helper ────────────────────────────────────────
+  // ── onSnapshot — listen for ALL active fazaa requests ────────────────────
+  useEffect(() => {
+    const unsub = onSnapshot(
+      query(collection(db, 'fazaa_requests'), where('status', '==', 'active')),
+      snap => {
+        const docs: FazaaDoc[] = [];
+        snap.forEach(d => {
+          const raw = d.data();
+          // ── FIX: always parse coordinates as numbers ──
+          const lat = Number(raw.latitude);
+          const lng = Number(raw.longitude);
+          if (isNaN(lat) || isNaN(lng)) {
+            console.warn('[Fazaa] bad coordinates for doc', d.id, raw.latitude, raw.longitude);
+            return;
+          }
+          const fazaa: FazaaDoc = {
+            id:        d.id,
+            userId:    String(raw.userId   ?? ''),
+            userName:  String(raw.userName ?? 'مستخدم'),
+            userPhone: String(raw.userPhone ?? ''),
+            issueType: String(raw.issueType ?? ''),
+            latitude:  lat,
+            longitude: lng,
+            status:    raw.status ?? 'active',
+          };
+          docs.push(fazaa);
+          console.log(`[Fazaa] 📍 active request: id=${d.id} issue=${fazaa.issueType} lat=${lat} lng=${lng} user=${fazaa.userName}`);
+        });
+        console.log(`[Fazaa] onSnapshot → ${docs.length} active request(s)`);
+        setActiveFazaas(docs);
+      },
+      err => console.warn('[Fazaa] onSnapshot error:', err.code, err.message),
+    );
+    listenerUnsub.current = unsub;
+    return () => unsub();
+  }, []);
+
+  // ── Draw / update map markers when fazaas or map readiness changes ────────
+  useEffect(() => {
+    if (!mapReady) { console.log('[Fazaa] map not ready yet, deferring markers'); return; }
+    const map = mapRef.current;
+    if (!map) return;
+
+    const me = myId();
+    const currentIds = new Set(activeFazaas.map(f => f.id));
+
+    // Remove stale markers
+    fazaaMarkersRef.current.forEach((marker, id) => {
+      if (!currentIds.has(id)) {
+        marker.remove();
+        fazaaMarkersRef.current.delete(id);
+        console.log('[Fazaa] removed stale marker:', id);
+      }
+    });
+
+    // Add new markers
+    activeFazaas.forEach(f => {
+      if (f.userId === me) {
+        console.log('[Fazaa] skipping own request:', f.id);
+        return;
+      }
+      if (fazaaMarkersRef.current.has(f.id)) return; // already on map
+
+      console.log(`[Fazaa] adding marker at [${f.latitude}, ${f.longitude}] for ${f.userName}`);
+      try {
+        const marker = L.marker([f.latitude, f.longitude], {
+          icon:         makeFazaaIcon(),
+          zIndexOffset: 2000,
+          interactive:  true,
+        }).addTo(map);
+
+        marker.on('click', () => {
+          console.log('[Fazaa] marker tapped:', f.id, f.issueType);
+          setSelected(f);
+          setRouteInfo(null);
+          setCalcRoute(true);
+          setPhase('detail');
+        });
+
+        fazaaMarkersRef.current.set(f.id, marker);
+        console.log('[Fazaa] ✅ marker added successfully:', f.id);
+      } catch (e) {
+        console.error('[Fazaa] ❌ failed to add marker:', e);
+      }
+    });
+  }, [activeFazaas, mapReady, mapRef]);
+
+  // ── Calc OSRM route when detail sheet opens ───────────────────────────────
+  useEffect(() => {
+    if (!calcRoute || !selected || !userLocation) { setCalcRoute(false); return; }
+    setCalcRoute(false);
+    fetchRoute(userLocation.lat, userLocation.lng, selected.latitude, selected.longitude)
+      .then(info => {
+        setRouteInfo(info);
+        if (info) console.log(`[Fazaa] route calc: ${info.distKm}km ${info.durationMin}min`);
+      });
+  }, [calcRoute, selected, userLocation]);
+
+  // ── Live distance recalc as helper moves ─────────────────────────────────
   useEffect(() => {
     if (phase !== 'helping' || !userLocation || !rescueTargetRef.current) return;
     const t = rescueTargetRef.current;
@@ -204,67 +286,7 @@ export function FazaaSystem({ mapRef, userLocation, clearMapForRescue }: FazaaSy
     setLiveInfo({ distKm: +km.toFixed(2), durationMin: Math.max(1, Math.round(km / 40 * 60)) });
   }, [userLocation, phase]);
 
-  // ── onSnapshot: listen for ALL active fazaa requests ───────────────────────
-  useEffect(() => {
-    const unsub = onSnapshot(
-      query(collection(db, 'fazaa_requests'), where('status', '==', 'active')),
-      snap => {
-        const docs: FazaaDoc[] = [];
-        snap.forEach(d => docs.push({ id: d.id, ...(d.data() as any) }));
-        setActiveFazaas(docs);
-      },
-      err => console.warn('[Fazaa] onSnapshot error:', err),
-    );
-    listenerUnsub.current = unsub;
-    return () => unsub();
-  }, []);
-
-  // ── Draw / remove markers when activeFazaas changes ───────────────────────
-  useEffect(() => {
-    const map = mapRef.current;
-    if (!map) return;
-    const user = getUser();
-    const myId = user?.uid ?? user?.phone ?? '';
-
-    // Build set of current IDs
-    const currentIds = new Set(activeFazaas.map(f => f.id));
-
-    // Remove stale markers
-    fazaaMarkersRef.current.forEach((marker, id) => {
-      if (!currentIds.has(id)) { marker.remove(); fazaaMarkersRef.current.delete(id); }
-    });
-
-    // Add new markers (not my own request)
-    activeFazaas.forEach(f => {
-      if (f.userId === myId) return; // skip own request
-      if (fazaaMarkersRef.current.has(f.id)) return; // already drawn
-
-      const marker = L.marker([f.latitude, f.longitude], {
-        icon:          makeFazaaMarkerIcon(),
-        zIndexOffset:  2000,
-        interactive:   true,
-      }).addTo(map);
-
-      marker.on('click', () => {
-        setSelected(f);
-        setRouteInfo(null);
-        setCalcRoute(true);
-        setPhase('detail');
-      });
-
-      fazaaMarkersRef.current.set(f.id, marker);
-    });
-  }, [activeFazaas, mapRef]);
-
-  // ── Calc route when detail sheet opens ────────────────────────────────────
-  useEffect(() => {
-    if (!calcRoute || !selected || !userLocation) { setCalcRoute(false); return; }
-    setCalcRoute(false);
-    fetchRoute(userLocation.lat, userLocation.lng, selected.latitude, selected.longitude)
-      .then(info => setRouteInfo(info));
-  }, [calcRoute, selected, userLocation]);
-
-  // ── Cleanup map layers on unmount ─────────────────────────────────────────
+  // ── Cleanup on unmount ────────────────────────────────────────────────────
   useEffect(() => {
     return () => {
       fazaaMarkersRef.current.forEach(m => m.remove());
@@ -276,7 +298,7 @@ export function FazaaSystem({ mapRef, userLocation, clearMapForRescue }: FazaaSy
     };
   }, []);
 
-  // ── Submit a fazaa request ─────────────────────────────────────────────────
+  // ── Submit fazaa request ──────────────────────────────────────────────────
   const handleSubmit = useCallback(async () => {
     if (!selectedIssue || !userLocation) return;
     const user = getUser();
@@ -284,23 +306,25 @@ export function FazaaSystem({ mapRef, userLocation, clearMapForRescue }: FazaaSy
     setSubmitting(true);
     try {
       const ref = await addDoc(collection(db, 'fazaa_requests'), {
-        userId:    user.uid ?? user.phone,
+        userId:    user.uid ?? user.phone ?? 'anon',
         userName:  user.name ?? 'مستخدم',
         userPhone: user.phone ?? '',
         issueType: selectedIssue,
-        latitude:  userLocation.lat,
+        latitude:  userLocation.lat,   // stored as number
         longitude: userLocation.lng,
         status:    'active',
         timestamp: serverTimestamp(),
       });
+      console.log('[Fazaa] created request:', ref.id);
       setMyRequestId(ref.id);
       setPhase('waiting');
 
-      // Watch own doc for status change
+      // Watch own doc for acceptance
       myDocUnsub.current?.();
       myDocUnsub.current = onSnapshot(doc(db, 'fazaa_requests', ref.id), snap => {
         const d = snap.data();
         if (d?.status === 'accepted') {
+          console.log('[Fazaa] request accepted by:', d.helperName);
           setHelperInfo({ name: d.helperName ?? 'نشمي' });
           setPhase('requester_helped');
           myDocUnsub.current?.();
@@ -313,27 +337,31 @@ export function FazaaSystem({ mapRef, userLocation, clearMapForRescue }: FazaaSy
     }
   }, [selectedIssue, userLocation]);
 
-  // ── Accept a fazaa (helper) ────────────────────────────────────────────────
+  // ── Accept fazaa (helper side) ────────────────────────────────────────────
   const handleAccept = useCallback(async () => {
     if (!selected || !userLocation) return;
     const user = getUser();
     if (!user) return;
 
-    // 1) Update Firestore
-    await updateDoc(doc(db, 'fazaa_requests', selected.id), {
-      status:     'accepted',
-      helperId:   user.uid ?? user.phone,
-      helperName: user.name ?? 'نشمي',
-    });
+    try {
+      await updateDoc(doc(db, 'fazaa_requests', selected.id), {
+        status:     'accepted',
+        helperId:   user.uid ?? user.phone ?? 'anon',
+        helperName: user.name ?? 'نشمي',
+      });
+      console.log('[Fazaa] accepted request:', selected.id);
+    } catch (e) {
+      console.error('[Fazaa] accept error:', e);
+    }
 
-    // 2) Remove this marker from map
+    // Remove marker
     fazaaMarkersRef.current.get(selected.id)?.remove();
     fazaaMarkersRef.current.delete(selected.id);
 
-    // 3) Clear existing taxi/route on map
+    // Clear existing map layers
     clearMapForRescue();
 
-    // 4) Draw rescue route
+    // Draw rescue route
     const map = mapRef.current;
     if (map) {
       const info = routeInfo ?? await fetchRoute(
@@ -357,41 +385,34 @@ export function FazaaSystem({ mapRef, userLocation, clearMapForRescue }: FazaaSy
     setPhase('helping');
   }, [selected, userLocation, routeInfo, mapRef, clearMapForRescue]);
 
-  // ── Cancel / finish rescue ─────────────────────────────────────────────────
-  const handleFinish = useCallback(() => {
-    rescueGlowRef.current?.remove(); rescueGlowRef.current = null;
-    rescueLineRef.current?.remove(); rescueLineRef.current = null;
-    rescueTargetRef.current = null;
-    setPhase('idle');
-    setSelected(null);
-    setLiveInfo(null);
-  }, []);
-
-  // ── Cancel own waiting request ─────────────────────────────────────────────
+  // ── Cancel waiting ────────────────────────────────────────────────────────
   const handleCancelWaiting = useCallback(async () => {
-    if (!myRequestId) { setPhase('idle'); return; }
-    try {
-      await updateDoc(doc(db, 'fazaa_requests', myRequestId), { status: 'accepted' }); // deactivate
-    } catch { /* */ }
-    myDocUnsub.current?.();
+    if (myRequestId) {
+      try { await updateDoc(doc(db, 'fazaa_requests', myRequestId), { status: 'cancelled' }); } catch { /* */ }
+      myDocUnsub.current?.();
+    }
     setMyRequestId(null);
     setPhase('idle');
   }, [myRequestId]);
 
-  const user = getUser();
-  const canRequest = Boolean(user && userLocation);
+  // ── Finish rescue ─────────────────────────────────────────────────────────
+  const handleFinish = useCallback(() => {
+    rescueGlowRef.current?.remove(); rescueGlowRef.current = null;
+    rescueLineRef.current?.remove(); rescueLineRef.current = null;
+    rescueTargetRef.current = null;
+    setPhase('idle'); setSelected(null); setLiveInfo(null);
+  }, []);
 
-  // ── Render ────────────────────────────────────────────────────────────────
+  const canRequest = Boolean(getUser() && userLocation);
+
+  // ── JSX ───────────────────────────────────────────────────────────────────
   return (
     <>
-      {/* ── Floating "طلب فزعة" button ── */}
-      {(phase === 'idle') && (
+      {/* ── Floating button (idle only) ── */}
+      {phase === 'idle' && (
         <button
-          onClick={() => {
-            if (!canRequest) return;
-            setSelectedIssue('');
-            setPhase('sheet');
-          }}
+          onClick={() => { if (canRequest) { setSelectedIssue(''); setPhase('sheet'); } }}
+          title={canRequest ? 'اطلب مساعدة' : 'فعّل الموقع وسجّل دخولك أولاً'}
           style={{
             position:     'fixed',
             bottom:       '90px',
@@ -401,82 +422,65 @@ export function FazaaSystem({ mapRef, userLocation, clearMapForRescue }: FazaaSy
             alignItems:   'center',
             gap:          '7px',
             padding:      '10px 16px',
-            background:   'rgba(200, 20, 60, 0.92)',
+            background:   'rgba(190,15,50,0.93)',
             border:       '1.5px solid rgba(255,80,110,0.7)',
             borderRadius: '28px',
             color:        '#fff',
-            fontFamily:   "'Tajawal', 'Orbitron', sans-serif",
+            fontFamily:   "'Tajawal','Arial',sans-serif",
             fontSize:     '13px',
             fontWeight:   700,
             cursor:       canRequest ? 'pointer' : 'not-allowed',
             opacity:      canRequest ? 1 : 0.6,
-            boxShadow:    '0 0 18px rgba(255,45,80,0.55), 0 2px 8px rgba(0,0,0,0.4)',
+            boxShadow:    '0 0 20px rgba(255,45,80,0.55),0 2px 8px rgba(0,0,0,0.45)',
             direction:    'rtl',
-            transition:   'all 0.2s',
             backdropFilter: 'blur(4px)',
+            transition:   'transform 0.15s',
           }}
-          title={canRequest ? 'اطلب مساعدة' : 'فعّل الموقع أولاً'}
         >
           🤝 طلب فزعة
         </button>
       )}
 
-      {/* ═══════════════════════════════════════════════════════════════════
-          REQUESTER — Issue selection sheet
-      ═══════════════════════════════════════════════════════════════════ */}
+      {/* ── Issue selection sheet ── */}
       {phase === 'sheet' && (
-        <div style={overlayBg} onClick={() => setPhase('idle')}>
-          <div style={sheet} onClick={e => e.stopPropagation()}>
-            <div style={sheetHandle} />
-            <div style={sheetTitle}>اختر نوع المشكلة</div>
-            <div style={sheetSub}>سيصلك المساعدة من أقرب نشمي قريب 🤝</div>
-
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px', justifyContent: 'center', marginBottom: '20px' }}>
+        <div style={S.overlay} onClick={() => setPhase('idle')}>
+          <div style={S.sheet} onClick={e => e.stopPropagation()}>
+            <div style={S.handle} />
+            <div style={S.title}>اختر نوع المشكلة</div>
+            <div style={S.sub}>سيصلك المساعدة من أقرب نشمي قريب 🤝</div>
+            <div style={{ display:'flex', flexWrap:'wrap', gap:'10px', justifyContent:'center', marginBottom:'20px' }}>
               {ISSUES.map(issue => (
                 <button
                   key={issue.key}
                   onClick={() => setSelectedIssue(issue.key)}
                   style={{
-                    padding:      '12px 18px',
-                    background:   selectedIssue === issue.key
-                      ? 'rgba(255,45,80,0.25)'
-                      : 'rgba(255,255,255,0.05)',
+                    padding:'12px 16px', minWidth:'130px', textAlign:'center',
+                    background:   selectedIssue === issue.key ? 'rgba(255,45,80,0.28)' : 'rgba(255,255,255,0.05)',
                     border:       `2px solid ${selectedIssue === issue.key ? '#ff2d50' : 'rgba(255,255,255,0.12)'}`,
                     borderRadius: '12px',
                     color:        selectedIssue === issue.key ? '#ff8fa0' : '#ccc',
-                    fontSize:     '14px',
-                    fontFamily:   "'Tajawal', sans-serif",
-                    fontWeight:   600,
-                    cursor:       'pointer',
-                    direction:    'rtl',
-                    minWidth:     '130px',
-                    textAlign:    'center',
-                    transition:   'all 0.18s',
-                    boxShadow:    selectedIssue === issue.key ? '0 0 12px rgba(255,45,80,0.4)' : 'none',
+                    fontSize:'14px', fontFamily:"'Tajawal',sans-serif", fontWeight:600,
+                    cursor:'pointer', direction:'rtl',
+                    boxShadow: selectedIssue === issue.key ? '0 0 12px rgba(255,45,80,0.4)' : 'none',
+                    transition:'all 0.18s',
                   }}
                 >
-                  <div style={{ fontSize: '24px', marginBottom: '4px' }}>{issue.icon}</div>
+                  <div style={{ fontSize:'26px', marginBottom:'4px' }}>{issue.icon}</div>
                   {issue.label}
                 </button>
               ))}
             </div>
-
             <button
               onClick={handleSubmit}
               disabled={!selectedIssue || submitting}
               style={{
-                width:        '100%',
-                padding:      '14px',
-                background:   (!selectedIssue || submitting) ? 'rgba(255,45,80,0.25)' : 'rgba(255,45,80,0.88)',
-                border:       '1.5px solid rgba(255,80,100,0.6)',
-                borderRadius: '10px',
-                color:        '#fff',
-                fontSize:     '15px',
-                fontFamily:   "'Tajawal', sans-serif",
-                fontWeight:   700,
-                cursor:       (!selectedIssue || submitting) ? 'not-allowed' : 'pointer',
-                boxShadow:    '0 0 16px rgba(255,45,80,0.4)',
-                direction:    'rtl',
+                width:'100%', padding:'14px',
+                background: (!selectedIssue || submitting) ? 'rgba(255,45,80,0.22)' : 'rgba(255,45,80,0.9)',
+                border:'1.5px solid rgba(255,80,100,0.6)', borderRadius:'10px',
+                color:'#fff', fontSize:'15px',
+                fontFamily:"'Tajawal',sans-serif", fontWeight:700,
+                cursor: (!selectedIssue || submitting) ? 'not-allowed' : 'pointer',
+                boxShadow:'0 0 16px rgba(255,45,80,0.4)', direction:'rtl',
               }}
             >
               {submitting ? '⟳ جاري الإرسال...' : '📡 إرسال الاستغاثة'}
@@ -485,114 +489,75 @@ export function FazaaSystem({ mapRef, userLocation, clearMapForRescue }: FazaaSy
         </div>
       )}
 
-      {/* ═══════════════════════════════════════════════════════════════════
-          REQUESTER — Waiting screen
-      ═══════════════════════════════════════════════════════════════════ */}
+      {/* ── Waiting screen (requester) ── */}
       {phase === 'waiting' && (
-        <div style={{ ...overlayBg, alignItems: 'center', justifyContent: 'center' }}>
-          <div style={{
-            background:   'rgba(10,12,22,0.97)',
-            border:       '1px solid rgba(255,45,80,0.4)',
-            borderRadius: '20px',
-            padding:      '36px 32px',
-            textAlign:    'center',
-            maxWidth:     '320px',
-            width:        '90%',
-            direction:    'rtl',
-          }}>
-            <div style={{ fontSize: '48px', marginBottom: '16px', animation: 'fazaa-bob 2s ease-in-out infinite' }}>🤝</div>
-            <div style={waitingTitle}>جاري نداء النشامى القريبين...</div>
-            <div style={waitingSub}>
-              {selectedIssue && ISSUE_MAP[selectedIssue]}<br />
-              انتظر — سيصلك نشمي بسرعة إن شاء الله
+        <div style={{ ...S.overlay, alignItems:'center', justifyContent:'center' }}>
+          <div style={S.centerCard}>
+            <div style={{ fontSize:'52px', marginBottom:'14px', animation:'fz-bob 2s ease-in-out infinite' }}>🤝</div>
+            <div style={{ ...S.title, color:'#ff8fa0' }}>جاري نداء النشامى القريبين...</div>
+            <div style={S.sub}>{ISSUE_MAP[selectedIssue] ?? selectedIssue}</div>
+            <div style={{ display:'flex', justifyContent:'center', margin:'18px 0' }}>
+              <div style={{
+                width:'38px', height:'38px',
+                border:'3px solid rgba(255,45,80,0.2)',
+                borderTop:'3px solid #ff2d50',
+                borderRadius:'50%',
+                animation:'fz-spin 0.9s linear infinite',
+              }} />
             </div>
-            <Spinner />
-            <button onClick={handleCancelWaiting} style={cancelBtn}>إلغاء الطلب</button>
+            <button onClick={handleCancelWaiting} style={S.cancelBtn}>إلغاء الطلب</button>
           </div>
         </div>
       )}
 
-      {/* ═══════════════════════════════════════════════════════════════════
-          REQUESTER — Helper accepted! notification
-      ═══════════════════════════════════════════════════════════════════ */}
+      {/* ── Helper accepted notification (requester) ── */}
       {phase === 'requester_helped' && (
-        <div style={{ ...overlayBg, alignItems: 'center', justifyContent: 'center' }} onClick={() => setPhase('idle')}>
-          <div style={{
-            background:   'rgba(10,12,22,0.97)',
-            border:       '1px solid rgba(0,220,100,0.5)',
-            borderRadius: '20px',
-            padding:      '36px 32px',
-            textAlign:    'center',
-            maxWidth:     '320px',
-            width:        '90%',
-            direction:    'rtl',
-            boxShadow:    '0 0 32px rgba(0,220,100,0.25)',
-          }}>
-            <div style={{ fontSize: '52px', marginBottom: '12px' }}>🚀</div>
-            <div style={{ ...waitingTitle, color: '#00dc64' }}>تم قبول فزعتك!</div>
-            <div style={waitingSub}>
-              <strong style={{ color: '#7fffb0' }}>{helperInfo?.name ?? 'نشمي'}</strong>
-              <br />يتجه نحوك الآن — ابقَ في مكانك
+        <div style={{ ...S.overlay, alignItems:'center', justifyContent:'center' }} onClick={() => setPhase('idle')}>
+          <div style={{ ...S.centerCard, border:'1px solid rgba(0,220,100,0.45)', boxShadow:'0 0 32px rgba(0,220,100,0.2)' }}>
+            <div style={{ fontSize:'52px', marginBottom:'12px' }}>🚀</div>
+            <div style={{ ...S.title, color:'#00dc64' }}>تم قبول فزعتك!</div>
+            <div style={S.sub}>
+              <strong style={{ color:'#7fffb0' }}>{helperInfo?.name ?? 'نشمي'}</strong>
+              <br/>يتجه نحوك الآن — ابقَ في مكانك
             </div>
-            <button style={{ ...cancelBtn, borderColor: 'rgba(0,220,100,0.4)', color: '#00dc64' }}>
-              حسناً ✓
-            </button>
+            <button style={{ ...S.cancelBtn, borderColor:'rgba(0,220,100,0.4)', color:'#00dc64' }}>حسناً ✓</button>
           </div>
         </div>
       )}
 
-      {/* ═══════════════════════════════════════════════════════════════════
-          HELPER — Detail sheet (tapped a marker)
-      ═══════════════════════════════════════════════════════════════════ */}
+      {/* ── Detail sheet (helper tapped marker) ── */}
       {phase === 'detail' && selected && (
-        <div style={overlayBg} onClick={() => { setPhase('idle'); setSelected(null); }}>
-          <div style={sheet} onClick={e => e.stopPropagation()}>
-            <div style={sheetHandle} />
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '14px', direction: 'rtl' }}>
-              <span style={{ fontSize: '32px' }}>🤝</span>
+        <div style={S.overlay} onClick={() => { setPhase('idle'); setSelected(null); }}>
+          <div style={S.sheet} onClick={e => e.stopPropagation()}>
+            <div style={S.handle} />
+            <div style={{ display:'flex', alignItems:'center', gap:'10px', marginBottom:'14px', direction:'rtl' }}>
+              <span style={{ fontSize:'32px' }}>🤝</span>
               <div>
-                <div style={sheetTitle}>طلب فزعة</div>
-                <div style={{ ...sheetSub, marginBottom: 0 }}>{selected.userName}</div>
+                <div style={S.title}>{selected.userName}</div>
+                <div style={{ ...S.sub, marginBottom:0 }}>طلب مساعدة عاجل</div>
               </div>
             </div>
-
-            {/* Issue type */}
-            <div style={detailRow}>
-              <span style={detailLabel}>المشكلة</span>
-              <span style={detailVal}>{ISSUE_MAP[selected.issueType] ?? selected.issueType}</span>
-            </div>
-
-            {/* Distance + duration */}
-            <div style={detailRow}>
-              <span style={detailLabel}>المسافة</span>
+            <div style={S.row}><span style={S.rowLabel}>المشكلة</span><span style={S.rowVal}>{ISSUE_MAP[selected.issueType] ?? selected.issueType}</span></div>
+            <div style={S.row}>
+              <span style={S.rowLabel}>المسافة</span>
               {calcRoute
-                ? <span style={{ color: '#888', fontSize: '13px' }}>جاري الحساب...</span>
+                ? <span style={{ color:'#888', fontSize:'13px' }}>جاري الحساب...</span>
                 : routeInfo
-                  ? <span style={detailVal}>{routeInfo.distKm} كم — {routeInfo.durationMin} دقيقة</span>
+                  ? <span style={S.rowVal}>{routeInfo.distKm} كم — {routeInfo.durationMin} دقيقة</span>
                   : userLocation
-                    ? <span style={detailVal}>
-                        {haversine(userLocation.lat, userLocation.lng, selected.latitude, selected.longitude).toFixed(1)} كم (تقريبي)
-                      </span>
-                    : <span style={{ color: '#888' }}>—</span>
+                    ? <span style={S.rowVal}>{haversine(userLocation.lat, userLocation.lng, selected.latitude, selected.longitude).toFixed(1)} كم (تقريبي)</span>
+                    : <span style={{ color:'#888' }}>—</span>
               }
             </div>
-
             <button
               onClick={handleAccept}
               style={{
-                width:        '100%',
-                padding:      '15px',
-                marginTop:    '8px',
-                background:   'rgba(255,45,80,0.9)',
-                border:       '1.5px solid rgba(255,80,100,0.7)',
-                borderRadius: '10px',
-                color:        '#fff',
-                fontSize:     '16px',
-                fontFamily:   "'Tajawal', sans-serif",
-                fontWeight:   700,
-                cursor:       'pointer',
-                boxShadow:    '0 0 20px rgba(255,45,80,0.5)',
-                direction:    'rtl',
+                width:'100%', padding:'15px', marginTop:'8px',
+                background:'rgba(255,45,80,0.9)',
+                border:'1.5px solid rgba(255,80,100,0.7)', borderRadius:'10px',
+                color:'#fff', fontSize:'16px',
+                fontFamily:"'Tajawal',sans-serif", fontWeight:700,
+                cursor:'pointer', boxShadow:'0 0 20px rgba(255,45,80,0.5)', direction:'rtl',
               }}
             >
               🚀 قبول الفزعة — إفزع له!
@@ -601,76 +566,53 @@ export function FazaaSystem({ mapRef, userLocation, clearMapForRescue }: FazaaSy
         </div>
       )}
 
-      {/* ═══════════════════════════════════════════════════════════════════
-          HELPER — Active rescue info panel
-      ═══════════════════════════════════════════════════════════════════ */}
+      {/* ── Active rescue info panel (helper) ── */}
       {phase === 'helping' && selected && (
         <div style={{
-          position:  'fixed',
-          bottom:    '80px',
-          left:      '50%',
-          transform: 'translateX(-50%)',
-          zIndex:    1300,
-          background: 'rgba(10,12,22,0.95)',
-          border:    '1.5px solid rgba(255,68,68,0.6)',
-          borderRadius: '16px',
-          padding:   '14px 20px',
-          minWidth:  '280px',
-          maxWidth:  '360px',
-          direction: 'rtl',
-          boxShadow: '0 0 24px rgba(255,68,68,0.35), 0 4px 16px rgba(0,0,0,0.5)',
-          backdropFilter: 'blur(8px)',
+          position:'fixed', bottom:'84px', left:'50%', transform:'translateX(-50%)',
+          zIndex:1300,
+          background:'rgba(10,12,22,0.95)',
+          border:'1.5px solid rgba(255,68,68,0.55)',
+          borderRadius:'16px', padding:'14px 20px',
+          minWidth:'280px', maxWidth:'360px',
+          direction:'rtl',
+          boxShadow:'0 0 24px rgba(255,68,68,0.3),0 4px 16px rgba(0,0,0,0.5)',
+          backdropFilter:'blur(8px)',
         }}>
-          {/* Header */}
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <span style={{ fontSize: '20px' }}>🚨</span>
-              <span style={{ color: '#ff4444', fontFamily: 'Orbitron, sans-serif', fontSize: '11px', letterSpacing: '0.1em' }}>
-                RESCUE ACTIVE
-              </span>
+          <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:'10px' }}>
+            <div style={{ display:'flex', alignItems:'center', gap:'8px' }}>
+              <span style={{ fontSize:'18px' }}>🚨</span>
+              <span style={{ color:'#ff4444', fontFamily:'Orbitron,sans-serif', fontSize:'10px', letterSpacing:'0.1em' }}>RESCUE ACTIVE</span>
             </div>
-            <button onClick={handleFinish} style={{ background: 'none', border: 'none', color: '#666', cursor: 'pointer', fontSize: '16px', padding: '2px 6px' }}>✕</button>
+            <button onClick={handleFinish} style={{ background:'none', border:'none', color:'#555', cursor:'pointer', fontSize:'16px', padding:'0 4px' }}>✕</button>
           </div>
-
-          {/* Issue */}
-          <div style={{ color: '#ddd', fontSize: '13px', fontFamily: "'Tajawal', sans-serif", marginBottom: '8px' }}>
+          <div style={{ color:'#ddd', fontSize:'13px', fontFamily:"'Tajawal',sans-serif", marginBottom:'10px' }}>
             {ISSUE_MAP[selected.issueType] ?? selected.issueType}
           </div>
-
-          {/* Live distance */}
           {liveInfo && (
-            <div style={{ display: 'flex', gap: '20px', marginBottom: '12px' }}>
-              <div style={statBox}>
-                <div style={statVal}>{liveInfo.distKm} <span style={statUnit}>كم</span></div>
-                <div style={statLabel}>المسافة المتبقية</div>
+            <div style={{ display:'flex', gap:'16px', marginBottom:'12px' }}>
+              <div style={{ flex:1, textAlign:'center' }}>
+                <div style={{ fontFamily:'Orbitron,sans-serif', fontSize:'20px', fontWeight:700, color:'#ff4444', lineHeight:1 }}>
+                  {liveInfo.distKm} <span style={{ fontSize:'11px', color:'#ff8888' }}>كم</span>
+                </div>
+                <div style={{ fontFamily:"'Tajawal',sans-serif", fontSize:'11px', color:'rgba(255,255,255,0.4)', marginTop:'3px' }}>المسافة المتبقية</div>
               </div>
-              <div style={statBox}>
-                <div style={statVal}>{liveInfo.durationMin} <span style={statUnit}>دقيقة</span></div>
-                <div style={statLabel}>الوقت المتوقع</div>
+              <div style={{ flex:1, textAlign:'center' }}>
+                <div style={{ fontFamily:'Orbitron,sans-serif', fontSize:'20px', fontWeight:700, color:'#ff4444', lineHeight:1 }}>
+                  {liveInfo.durationMin} <span style={{ fontSize:'11px', color:'#ff8888' }}>دقيقة</span>
+                </div>
+                <div style={{ fontFamily:"'Tajawal',sans-serif", fontSize:'11px', color:'rgba(255,255,255,0.4)', marginTop:'3px' }}>الوقت المتوقع</div>
               </div>
             </div>
           )}
-
-          {/* Call button */}
           {selected.userPhone && (
-            <a
-              href={`tel:${selected.userPhone}`}
-              style={{
-                display:      'block',
-                width:        '100%',
-                padding:      '10px',
-                background:   'rgba(0,180,80,0.18)',
-                border:       '1px solid rgba(0,200,80,0.45)',
-                borderRadius: '8px',
-                color:        '#00dc64',
-                textAlign:    'center',
-                textDecoration: 'none',
-                fontSize:     '13px',
-                fontFamily:   "'Tajawal', sans-serif",
-                fontWeight:   600,
-                direction:    'rtl',
-              }}
-            >
+            <a href={`tel:${selected.userPhone}`} style={{
+              display:'block', width:'100%', padding:'10px',
+              background:'rgba(0,180,80,0.18)', border:'1px solid rgba(0,200,80,0.4)',
+              borderRadius:'8px', color:'#00dc64', textAlign:'center',
+              textDecoration:'none', fontSize:'13px',
+              fontFamily:"'Tajawal',sans-serif", fontWeight:600, direction:'rtl',
+            }}>
               📞 اتصال بطالب الفزعة ({selected.userName})
             </a>
           )}
@@ -680,137 +622,79 @@ export function FazaaSystem({ mapRef, userLocation, clearMapForRescue }: FazaaSy
   );
 }
 
-// ── Spinner ────────────────────────────────────────────────────────────────────
-function Spinner() {
-  return (
-    <div style={{ display: 'flex', justifyContent: 'center', margin: '20px 0' }}>
-      <div style={{
-        width:  '40px', height: '40px',
-        border: '3px solid rgba(255,45,80,0.2)',
-        borderTop: '3px solid #ff2d50',
-        borderRadius: '50%',
-        animation: 'fazaa-bob 0.8s linear infinite',
-      }} />
-    </div>
-  );
-}
+// ── Shared style tokens ────────────────────────────────────────────────────────
+const S = {
+  overlay: {
+    position:  'fixed', inset: 0,
+    zIndex:    1250,
+    background:'rgba(0,0,0,0.58)',
+    display:   'flex', flexDirection:'column',
+    alignItems:'flex-end', justifyContent:'flex-end',
+    backdropFilter:'blur(2px)',
+  } as React.CSSProperties,
 
-// ── Shared styles ─────────────────────────────────────────────────────────────
-const overlayBg: React.CSSProperties = {
-  position:  'fixed', inset: 0,
-  zIndex:    1250,
-  background: 'rgba(0,0,0,0.55)',
-  display:   'flex',
-  flexDirection: 'column',
-  alignItems: 'flex-end',
-  justifyContent: 'flex-end',
-  backdropFilter: 'blur(2px)',
-};
+  sheet: {
+    background:   'rgba(8,10,20,0.98)',
+    border:       '1px solid rgba(255,45,80,0.22)',
+    borderRadius: '20px 20px 0 0',
+    padding:      '20px 20px 36px',
+    width:        '100%',
+    maxHeight:    '85vh',
+    overflowY:    'auto',
+    direction:    'rtl',
+    boxShadow:    '0 -8px 32px rgba(255,45,80,0.12)',
+  } as React.CSSProperties,
 
-const sheet: React.CSSProperties = {
-  background:   'rgba(8,10,20,0.98)',
-  border:       '1px solid rgba(255,45,80,0.25)',
-  borderRadius: '20px 20px 0 0',
-  padding:      '20px 20px 36px',
-  width:        '100%',
-  maxHeight:    '85vh',
-  overflowY:    'auto',
-  direction:    'rtl',
-  boxShadow:    '0 -8px 32px rgba(255,45,80,0.15)',
-};
+  centerCard: {
+    background:   'rgba(10,12,22,0.97)',
+    border:       '1px solid rgba(255,45,80,0.38)',
+    borderRadius: '20px',
+    padding:      '36px 28px',
+    textAlign:    'center',
+    maxWidth:     '320px',
+    width:        '90%',
+    direction:    'rtl',
+  } as React.CSSProperties,
 
-const sheetHandle: React.CSSProperties = {
-  width:        '40px', height: '4px',
-  background:   'rgba(255,255,255,0.15)',
-  borderRadius: '2px',
-  margin:       '0 auto 18px',
-};
+  handle: {
+    width:'40px', height:'4px',
+    background:'rgba(255,255,255,0.14)',
+    borderRadius:'2px', margin:'0 auto 18px',
+  } as React.CSSProperties,
 
-const sheetTitle: React.CSSProperties = {
-  fontFamily:   "'Tajawal', 'Orbitron', sans-serif",
-  fontSize:     '18px', fontWeight: 700,
-  color:        '#fff',
-  marginBottom: '6px',
-};
+  title: {
+    fontFamily:"'Tajawal','Orbitron',sans-serif",
+    fontSize:'18px', fontWeight:700,
+    color:'#fff', marginBottom:'6px',
+  } as React.CSSProperties,
 
-const sheetSub: React.CSSProperties = {
-  fontFamily:   "'Tajawal', sans-serif",
-  fontSize:     '13px',
-  color:        'rgba(255,255,255,0.5)',
-  marginBottom: '18px',
-};
+  sub: {
+    fontFamily:"'Tajawal',sans-serif",
+    fontSize:'13px', color:'rgba(255,255,255,0.5)',
+    marginBottom:'18px', lineHeight:1.7,
+  } as React.CSSProperties,
 
-const waitingTitle: React.CSSProperties = {
-  fontFamily: "'Tajawal', 'Orbitron', sans-serif",
-  fontSize:   '17px', fontWeight: 700,
-  color:      '#ff8fa0',
-  marginBottom: '10px',
-};
+  cancelBtn: {
+    marginTop:'12px', width:'100%', padding:'10px',
+    background:'transparent',
+    border:'1px solid rgba(255,45,80,0.32)',
+    borderRadius:'8px', color:'#ff8fa0',
+    fontSize:'13px', fontFamily:"'Tajawal',sans-serif",
+    cursor:'pointer', direction:'rtl',
+  } as React.CSSProperties,
 
-const waitingSub: React.CSSProperties = {
-  fontFamily: "'Tajawal', sans-serif",
-  fontSize:   '14px',
-  color:      'rgba(255,255,255,0.55)',
-  lineHeight: 1.8,
-  marginBottom: '8px',
-};
+  row: {
+    display:'flex', justifyContent:'space-between', alignItems:'center',
+    padding:'10px 0', borderBottom:'1px solid rgba(255,255,255,0.07)',
+  } as React.CSSProperties,
 
-const cancelBtn: React.CSSProperties = {
-  marginTop:    '14px',
-  width:        '100%',
-  padding:      '10px',
-  background:   'transparent',
-  border:       '1px solid rgba(255,45,80,0.35)',
-  borderRadius: '8px',
-  color:        '#ff8fa0',
-  fontSize:     '13px',
-  fontFamily:   "'Tajawal', sans-serif",
-  cursor:       'pointer',
-  direction:    'rtl',
-};
+  rowLabel: {
+    fontFamily:"'Tajawal',sans-serif",
+    fontSize:'13px', color:'rgba(255,255,255,0.42)',
+  } as React.CSSProperties,
 
-const detailRow: React.CSSProperties = {
-  display:       'flex',
-  justifyContent: 'space-between',
-  alignItems:    'center',
-  padding:       '10px 0',
-  borderBottom:  '1px solid rgba(255,255,255,0.07)',
-};
-
-const detailLabel: React.CSSProperties = {
-  fontFamily: "'Tajawal', sans-serif",
-  fontSize:   '13px',
-  color:      'rgba(255,255,255,0.45)',
-};
-
-const detailVal: React.CSSProperties = {
-  fontFamily: "'Tajawal', sans-serif",
-  fontSize:   '14px',
-  fontWeight: 600,
-  color:      '#fff',
-};
-
-const statBox: React.CSSProperties = {
-  flex:      1,
-  textAlign: 'center',
-};
-
-const statVal: React.CSSProperties = {
-  fontFamily: 'Orbitron, sans-serif',
-  fontSize:   '20px', fontWeight: 700,
-  color:      '#ff4444',
-  lineHeight: 1,
-};
-
-const statUnit: React.CSSProperties = {
-  fontSize:   '11px',
-  fontFamily: "'Tajawal', sans-serif",
-  color:      '#ff8888',
-};
-
-const statLabel: React.CSSProperties = {
-  fontFamily: "'Tajawal', sans-serif",
-  fontSize:   '11px',
-  color:      'rgba(255,255,255,0.4)',
-  marginTop:  '4px',
+  rowVal: {
+    fontFamily:"'Tajawal',sans-serif",
+    fontSize:'14px', fontWeight:600, color:'#fff',
+  } as React.CSSProperties,
 };
