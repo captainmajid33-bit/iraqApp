@@ -1474,6 +1474,97 @@ function FuelStationsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
   const [saving,       setSaving]       = useState(false);
   const [confirmDel,   setConfirmDel]   = useState<string | null>(null);
 
+  // ── Map picker refs ──────────────────────────────────────────────────────
+  const mapPickerContainerRef = useRef<HTMLDivElement | null>(null);
+  const mapPickerRef          = useRef<L.Map | null>(null);
+  const mapPickerMarkerRef    = useRef<L.Marker | null>(null);
+
+  // ── Map picker: init / destroy with modal ───────────────────────────────
+  useEffect(() => {
+    if (!showForm) {
+      // Clean up map when modal closes
+      mapPickerRef.current?.remove();
+      mapPickerRef.current    = null;
+      mapPickerMarkerRef.current = null;
+      return;
+    }
+
+    // Wait one tick for the DOM to mount the container
+    const tid = setTimeout(() => {
+      const container = mapPickerContainerRef.current;
+      if (!container || mapPickerRef.current) return;
+
+      // Determine initial position
+      const initLat = parseFloat(form.latitude) || 33.7440;
+      const initLng = parseFloat(form.longitude) || 44.6530;
+
+      // Create map
+      const map = L.map(container, {
+        center: [initLat, initLng],
+        zoom: 13,
+        zoomControl: true,
+        attributionControl: false,
+      });
+      mapPickerRef.current = map;
+
+      L.tileLayer(
+        'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+        { subdomains: 'abcd', maxZoom: 20 }
+      ).addTo(map);
+
+      // Custom yellow fuel-pin icon
+      const pinIcon = L.divIcon({
+        className: '',
+        iconSize:  [34, 34],
+        iconAnchor:[17, 34],
+        html: `<div style="width:34px;height:34px;display:flex;align-items:center;justify-content:center;
+                      background:#f5c51822;border:2px solid #f5c518;border-radius:50% 50% 50% 0;
+                      transform:rotate(-45deg);box-shadow:0 0 14px #f5c51888;cursor:grab">
+                 <span style="transform:rotate(45deg);font-size:16px">⛽</span>
+               </div>`,
+      });
+
+      // Draggable marker
+      const marker = L.marker([initLat, initLng], { draggable: true, icon: pinIcon }).addTo(map);
+      mapPickerMarkerRef.current = marker;
+
+      const applyLatLng = (lat: number, lng: number) => {
+        setForm(p => ({ ...p, latitude: lat.toFixed(6), longitude: lng.toFixed(6) }));
+      };
+
+      // Update on drag end
+      marker.on('dragend', () => {
+        const { lat, lng } = marker.getLatLng();
+        applyLatLng(lat, lng);
+      });
+
+      // Click on map → move marker
+      map.on('click', (e: L.LeafletMouseEvent) => {
+        marker.setLatLng(e.latlng);
+        applyLatLng(e.latlng.lat, e.latlng.lng);
+      });
+
+      // Invalidate size after mount to fix tile rendering
+      setTimeout(() => map.invalidateSize(), 80);
+    }, 60);
+
+    return () => clearTimeout(tid);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showForm]);
+
+  // ── Sync marker position when lat/lng manually changed ──────────────────
+  useEffect(() => {
+    const map    = mapPickerRef.current;
+    const marker = mapPickerMarkerRef.current;
+    if (!map || !marker) return;
+    const lat = parseFloat(form.latitude);
+    const lng = parseFloat(form.longitude);
+    if (!isNaN(lat) && !isNaN(lng)) {
+      marker.setLatLng([lat, lng]);
+      map.panTo([lat, lng], { animate: true, duration: 0.4 });
+    }
+  }, [form.latitude, form.longitude]);
+
   // ── Live Firestore listener ──────────────────────────────────────────────
   useEffect(() => {
     const unsub = onSnapshot(
@@ -1575,7 +1666,7 @@ function FuelStationsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
       {showForm && (
         <div style={{ position: 'fixed', inset: 0, zIndex: 500, background: 'rgba(0,0,0,0.78)', backdropFilter: 'blur(6px)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '16px' }}
           onClick={e => { if (e.target === e.currentTarget) setShowForm(false); }}>
-          <div style={{ width: 'min(520px, 100%)', background: C.surface, border: `1px solid ${C.yellow}44`, borderRadius: '4px', boxShadow: `0 0 48px ${C.yellow}18, 0 8px 32px rgba(0,0,0,0.9)`, overflow: 'hidden' }}>
+          <div style={{ width: 'min(580px, 100%)', background: C.surface, border: `1px solid ${C.yellow}44`, borderRadius: '4px', boxShadow: `0 0 48px ${C.yellow}18, 0 8px 32px rgba(0,0,0,0.9)`, overflow: 'hidden', maxHeight: '90vh', display: 'flex', flexDirection: 'column' }}>
             {/* Modal header */}
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 16px', borderBottom: `1px solid ${C.yellow}22`, background: `${C.yellow}08` }}>
               <span style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '10px', color: C.yellow, letterSpacing: '0.15em' }}>
@@ -1585,7 +1676,7 @@ function FuelStationsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
             </div>
 
             {/* Form body */}
-            <div style={{ padding: '18px 16px', display: 'flex', flexDirection: 'column', gap: '14px' }}>
+            <div style={{ padding: '18px 16px', display: 'flex', flexDirection: 'column', gap: '14px', overflowY: 'auto', flex: 1 }}>
               {/* Name */}
               <div>
                 <label style={LBL}>اسم المحطة *</label>
@@ -1602,20 +1693,58 @@ function FuelStationsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
                   style={FLD} />
               </div>
 
-              {/* Lat / Lng row */}
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
-                <div>
-                  <label style={LBL}>خط العرض Latitude *</label>
-                  <input value={form.latitude} onChange={f('latitude')} onFocus={ff} onBlur={fb}
-                    type="number" step="0.0001" placeholder="33.7440"
-                    style={FLD} />
+              {/* ── Map Picker ───────────────────────────────────────────── */}
+              <div>
+                <label style={{ ...LBL, marginBottom: '6px' }}>
+                  📍 تحديد الموقع على الخريطة *
+                  <span style={{ color: C.dim, fontFamily: 'Rajdhani, sans-serif', fontSize: '11px', marginRight: '6px', fontWeight: 400 }}>
+                    — اضغط أو اسحب الـ Pin
+                  </span>
+                </label>
+
+                {/* Map container */}
+                <div
+                  ref={mapPickerContainerRef}
+                  style={{
+                    width:        '100%',
+                    height:       '260px',
+                    borderRadius: '3px',
+                    border:       `1px solid ${C.yellow}44`,
+                    overflow:     'hidden',
+                    background:   '#0a0d14',
+                    boxShadow:    `inset 0 0 24px rgba(0,0,0,0.6), 0 0 12px ${C.yellow}18`,
+                    cursor:       'crosshair',
+                  }}
+                />
+
+                {/* Coordinate readout + manual fine-tune */}
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', marginTop: '8px' }}>
+                  <div>
+                    <label style={{ ...LBL, color: `${C.yellow}88` }}>Latitude (خط العرض)</label>
+                    <input
+                      value={form.latitude}
+                      onChange={f('latitude')}
+                      onFocus={ff} onBlur={fb}
+                      type="number" step="0.000001" placeholder="33.744000"
+                      style={{ ...FLD, fontFamily: 'Orbitron, monospace', fontSize: '11px', color: C.yellow, letterSpacing: '0.04em', borderColor: `${C.yellow}55` }}
+                    />
+                  </div>
+                  <div>
+                    <label style={{ ...LBL, color: `${C.yellow}88` }}>Longitude (خط الطول)</label>
+                    <input
+                      value={form.longitude}
+                      onChange={f('longitude')}
+                      onFocus={ff} onBlur={fb}
+                      type="number" step="0.000001" placeholder="44.653000"
+                      style={{ ...FLD, fontFamily: 'Orbitron, monospace', fontSize: '11px', color: C.yellow, letterSpacing: '0.04em', borderColor: `${C.yellow}55` }}
+                    />
+                  </div>
                 </div>
-                <div>
-                  <label style={LBL}>خط الطول Longitude *</label>
-                  <input value={form.longitude} onChange={f('longitude')} onFocus={ff} onBlur={fb}
-                    type="number" step="0.0001" placeholder="44.6530"
-                    style={FLD} />
-                </div>
+                {!form.latitude && !form.longitude && (
+                  <div style={{ fontFamily: 'Rajdhani, sans-serif', fontSize: '12px', color: C.red, marginTop: '4px' }}>
+                    ⚠ يرجى تحديد الموقع على الخريطة
+                  </div>
+                )}
               </div>
 
               {/* Queue status */}
