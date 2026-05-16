@@ -410,35 +410,52 @@ export function FazaaSystem({ mapRef, userLocation, clearMapForRescue }: FazaaSy
     <>
       {/* ── Floating button (idle only) ── */}
       {phase === 'idle' && (
-        <button
-          onClick={() => { if (canRequest) { setSelectedIssue(''); setPhase('sheet'); } }}
-          title={canRequest ? 'اطلب مساعدة' : 'فعّل الموقع وسجّل دخولك أولاً'}
-          style={{
-            position:     'fixed',
-            bottom:       '90px',
-            left:         '16px',
-            zIndex:       1200,
-            display:      'flex',
-            alignItems:   'center',
-            gap:          '7px',
-            padding:      '10px 16px',
-            background:   'rgba(190,15,50,0.93)',
-            border:       '1.5px solid rgba(255,80,110,0.7)',
-            borderRadius: '28px',
-            color:        '#fff',
-            fontFamily:   "'Tajawal','Arial',sans-serif",
-            fontSize:     '13px',
-            fontWeight:   700,
-            cursor:       canRequest ? 'pointer' : 'not-allowed',
-            opacity:      canRequest ? 1 : 0.6,
-            boxShadow:    '0 0 20px rgba(255,45,80,0.55),0 2px 8px rgba(0,0,0,0.45)',
-            direction:    'rtl',
-            backdropFilter: 'blur(4px)',
-            transition:   'transform 0.15s',
-          }}
-        >
-          🤝 طلب فزعة
-        </button>
+        <div style={{
+          position:      'fixed',
+          bottom:        '184px',
+          right:         '20px',
+          zIndex:        1200,
+          display:       'flex',
+          flexDirection: 'column',
+          alignItems:    'center',
+          gap:           '4px',
+        }}>
+          <button
+            onClick={() => { if (canRequest) { setSelectedIssue(''); setPhase('sheet'); } }}
+            title={canRequest ? 'اطلب مساعدة' : 'فعّل الموقع وسجّل دخولك أولاً'}
+            style={{
+              width:          '52px',
+              height:         '52px',
+              borderRadius:   '50%',
+              background:     canRequest ? 'rgba(190,15,50,0.92)' : 'rgba(80,10,25,0.85)',
+              border:         '2px solid rgba(255,60,90,0.65)',
+              color:          '#fff',
+              display:        'flex',
+              alignItems:     'center',
+              justifyContent: 'center',
+              fontSize:       '22px',
+              cursor:         canRequest ? 'pointer' : 'not-allowed',
+              opacity:        canRequest ? 1 : 0.55,
+              boxShadow:      canRequest
+                ? '0 0 16px rgba(255,45,80,0.55), 0 0 32px rgba(255,45,80,0.2)'
+                : '0 0 6px rgba(255,45,80,0.2)',
+              backdropFilter: 'blur(12px)',
+              transition:     'all 0.25s',
+              position:       'relative',
+            }}
+          >
+            🤝
+          </button>
+          <div style={{
+            fontFamily:    'Orbitron, sans-serif',
+            fontSize:      '7px',
+            color:         canRequest ? 'rgba(255,100,120,0.85)' : 'rgba(255,100,120,0.4)',
+            letterSpacing: '0.1em',
+            textAlign:     'center',
+          }}>
+            FAZAA
+          </div>
+        </div>
       )}
 
       {/* ── Issue selection sheet ── */}
