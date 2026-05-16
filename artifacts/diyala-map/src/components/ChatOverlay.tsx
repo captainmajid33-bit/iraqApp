@@ -339,7 +339,7 @@ export function ChatOverlay({ orderId, driverPhone, onMinimize, onDeleteChat, on
             </div>
           )}
           {messages.map(msg => {
-            if (msg.isSystemMsg) return <SystemAlertBubble key={msg.id} msg={msg} />;
+            if (msg.isSystemMsg || msg.senderRole === 'system') return <SystemAlertBubble key={msg.id} msg={msg} />;
             const isCustomer = msg.senderRole === 'customer';
             return (
               <div key={msg.id} style={{ display: 'flex', justifyContent: isCustomer ? 'flex-start' : 'flex-end' }}>

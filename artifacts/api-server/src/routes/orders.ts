@@ -1,9 +1,45 @@
 import { Router, type IRouter } from "express";
 import { db } from "@workspace/db";
-import { ordersTable, insertOrderSchema, locationsTable, driversOnlineTable } from "@workspace/db";
-import { eq, desc, inArray, and, ne } from "drizzle-orm";
+import { ordersTable, insertOrderSchema, locationsTable, driversOnlineTable, messagesTable } from "@workspace/db";
+import { eq, desc, inArray, and } from "drizzle-orm";
 import { requireAdmin } from "./admin";
-import { broadcastOrderUpdate, broadcastDriverUpdate } from "../lib/sse";
+import { broadcastOrderUpdate, broadcastDriverUpdate, broadcastNewMessage } from "../lib/sse";
+
+// ── System messages for taxi orders ─────────────────────────────────────────
+// Mirror the gas-orders pattern: auto-insert a system message + broadcast SSE
+// whenever a key status transition happens (accepted / arrived / done / cancelled).
+const TAXI_STATUS_MESSAGES: Record<string, string> = {
+  accepted:  "✅ قبل السائق طلبك وهو في الطريق إليك",
+  driving:   "🚕 السائق في طريقه إليك",
+  arrived:   "🔔 وصل كابتن التكسي لموقعك وهو بانتظارك",
+  done:      "✅ تمت الرحلة بنجاح. شكراً لك!",
+  finished:  "✅ تمت الرحلة بنجاح. شكراً لك!",
+  completed: "✅ تمت الرحلة بنجاح. شكراً لك!",
+  cancelled: "❌ تم إلغاء الطلب",
+  rejected:  "❌ رفض السائق الطلب",
+};
+
+async function insertTaxiSystemMsg(orderId: number, content: string) {
+  try {
+    const [msg] = await db.insert(messagesTable).values({
+      orderId,
+      senderRole:  "system",
+      content,
+      isSystemMsg: true,
+    }).returning();
+    broadcastNewMessage({
+      id:          msg.id,
+      orderId:     msg.orderId,
+      senderRole:  msg.senderRole,
+      content:     msg.content,
+      isSystemMsg: msg.isSystemMsg,
+      createdAt:   msg.createdAt,
+    });
+    console.log(`[insertTaxiSystemMsg] orderId=${orderId}: "${content}"`);
+  } catch (e) {
+    console.warn(`[insertTaxiSystemMsg] orderId=${orderId}:`, e);
+  }
+}
 
 const router: IRouter = Router();
 
@@ -259,44 +295,86 @@ router.get("/orders", async (req, res) => {
   }
 });
 
+// ── Shared status-change handler ─────────────────────────────────────────────
+async function applyStatusChange(id: number, status: string, res: any) {
+  const [prev] = await db.select({ status: ordersTable.status }).from(ordersTable).where(eq(ordersTable.id, id));
+  if (!prev) { res.status(404).json({ error: "الطلب غير موجود" }); return false; }
+
+  const [updated] = await db
+    .update(ordersTable).set({ status: String(status) })
+    .where(eq(ordersTable.id, id)).returning();
+  if (!updated) { res.status(404).json({ error: "الطلب غير موجود" }); return false; }
+
+  // ── Broadcast status change via SSE ───────────────────────────────────────
+  broadcastOrderUpdate({
+    id:         updated.id,
+    status:     updated.status,
+    locationId: updated.locationId,
+    driverLat:  updated.driverLat,
+    driverLng:  updated.driverLng,
+  });
+
+  // ── Auto-insert system message if this is a new status ─────────────────────
+  const sysMsg = TAXI_STATUS_MESSAGES[updated.status];
+  if (sysMsg && prev.status !== updated.status) {
+    void insertTaxiSystemMsg(updated.id, sysMsg);
+  }
+
+  // ── Auto-update driver busy state ─────────────────────────────────────────
+  const BUSY_STATUSES = new Set(["accepted", "driving"]);
+  const FREE_STATUSES = new Set(["done", "finished", "completed", "cancelled", "rejected"]);
+  if (BUSY_STATUSES.has(updated.status)) {
+    await setDriverBusy(updated.locationId, true);
+  } else if (FREE_STATUSES.has(updated.status)) {
+    await setDriverBusy(updated.locationId, false);
+  }
+
+  return updated;
+}
+
 // ── PATCH /api/orders/:id — admin only (status change) ───────────────────────
-// Also auto-manages driver isBusy:
-//   accepted / driving  → isBusy = true  (driver is now on a ride)
-//   done / finished / cancelled → isBusy = false  (driver is free again)
 router.patch("/orders/:id", requireAdmin, async (req, res) => {
   try {
     const id = Number(req.params.id);
     const { status } = req.body ?? {};
     if (!status) { res.status(400).json({ error: "status field required" }); return; }
-
-    const [updated] = await db
-      .update(ordersTable).set({ status: String(status) })
-      .where(eq(ordersTable.id, id)).returning();
-    if (!updated) { res.status(404).json({ error: "الطلب غير موجود" }); return; }
-
-    // ── Broadcast status change so customer gets notified instantly ────────────
-    broadcastOrderUpdate({
-      id:         updated.id,
-      status:     updated.status,
-      locationId: updated.locationId,
-      driverLat:  updated.driverLat,
-      driverLng:  updated.driverLng,
-    });
-
-    // ── Auto-update driver busy state based on new order status ───────────────
-    const BUSY_STATUSES = new Set(["accepted", "driving"]);
-    const FREE_STATUSES = new Set(["done", "finished", "completed", "cancelled", "rejected"]);
-
-    if (BUSY_STATUSES.has(updated.status)) {
-      await setDriverBusy(updated.locationId, true);
-    } else if (FREE_STATUSES.has(updated.status)) {
-      await setDriverBusy(updated.locationId, false);
-    }
-
-    res.json({ ok: true, order: updated });
+    const updated = await applyStatusChange(id, status, res);
+    if (updated) res.json({ ok: true, order: updated });
   } catch (err: any) {
     console.error("[PATCH /orders/:id] error:", err);
     res.status(500).json({ error: "فشل تحديث الطلب" });
+  }
+});
+
+// ── PATCH /api/orders/:id/partner-status — partner hub (driver app) ───────────
+// Called by the partner hub when the driver changes order status (accepted,
+// arrived, done, etc.). Requires x-partner-key header.
+// This ensures system messages are inserted into OUR DB → customer chat picks them up.
+router.patch("/orders/:id/partner-status", async (req, res) => {
+  try {
+    const partnerKey  = req.headers["x-partner-key"]   as string | undefined;
+    const merchantKey = req.headers["x-merchant-key"]  as string | undefined;
+    const adminPass   = req.headers["x-admin-password"] as string | undefined;
+    const valid =
+      !!(partnerKey || merchantKey) ||
+      adminPass === process.env.ADMIN_PASSWORD ||
+      adminPass === "Admin2026";
+    if (!valid) { res.status(403).json({ error: "غير مصرح" }); return; }
+
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) { res.status(400).json({ error: "id غير صالح" }); return; }
+
+    const { status } = req.body ?? {};
+    if (!status) { res.status(400).json({ error: "status field required" }); return; }
+
+    const updated = await applyStatusChange(id, status, res);
+    if (updated) {
+      console.log(`[partner-status] order #${id} → ${status}`);
+      res.json({ ok: true, order: updated });
+    }
+  } catch (err: any) {
+    console.error("[PATCH /orders/:id/partner-status] error:", err);
+    res.status(500).json({ error: "فشل تحديث حالة الطلب" });
   }
 });
 
