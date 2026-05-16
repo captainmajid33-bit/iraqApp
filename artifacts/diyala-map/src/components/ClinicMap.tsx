@@ -2774,6 +2774,49 @@ export function ClinicMap({
         }
       </div>
 
+      {/* ── Clear Active Filter Button — appears only when a filter is active ── */}
+      {activeFilter && (
+        <button
+          onClick={() => { onFilterChange(''); setShowMoreModal(false); }}
+          style={{
+            position: 'absolute',
+            top: '98px',
+            left: '50%',
+            transform: 'translateX(-50%)',
+            zIndex: 1000,
+            display: 'flex',
+            alignItems: 'center',
+            gap: '6px',
+            padding: '5px 14px 5px 10px',
+            background: 'rgba(255,45,80,0.13)',
+            border: '1px solid rgba(255,45,80,0.45)',
+            borderRadius: '20px',
+            color: '#ff2d50',
+            fontFamily: 'Rajdhani, sans-serif',
+            fontSize: '13px',
+            fontWeight: 700,
+            letterSpacing: '0.04em',
+            cursor: 'pointer',
+            backdropFilter: 'blur(12px)',
+            boxShadow: '0 2px 16px rgba(255,45,80,0.18)',
+            transition: 'all 0.18s',
+            whiteSpace: 'nowrap',
+            direction: 'rtl',
+          }}
+          onMouseEnter={e => {
+            (e.currentTarget as HTMLElement).style.background = 'rgba(255,45,80,0.26)';
+            (e.currentTarget as HTMLElement).style.boxShadow = '0 2px 24px rgba(255,45,80,0.38)';
+          }}
+          onMouseLeave={e => {
+            (e.currentTarget as HTMLElement).style.background = 'rgba(255,45,80,0.13)';
+            (e.currentTarget as HTMLElement).style.boxShadow = '0 2px 16px rgba(255,45,80,0.18)';
+          }}
+        >
+          <span style={{ fontSize: '15px', lineHeight: 1 }}>✕</span>
+          <span>إلغاء الفلتر — عرض الكل</span>
+        </button>
+      )}
+
       {/* ── More Categories + Smart Search Modal ── */}
       {showMoreModal && (
         <div
