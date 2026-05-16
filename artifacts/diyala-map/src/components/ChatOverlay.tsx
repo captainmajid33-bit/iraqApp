@@ -154,7 +154,8 @@ export function ChatOverlay({ orderId, driverPhone, onMinimize, onDeleteChat, on
           mergeMessage(message);
         } catch { /* malformed */ }
       });
-      es.onerror = () => {
+      es.onerror = (err) => {
+        console.error('[ChatOverlay] SSE error — reconnecting in', retryDelay, 'ms', err);
         es?.close(); setSseOk(false);
         if (destroyed) return;
         retryTimer = setTimeout(() => { retryDelay = Math.min(retryDelay * 2, 16_000); connect(); }, retryDelay);

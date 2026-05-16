@@ -5,6 +5,11 @@ import {
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 
+// ── Unified Firestore path — MUST match partner-hub exactly ──────────────────
+// Customer writes:  chats/{orderId}/messages  { senderId, receiverId, text, timestamp }
+// Agent reads from: chats/{orderId}/messages  (same path, same fields)
+const CHAT_COL = (id: number) => ['chats', String(id), 'messages'] as const;
+
 // ── Unified display message ───────────────────────────────────────────────
 interface GasMsg {
   id:          string;
@@ -81,43 +86,44 @@ export function GasChatOverlay({ gasOrderId, agentPhone, onMinimize, onNewMessag
     (a, b) => a.createdAt.getTime() - b.createdAt.getTime()
   );
 
-  // ── 1. Firestore real-time listener ─────────────────────────────────────
+  // ── 1. Firestore real-time listener ──────────────────────────────────────
+  // PATH: chats/{orderId}/messages  (unified with partner-hub)
+  // FIELDS: { senderId, receiverId, text, timestamp }
   useEffect(() => {
     if (!safeId) return;
-    const fsPath = `orders/${safeId}/messages`;
-    console.log(`🔥 CUSTOMER CHAT PATH -> ${fsPath}`);
+    const [col, docId, subCol] = CHAT_COL(safeId);
+    const fsPath = `${col}/${docId}/${subCol}`;
+    console.log(`🔥 [GasChat] Listening -> Firestore "${fsPath}"  fields: senderId/text/timestamp`);
 
-    // No orderBy — serverTimestamp() is null locally before sync,
-    // which causes Firestore to drop the doc from an ordered query.
-    // We sort client-side instead so messages appear immediately.
-    const q = query(
-      collection(db, 'orders', String(safeId), 'messages'),
-    );
+    const q = query(collection(db, col, docId, subCol));
 
     const unsub = onSnapshot(
       q,
       { includeMetadataChanges: true },
       (snap) => {
-        console.log(`🔥 onSnapshot fired — ${snap.docs.length} doc(s) at ${fsPath} (fromCache=${snap.metadata.fromCache})`);
+        console.log(`🔥 [GasChat] onSnapshot — ${snap.docs.length} doc(s) | fromCache=${snap.metadata.fromCache}`);
         setLiveOk(true);
         const msgs: GasMsg[] = snap.docs
           .map(d => {
             const data = d.data();
-            // Timestamp may be null for pending local writes — fall back to now
+            // senderId field (new schema); fall back to legacy "sender" if present
+            const senderId = data.senderId ?? data.sender ?? 'customer';
+            // Timestamp may be null for pending writes — fall back gracefully
             const ts: Date = data.timestamp?.toDate?.() ?? (d.metadata.hasPendingWrites ? new Date() : new Date(0));
             return {
               id:         d.id,
-              content:    data.text ?? '',
-              senderRole: (data.sender === 'agent' ? 'agent' : 'customer') as GasMsg['senderRole'],
+              content:    data.text ?? data.message ?? '',
+              senderRole: (senderId === 'agent' ? 'agent' : 'customer') as GasMsg['senderRole'],
               createdAt:  ts,
             };
           })
           .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
 
-        // Fire onNewMessage for new agent messages
+        // Notify on new agent messages
         msgs.forEach(m => {
           if (m.senderRole === 'agent' && !seenAgentIds.current.has(m.id)) {
             seenAgentIds.current.add(m.id);
+            console.log(`🔥 [GasChat] New AGENT message id=${m.id}`);
             onNewMessage?.();
           }
         });
@@ -125,7 +131,7 @@ export function GasChatOverlay({ gasOrderId, agentPhone, onMinimize, onNewMessag
         setFsMessages(msgs);
       },
       (err) => {
-        console.error('[GasChat] Firestore onSnapshot error:', err?.code, err?.message);
+        console.error(`🔥 [GasChat] Firestore onSnapshot ERROR — code=${err?.code} msg=${err?.message}`);
         setLiveOk(false);
       },
     );
@@ -133,12 +139,15 @@ export function GasChatOverlay({ gasOrderId, agentPhone, onMinimize, onNewMessag
     return () => unsub();
   }, [safeId, onNewMessage]);
 
-  // ── 2. System messages from REST API (poll every 4 s) ───────────────────
+  // ── 2. System messages from REST API (poll every 4 s + SSE trigger) ─────
   const fetchSystemMsgs = useCallback(async () => {
     if (!safeId) return;
     try {
       const res = await fetch(`${API}/gas-orders/${safeId}/messages`);
-      if (!res.ok) return;
+      if (!res.ok) {
+        console.warn(`[GasChat] GET /gas-orders/${safeId}/messages → ${res.status}`);
+        return;
+      }
       const data: Array<{
         id: number | string;
         isSystemMsg?: boolean;
@@ -161,16 +170,55 @@ export function GasChatOverlay({ gasOrderId, agentPhone, onMinimize, onNewMessag
         const existingIds = new Set(prev.map(m => m.id));
         const newMsgs = mapped.filter(m => !existingIds.has(m.id));
         if (newMsgs.length === 0) return prev;
+        newMsgs.forEach(m => console.log(`[GasChat] New SYSTEM msg id=${m.id}: ${m.content.slice(0, 40)}`));
         return [...prev, ...newMsgs];
       });
-    } catch { /* silent */ }
+    } catch (e: any) {
+      console.error('[GasChat] fetchSystemMsgs error:', e?.message);
+    }
   }, [safeId]);
 
+  // Poll every 4 s + also fetch immediately on gas_new_message SSE event
   useEffect(() => {
     fetchSystemMsgs();
     const t = setInterval(fetchSystemMsgs, 4000);
     return () => clearInterval(t);
   }, [fetchSystemMsgs]);
+
+  // ── 3. SSE listener — gas_new_message triggers instant system-msg fetch ──
+  useEffect(() => {
+    if (!safeId) return;
+    let es: EventSource | null = null;
+    let retryDelay = 1500;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let destroyed = false;
+
+    const connect = () => {
+      if (destroyed) return;
+      es = new EventSource(`${API}/events`);
+      es.addEventListener('gas_new_message', (e: MessageEvent) => {
+        try {
+          const { message } = JSON.parse(e.data) as { message: { gasOrderId?: number } };
+          if (message.gasOrderId !== safeId) return;
+          console.log('[GasChat] SSE gas_new_message received — fetching system msgs immediately');
+          fetchSystemMsgs();
+        } catch { /* malformed */ }
+      });
+      es.onerror = (err) => {
+        console.error('[GasChat] SSE error — reconnecting in', retryDelay, 'ms', err);
+        es?.close();
+        if (destroyed) return;
+        retryTimer = setTimeout(() => { retryDelay = Math.min(retryDelay * 2, 15_000); connect(); }, retryDelay);
+      };
+    };
+
+    connect();
+    return () => {
+      destroyed = true;
+      if (retryTimer) clearTimeout(retryTimer);
+      es?.close();
+    };
+  }, [safeId, fetchSystemMsgs]);
 
   // ── Auto-scroll ──────────────────────────────────────────────────────────
   useEffect(() => {
@@ -178,22 +226,26 @@ export function GasChatOverlay({ gasOrderId, agentPhone, onMinimize, onNewMessag
   }, [messages.length]);
 
   // ── Send message via Firestore addDoc ────────────────────────────────────
+  // PATH: chats/{orderId}/messages
+  // FIELDS: { senderId, receiverId, text, timestamp }
   const sendMessage = useCallback(async () => {
     const text = input.trim();
     if (!text || sending || !safeId) return;
     setSending(true);
-    const fsPath = `orders/${safeId}/messages`;
-    console.log(`🔥 SEND -> ${fsPath}`, { text, sender: 'customer' });
+    const [col, docId, subCol] = CHAT_COL(safeId);
+    const fsPath = `${col}/${docId}/${subCol}`;
+    console.log(`🔥 [GasChat] SEND -> "${fsPath}"`, { senderId: 'customer', receiverId: 'agent', text });
     try {
-      await addDoc(collection(db, 'orders', String(safeId), 'messages'), {
+      await addDoc(collection(db, col, docId, subCol), {
+        senderId:   'customer',
+        receiverId: 'agent',
         text,
-        sender:    'customer',
-        timestamp: serverTimestamp(),
+        timestamp:  serverTimestamp(),
       });
-      console.log(`🔥 SEND SUCCESS -> ${fsPath}`);
+      console.log(`🔥 [GasChat] SEND SUCCESS -> "${fsPath}"`);
       setInput('');
     } catch (e: any) {
-      console.error(`🔥 SEND FAILED -> ${fsPath}`, e?.code, e?.message);
+      console.error(`🔥 [GasChat] SEND FAILED -> "${fsPath}" | code=${e?.code} msg=${e?.message}`);
     } finally {
       setSending(false);
     }
