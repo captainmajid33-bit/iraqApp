@@ -8,6 +8,7 @@ import { RatingDialog } from './RatingDialog';
 import { FazaaSystem } from './FazaaSystem';
 import { MarketTicker } from './MarketTicker';
 import { FuelStationRadar } from './FuelStationRadar';
+import { BountyMissionSystem } from './BountyMissionSystem';
 import { collection, query, where, getDocs, onSnapshot, orderBy, limit } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 
@@ -648,7 +649,6 @@ export function ClinicMap({
 
   const pendingJumpRef   = useRef<number|null>(null);
   const trafficLayersRef = useRef<L.Polyline[]>([]);
-  const missionMarkerRef = useRef<L.Marker|null>(null);
 
   const clearRouteVisuals = useCallback(()=>{
     routeGlowRef.current?.remove(); routeGlowRef.current=null;
@@ -921,45 +921,6 @@ export function ClinicMap({
       taxiPickPointRef.current?.(e.latlng.lat, e.latlng.lng);
     });
 
-    // ── Mission marker — golden pulsing diamond at city centre ───────────────
-    const missionIcon = L.divIcon({
-      className:'',
-      html:`<div style="width:54px;height:54px;position:relative;display:flex;align-items:center;justify-content:center;cursor:pointer;">
-        <div style="position:absolute;inset:-4px;border-radius:50%;background:#f5c518;opacity:0.10;animation:lf-ping 1.8s cubic-bezier(0,0,0.2,1) infinite;"></div>
-        <div style="position:absolute;inset:-10px;border-radius:50%;background:#f5c518;opacity:0.05;animation:lf-ping 1.8s cubic-bezier(0,0,0.2,1) infinite;animation-delay:0.5s;"></div>
-        <div style="animation:mission-pulse 2s ease-in-out infinite;">
-          <svg width="46" height="46" viewBox="0 0 46 46" fill="none">
-            <polygon points="23,2 43,23 23,44 3,23" fill="#f5c51818" stroke="#f5c518" stroke-width="2"/>
-            <polygon points="23,10 36,23 23,36 10,23" fill="#f5c518" opacity="0.85"/>
-            <text x="23" y="28" text-anchor="middle" font-size="13" fill="#0a0d14" font-weight="900" font-family="Arial">★</text>
-          </svg>
-        </div>
-      </div>`,
-      iconSize:[54,54], iconAnchor:[27,27],
-    });
-    const missionEl = document.createElement('div');
-    missionEl.style.cssText='padding:18px 16px 14px;text-align:center;direction:rtl;min-width:230px;';
-    missionEl.innerHTML=`
-      <div style="font-family:Orbitron,sans-serif;font-size:9px;color:#f5c518;letter-spacing:0.18em;margin-bottom:10px;text-shadow:0 0 12px #f5c518;">⭐ DAILY MISSION ⭐</div>
-      <div style="font-family:Rajdhani,sans-serif;font-size:20px;font-weight:800;color:#fff;margin-bottom:6px;text-shadow:0 0 18px #f5c51877;">استلم جائزتك الآن</div>
-      <div style="font-family:Rajdhani,sans-serif;font-size:13px;color:rgba(255,255,255,0.45);margin-bottom:14px;line-height:1.5;">توجّه إلى نقطة الجائزة واضغط للاستلام<br/>المكافأة: خصم 30% على أقرب مطعم</div>
-      <div style="display:flex;gap:8px;align-items:center;justify-content:center;margin-bottom:2px;">
-        <div style="width:6px;height:6px;border-radius:50%;background:#00f5d4;box-shadow:0 0 8px #00f5d4;animation:lf-ping 2s ease infinite;"></div>
-        <span style="font-family:Orbitron,sans-serif;font-size:9px;color:#00f5d4;letter-spacing:0.1em;">ACTIVE</span>
-      </div>
-    `;
-    const closeBtn=document.createElement('button');
-    closeBtn.textContent='✕  إغلاق المهمة';
-    closeBtn.style.cssText='width:100%;padding:10px;margin-top:10px;background:rgba(245,197,24,0.08);border:1px solid #f5c51855;color:#f5c518;font-family:Orbitron,sans-serif;font-size:9px;letter-spacing:0.12em;cursor:pointer;transition:all 0.2s;';
-    closeBtn.onmouseover=()=>{closeBtn.style.background='rgba(245,197,24,0.18)';closeBtn.style.boxShadow='0 0 14px #f5c51844';};
-    closeBtn.onmouseout=()=>{closeBtn.style.background='rgba(245,197,24,0.08)';closeBtn.style.boxShadow='none';};
-    closeBtn.onclick=()=>{ mapRef.current?.closePopup(); };
-    missionEl.appendChild(closeBtn);
-
-    missionMarkerRef.current = L.marker([33.7451,44.6488],{icon:missionIcon,zIndexOffset:2000})
-      .addTo(mapRef.current)
-      .bindPopup(L.popup({className:'map-popup mission-popup',closeButton:false,autoPan:true,offset:[0,-10]}).setContent(missionEl));
-
     // ── OSM Global POI overlay — sticky accumulation (markers never clear on pan/zoom) ───
     const poiLayerA = L.layerGroup().addTo(mapRef.current);
     poiLayerRef.current = poiLayerA;
@@ -1123,7 +1084,6 @@ export function ClinicMap({
       poiLayerA.remove(); poiLayerRef.current = null;
       poiRouteGlowRef.current?.remove(); poiRouteGlowRef.current = null;
       poiRouteLineRef.current?.remove(); poiRouteLineRef.current = null;
-      missionMarkerRef.current?.remove(); missionMarkerRef.current=null;
       trafficLayersRef.current.forEach(l=>l.remove()); trafficLayersRef.current=[];
       mapRef.current?.remove(); mapRef.current=null;
       style.remove();
@@ -4887,6 +4847,12 @@ export function ClinicMap({
         mapRef={mapRef}
         userLocation={userLocation}
         visible={showFuel}
+      />
+
+      {/* ── Bounty Mission System ── */}
+      <BountyMissionSystem
+        mapRef={mapRef}
+        userLocation={userLocation}
       />
 
       {/* ── Live Market Ticker ── */}
