@@ -9,9 +9,10 @@ import { FazaaSystem } from './FazaaSystem';
 import { MarketTicker } from './MarketTicker';
 import { FuelStationRadar } from './FuelStationRadar';
 import { BountyMissionSystem } from './BountyMissionSystem';
+import { ActiveOrderTracker } from './ActiveOrderTracker';
 import { useMapTheme } from '@/lib/mapTheme';
-import { collection, query, where, getDocs, onSnapshot, orderBy, limit } from 'firebase/firestore';
-import { db } from '@/lib/firebase';
+import { collection, query, where, getDocs, onSnapshot, orderBy, limit, doc, setDoc, serverTimestamp } from 'firebase/firestore';
+import { auth, db } from '@/lib/firebase';
 
 // ── Fetch phones of AVAILABLE agents from Firestore (cross-check filter) ──
 // Returns a Set of phone strings, or null if Firestore is unreachable.
@@ -1510,6 +1511,18 @@ export function ClinicMap({
           activeGasOrderIdRef.current    = gasOrderId;
           activeGasOrderStatusRef.current = 'pending';
           localStorage.setItem('diyala_active_gas_order', JSON.stringify({ orderId: gasOrderId }));
+          // ── Mirror to Firestore for real-time driver tracking ──────────
+          const uid = auth.currentUser?.uid;
+          if (uid) {
+            setDoc(doc(db, 'orders', String(gasOrderId)), {
+              customer_id:  uid,
+              type:         'gas',
+              status:       'pending',
+              customer_lat: loc.lat,
+              customer_lng: loc.lng,
+              created_at:   serverTimestamp(),
+            }).catch(() => { /* non-fatal */ });
+          }
         }
         setTimeout(()=>{ setShowGasForm(false); setGasFormSuccess(false); }, 2500);
       } else {
@@ -2387,6 +2400,18 @@ export function ClinicMap({
           setActiveDriverId(taxiDriverItem.id);
           // Persist order to localStorage so it survives page refresh
           localStorage.setItem('diyala_active_order', JSON.stringify({ orderId, driverPhone, driverId: taxiDriverItem.id }));
+          // ── Mirror to Firestore for real-time driver tracking ────────────
+          const uid = auth.currentUser?.uid;
+          if (uid) {
+            setDoc(doc(db, 'orders', String(orderId)), {
+              customer_id:  uid,
+              type:         'taxi',
+              status:       'pending',
+              customer_lat: taxiFromPt?.lat ?? null,
+              customer_lng: taxiFromPt?.lng ?? null,
+              created_at:   serverTimestamp(),
+            }).catch(() => { /* non-fatal */ });
+          }
           // ── Start the search loop countdown ─────────────────────────────
           loopFromPtRef.current    = taxiFromPt;
           loopToPtRef.current      = taxiToPt;
@@ -4961,6 +4986,12 @@ export function ClinicMap({
         mapRef={mapRef}
         userLocation={userLocation}
         visible={showFuel}
+      />
+
+      {/* ── Active Order Tracker — Firestore real-time driver tracking ── */}
+      <ActiveOrderTracker
+        mapRef={mapRef}
+        userLocation={userLocation}
       />
 
       {/* ── Bounty Mission System ── */}
