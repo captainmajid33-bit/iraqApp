@@ -26,6 +26,7 @@ interface BountyDoc {
   second_reward: string;
   third_reward:  string;
   fake_message:  string;
+  secret_answer: string;
   winners_log:   WinnerEntry[];
   expiresAt:     Timestamp;
   status:        'active' | 'closed' | 'expired';
@@ -121,13 +122,16 @@ export function BountyMissionSystem({
   const [selected,    setSelected]    = useState<BountyDoc | null>(null);
   const [distM,       setDistM]       = useState<number | null>(null);
   const [claiming,    setClaiming]    = useState(false);
-  const [phase, setPhase] = useState<'idle'|'fake'|'rank1'|'rank2'|'rank3'|'full'|'error'>('idle');
+  const [phase, setPhase] = useState<'idle'|'question'|'fake'|'rank1'|'rank2'|'rank3'|'full'|'error'>('idle');
+  const [answerInput,  setAnswerInput]  = useState('');
+  const [answerError,  setAnswerError]  = useState('');
   const [gpsLoading,  setGpsLoading]  = useState(false);
   const [internalPos, setInternalPos] = useState<{lat:number;lng:number}|null>(null);
   const [overlays,    setOverlays]    = useState<Array<{id:string;x:number;y:number;ms:number}>>([]);
 
   const markersRef  = useRef<Map<string, L.Marker>>(new Map());
   const gpsWatchRef = useRef<number | null>(null);
+  const bountiesRef = useRef<BountyDoc[]>([]); // stable ref to avoid stale closure in transaction
 
   const pos = userLocation ?? internalPos;
 
@@ -159,6 +163,7 @@ export function BountyMissionSystem({
           second_reward: String(raw.second_reward ?? ''),
           third_reward:  String(raw.third_reward ?? ''),
           fake_message:  String(raw.fake_message ?? 'أكلت المقلب خوية! 😂 اركض للموقع الثاني بسرعة!'),
+          secret_answer: String(raw.secret_answer ?? ''),
           winners_log:   Array.isArray(raw.winners_log) ? raw.winners_log : [],
           expiresAt:     raw.expiresAt as Timestamp,
           status:        raw.status,
@@ -254,10 +259,21 @@ export function BountyMissionSystem({
     setDistM(haversineMeters(pos.lat, pos.lng, selected.latitude, selected.longitude));
   }, [selected, pos]);
 
-  // ── Claim ──────────────────────────────────────────────────────────────────
-  const handleClaim = useCallback(async () => {
+  // ── Keep bountiesRef in sync (stable ref for transaction) ─────────────────
+  useEffect(() => { bountiesRef.current = bounties; }, [bounties]);
+
+  // ── Open question dialog when user clicks claim ─────────────────────────
+  const openQuestion = useCallback(() => {
+    setAnswerInput('');
+    setAnswerError('');
+    setPhase('question');
+  }, []);
+
+  // ── Submit answer — handles both fake + real validation ─────────────────
+  const handleSubmitAnswer = useCallback(async () => {
     if (!selected || claiming) return;
 
+    // ── FAKE location: ignore the answer entirely → prank screen ──────────
     if (selected.isFake) {
       markFakeVisited(selected.id);
       markersRef.current.get(selected.id)?.remove();
@@ -266,23 +282,44 @@ export function BountyMissionSystem({
       return;
     }
 
-    const user      = getUser();
-    const uid       = auth.currentUser?.uid ?? user?.phone ?? user?.name ?? 'anonymous';
-    const uname     = user?.name ?? uid;
+    // ── REAL location: validate secret_answer ─────────────────────────────
+    const trimmed = answerInput.trim().toLowerCase();
+    const correct = selected.secret_answer.trim().toLowerCase();
+    if (correct && trimmed !== correct) {
+      setAnswerError('لتكتب جواب من يمك روح اسئل الموظف شنو جواب السؤال وكتبه');
+      return;
+    }
+
+    // ── Correct answer → Firestore transaction ────────────────────────────
+    const user  = getUser();
+    const uid   = auth.currentUser?.uid ?? user?.phone ?? user?.name ?? 'anonymous';
+    const uname = user?.name ?? uid;
     setClaiming(true);
     try {
       let rank = 0;
+      // Stable snapshot of bounties for finding the fake sibling
+      const fakeSibling = bountiesRef.current.find(
+        b => b.pairId === selected.pairId && b.isFake,
+      );
       await runTransaction(db, async txn => {
-        const ref = doc(db, 'bounties', selected.id);
+        const ref  = doc(db, 'bounties', selected.id);
         const snap = await txn.get(ref);
         if (!snap.exists() || snap.data()?.status !== 'active') throw new Error('closed');
         const log: WinnerEntry[] = snap.data()?.winners_log ?? [];
         if (log.length >= 3) throw new Error('full');
         rank = log.length + 1;
         const entry: WinnerEntry = { uid, name: uname, rank, claimedAt: serverTimestamp() };
-        const upd: Record<string,any> = { winners_log: arrayUnion(entry) };
-        if (rank === 3) upd.status = 'closed';
-        txn.update(ref, upd);
+        const upd: Record<string, any> = { winners_log: arrayUnion(entry) };
+        if (rank === 3) {
+          // ── شرط الاختفاء الفوري: أغلق المهمتين معاً عند الفائز الثالث ──
+          upd.status = 'closed';
+          txn.update(ref, upd);
+          if (fakeSibling) {
+            txn.update(doc(db, 'bounties', fakeSibling.id), { status: 'closed' });
+          }
+        } else {
+          txn.update(ref, upd);
+        }
       });
       setPhase(rank === 1 ? 'rank1' : rank === 2 ? 'rank2' : 'rank3');
     } catch (e: any) {
@@ -290,9 +327,15 @@ export function BountyMissionSystem({
     } finally {
       setClaiming(false);
     }
-  }, [selected, claiming]);
+  }, [selected, claiming, answerInput]);
 
-  const closeSheet = () => { setSelected(null); setPhase('idle'); setDistM(null); };
+  const closeSheet = () => {
+    setSelected(null);
+    setPhase('idle');
+    setDistM(null);
+    setAnswerInput('');
+    setAnswerError('');
+  };
 
   if (!mapReady) return null;
 
@@ -355,6 +398,17 @@ export function BountyMissionSystem({
             <button onClick={closeSheet} style={{ position:'absolute',top:'12px',left:'16px',background:'none',border:'none',color:'rgba(255,255,255,0.3)',fontSize:'22px',cursor:'pointer' }}>×</button>
 
             {/* ── Result Screens ── */}
+            {phase === 'question' && (
+              <QuestionScreen
+                isFake={selected.isFake}
+                answer={answerInput}
+                error={answerError}
+                claiming={claiming}
+                onChange={v => { setAnswerInput(v); setAnswerError(''); }}
+                onSubmit={handleSubmitAnswer}
+                onBack={() => { setPhase('idle'); setAnswerInput(''); setAnswerError(''); }}
+              />
+            )}
             {phase === 'fake' && <FakeScreen msg={selected.fake_message} onClose={closeSheet} />}
             {phase === 'rank1' && <WinScreen rank={1} reward={selected.first_reward} sponsor={selected.sponsor_name} onClose={closeSheet} />}
             {phase === 'rank2' && <WinScreen rank={2} reward={selected.second_reward} sponsor={selected.sponsor_name} onClose={closeSheet} />}
@@ -450,9 +504,9 @@ export function BountyMissionSystem({
                   </div>
                 </div>
 
-                {/* Claim button */}
+                {/* Claim button → opens question dialog first */}
                 {isClose && selMs !== null && selMs > 0 && selected.winners_log.length < 3 && (
-                  <button onClick={handleClaim} disabled={claiming} style={{
+                  <button onClick={openQuestion} disabled={claiming} style={{
                     width:'100%',padding:'15px 20px',
                     background: claiming ? `${CL.yellow}10` : `linear-gradient(135deg,${CL.yellow}22,${CL.yellow}0C)`,
                     border:`2px solid ${CL.yellow}`,color:CL.yellow,
@@ -557,6 +611,149 @@ function FullScreen({ onClose }: { onClose: () => void }) {
       </div>
       <button onClick={onClose} style={{ padding:'11px 28px',background:'rgba(255,255,255,0.06)',border:'1px solid rgba(255,255,255,0.18)',color:'rgba(255,255,255,0.55)',fontFamily:'Orbitron, sans-serif',fontSize:'10px',letterSpacing:'0.12em',cursor:'pointer',borderRadius:'4px' }}>
         إغلاق
+      </button>
+    </div>
+  );
+}
+
+// ── QuestionScreen — لغز السؤال السري ──────────────────────────────────────
+function QuestionScreen({
+  isFake, answer, error, claiming, onChange, onSubmit, onBack,
+}: {
+  isFake:    boolean;
+  answer:    string;
+  error:     string;
+  claiming:  boolean;
+  onChange:  (v: string) => void;
+  onSubmit:  () => void;
+  onBack:    () => void;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => { setTimeout(() => inputRef.current?.focus(), 150); }, []);
+
+  const handleKey = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && !claiming) onSubmit();
+  };
+
+  return (
+    <div style={{
+      textAlign: 'center', padding: '10px 0 20px',
+      animation: 'bms-pop 0.45s cubic-bezier(0.34,1.56,0.64,1)',
+    }}>
+      {/* Icon */}
+      <div style={{
+        fontSize: '54px', marginBottom: '12px',
+        filter: 'drop-shadow(0 0 20px #f5c518)',
+        animation: 'bms-pulse 2s ease-in-out infinite',
+      }}>🔑</div>
+
+      {/* Label */}
+      <div style={{
+        fontFamily: 'Orbitron, sans-serif', fontSize: '9px',
+        color: '#f5c518', letterSpacing: '0.2em', marginBottom: '10px',
+      }}>
+        سؤال التحقق · SECRET QUESTION
+      </div>
+
+      {/* Question text */}
+      <div style={{
+        fontFamily: 'Rajdhani, sans-serif', fontSize: '18px', fontWeight: 700,
+        color: '#fff', lineHeight: 1.6, marginBottom: '20px',
+        padding: '14px 16px',
+        background: 'rgba(245,197,24,0.07)',
+        border: '1px solid rgba(245,197,24,0.3)',
+        borderRadius: '10px',
+      }}>
+        ماهو الشي المخفي الذي لقيته بعد سؤال الموظف ؟
+      </div>
+
+      {/* Text input */}
+      <input
+        ref={inputRef}
+        value={answer}
+        onChange={e => onChange(e.target.value)}
+        onKeyDown={handleKey}
+        placeholder='اكتب جوابك هنا...'
+        disabled={claiming}
+        style={{
+          width: '100%',
+          padding: '13px 16px',
+          background: 'rgba(255,255,255,0.04)',
+          border: `2px solid ${error ? '#ff2d50' : 'rgba(245,197,24,0.5)'}`,
+          borderRadius: '8px',
+          color: '#fff',
+          fontFamily: 'Rajdhani, sans-serif',
+          fontSize: '17px',
+          fontWeight: 600,
+          textAlign: 'center',
+          outline: 'none',
+          boxSizing: 'border-box',
+          marginBottom: '8px',
+          transition: 'border-color 0.2s',
+        }}
+      />
+
+      {/* Error message */}
+      {error && (
+        <div style={{
+          fontFamily: 'Rajdhani, sans-serif', fontSize: '14px',
+          color: '#ff2d50', lineHeight: 1.6,
+          padding: '10px 14px',
+          background: 'rgba(255,45,80,0.08)',
+          border: '1px solid rgba(255,45,80,0.35)',
+          borderRadius: '8px',
+          marginBottom: '8px',
+          animation: 'bms-pop 0.35s ease',
+        }}>
+          ⚠ {error}
+        </div>
+      )}
+
+      {/* Confirm button */}
+      <button
+        onClick={onSubmit}
+        disabled={claiming || !answer.trim()}
+        style={{
+          width: '100%', padding: '14px 20px', marginTop: '4px',
+          background: answer.trim()
+            ? 'linear-gradient(135deg,rgba(245,197,24,0.22),rgba(245,197,24,0.10))'
+            : 'rgba(255,255,255,0.04)',
+          border: `2px solid ${answer.trim() ? '#f5c518' : 'rgba(255,255,255,0.12)'}`,
+          color: answer.trim() ? '#f5c518' : 'rgba(255,255,255,0.3)',
+          fontFamily: 'Orbitron, sans-serif', fontSize: '11px', letterSpacing: '0.14em',
+          cursor: claiming || !answer.trim() ? 'not-allowed' : 'pointer',
+          borderRadius: '8px',
+          boxShadow: answer.trim() ? '0 0 20px rgba(245,197,24,0.3)' : 'none',
+          transition: 'all 0.2s',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px',
+          marginBottom: '10px',
+        }}
+      >
+        {claiming ? (
+          <>
+            <svg width="14" height="14" viewBox="0 0 28 28" fill="none"
+              style={{ animation: 'lf-spin 0.9s linear infinite' }}>
+              <circle cx="14" cy="14" r="10" stroke="#f5c518" strokeWidth="2.5"
+                strokeDasharray="22 14" strokeLinecap="round"/>
+            </svg>
+            جاري التحقق...
+          </>
+        ) : '✓ تأكيد الجواب'}
+      </button>
+
+      {/* Back link */}
+      <button
+        onClick={onBack}
+        disabled={claiming}
+        style={{
+          background: 'none', border: 'none',
+          color: 'rgba(255,255,255,0.3)',
+          fontFamily: 'Rajdhani, sans-serif', fontSize: '13px',
+          cursor: 'pointer', padding: '4px 8px',
+          textDecoration: 'underline',
+        }}
+      >
+        ← رجوع
       </button>
     </div>
   );

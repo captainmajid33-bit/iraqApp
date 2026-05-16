@@ -1711,6 +1711,7 @@ interface AdminBountyDoc {
   second_reward: string;
   third_reward:  string;
   fake_message:  string;
+  secret_answer: string;
   winners_log:   any[];
   expiresAt:     any;
   status:        'active' | 'closed' | 'expired';
@@ -1742,6 +1743,7 @@ const EMPTY_BMISSION = {
   second_reward:  '',
   third_reward:   '',
   fake_message:   '',
+  secret_answer:  '',
   duration_minutes: '30',
   realLat: '', realLng: '',
   fakeLat: '', fakeLng: '',
@@ -1921,7 +1923,7 @@ function BountyMissionsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
         createdAt: serverTimestamp(),
       };
       await Promise.all([
-        addDoc(collection(db, 'bounties'), { ...shared, isFake: false, latitude: rLat, longitude: rLng }),
+        addDoc(collection(db, 'bounties'), { ...shared, isFake: false, latitude: rLat, longitude: rLng, secret_answer: (form.secret_answer ?? '').trim() }),
         addDoc(collection(db, 'bounties'), { ...shared, isFake: true,  latitude: fLat, longitude: fLng }),
       ]);
       toast.show(`✓ تم إطلاق مهمة "${title}" — ${dur} دقيقة`);
@@ -2030,6 +2032,26 @@ function BountyMissionsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
                   placeholder='مثال: "أكلت المقلب خوية! صاحب المحل استغرب منك 😂.. اركض للموقع الثاني بسرعة!"'
                   rows={2}
                   style={{ ...FLD, resize: 'vertical', minHeight: '60px', lineHeight: 1.55, borderColor: `${C.red}44` }} />
+              </div>
+
+              {/* Secret Answer — real location only */}
+              <div style={{ padding: '14px 16px', background: `${C.yellow}07`, border: `1px solid ${C.yellow}33`, borderRadius: '6px' }}>
+                <label style={{ ...LBL, color: C.yellow + 'cc', marginBottom: '6px' }}>
+                  🔑 الجواب السري للموقع الحقيقي *
+                </label>
+                <div style={{ fontFamily: 'Rajdhani, sans-serif', fontSize: '12px', color: C.dim, marginBottom: '8px', lineHeight: 1.5 }}>
+                  الكلمة التي يجب أن يكتبها الفائز بعد سؤال الموظف — مثال: <strong style={{ color: '#fff' }}>"ساعة"</strong> أو <strong style={{ color: '#fff' }}>"شعار أحمر"</strong>
+                </div>
+                <input
+                  value={form.secret_answer}
+                  onChange={f('secret_answer')}
+                  onFocus={ff} onBlur={fb}
+                  placeholder='اكتب الجواب السري هنا — غير مرئي للاعبين'
+                  style={{ ...FLD, borderColor: `${C.yellow}55`, color: C.yellow, fontWeight: 700 }}
+                />
+                <div style={{ fontFamily: 'Rajdhani, sans-serif', fontSize: '11px', color: C.dim, marginTop: '5px' }}>
+                  ⚠ يُحفظ فقط في مستند الموقع الحقيقي — لا يظهر للاعبين
+                </div>
               </div>
 
               {/* ── Dual Map Picker ── */}
