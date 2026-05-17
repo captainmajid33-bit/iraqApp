@@ -2620,6 +2620,17 @@ export function ClinicMap({
     }
   }, [clearRouteVisuals, onClearRoute]);
 
+  // ── Category list visibility & lift offset ───────────────────────────────
+  const isCategoryListVisible =
+    !!activeFilter &&
+    activeFilter !== '__fuel_stations__' &&
+    !routeTarget &&
+    !selectedPlace &&
+    items.filter(i => i.kind === activeFilter && i.status !== 'معطّل').length > 0;
+
+  /** px to add to every floating button when the category list is showing */
+  const LIST_LIFT = isCategoryListVisible ? 148 : 0;
+
   // ── Render ────────────────────────────────────────────────────────────────
   return (
     <div className="relative w-full h-full">
@@ -3053,10 +3064,12 @@ export function ClinicMap({
       )}
 
       {/* ── GTA V GPS Button ── */}
-      {/* bottom shifts up dynamically when Selected Place Panel is visible */}
+      {/* bottom shifts up dynamically when Selected Place or Category List is visible */}
       <div style={{
         position:'absolute',
-        bottom: selectedPlace ? (placeRouteInfo ? '262px' : '208px') : '100px',
+        bottom: selectedPlace
+          ? (placeRouteInfo ? '262px' : '208px')
+          : `${100 + LIST_LIFT}px`,
         left:'20px',
         zIndex:1001,
         display:'flex',flexDirection:'column',alignItems:'center',gap:'8px',
@@ -3166,11 +3179,13 @@ export function ClinicMap({
 
       {/* ── Traffic Toggle Button — hidden when destination sheet is open ── */}
       <div style={{
-        position:'absolute',bottom:'90px',right:'16px',
+        position:'absolute',
+        bottom:`${90 + LIST_LIFT}px`,
+        right:'16px',
         zIndex:1000,display:'flex',flexDirection:'column-reverse',alignItems:'center',gap:'4px',
         opacity: selectedPlace ? 0 : 1,
         pointerEvents: selectedPlace ? 'none' : 'auto',
-        transition: 'opacity 0.25s ease',
+        transition: 'opacity 0.25s ease, bottom 0.32s cubic-bezier(0.4,0,0.2,1)',
       }}>
         <button
           onClick={()=>setShowTraffic(v=>!v)}
@@ -5079,7 +5094,7 @@ export function ClinicMap({
           mapRef={mapRef}
           userLocation={userLocation}
           clearMapForRescue={clearMapForRescue}
-          buttonBottom={showTraffic ? 250 : 172}
+          buttonBottom={(showTraffic ? 250 : 172) + LIST_LIFT}
         />
       )}
 
@@ -5118,6 +5133,7 @@ export function ClinicMap({
           mapRef={mapRef}
           isDay={theme.isDay}
           onUnlock={() => setIsBountyUnlocked(true)}
+          bottomOffset={LIST_LIFT}
         />
       )}
 

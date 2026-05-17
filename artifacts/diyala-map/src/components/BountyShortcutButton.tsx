@@ -58,9 +58,10 @@ type Phase =
   | 'missions';   // Show missions list (reward earned)
 
 interface Props {
-  mapRef:    React.MutableRefObject<L.Map | null>;
-  isDay?:    boolean;
-  onUnlock?: () => void;
+  mapRef:       React.MutableRefObject<L.Map | null>;
+  isDay?:       boolean;
+  onUnlock?:    () => void;
+  bottomOffset?: number;
 }
 
 // ── Colors ──────────────────────────────────────────────────────────────────
@@ -449,7 +450,7 @@ function MissionCard({
 // ════════════════════════════════════════════════════════════════════════════
 // ── Main Component ────────────────────────────────────────────────────────
 // ════════════════════════════════════════════════════════════════════════════
-export function BountyShortcutButton({ mapRef, isDay = false, onUnlock }: Props) {
+export function BountyShortcutButton({ mapRef, isDay = false, onUnlock, bottomOffset = 0 }: Props) {
   const [phase,    setPhase]    = useState<Phase>('idle');
   const [bounties, setBounties] = useState<ActiveBounty[]>([]);
   const [pressed,  setPressed]  = useState(false);
@@ -600,12 +601,13 @@ export function BountyShortcutButton({ mapRef, isDay = false, onUnlock }: Props)
           Wrapper handles position so animation transform doesn't conflict
       ══════════════════════════════════════════════════════════════════════ */}
       <div style={{
-        position:  'absolute',
-        bottom:    '90px',
-        left:      '50%',
-        transform: 'translateX(-50%)',
-        zIndex:    1100,
+        position:   'absolute',
+        bottom:     `${90 + bottomOffset}px`,
+        left:       '50%',
+        transform:  'translateX(-50%)',
+        zIndex:     1100,
         pointerEvents: 'none',
+        transition: 'bottom 0.32s cubic-bezier(0.4,0,0.2,1)',
       }}>
         <button
           onClick={handleFabClick}
