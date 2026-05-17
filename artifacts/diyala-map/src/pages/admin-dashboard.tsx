@@ -3198,6 +3198,11 @@ interface Appt {
   userId?: string;
   slot_time?: string;
   date?: string;
+  isUserArrived?: boolean;
+  arrivalMethod?: string;
+  // Firestore Timestamp or null
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  arrivalTime?: any;
 }
 
 function DoctorCard({
@@ -3237,7 +3242,8 @@ function DoctorCard({
     return unsub;
   }, [open, doctor.id]);
 
-  const totalCommission = appts.length * 2000;
+  const gpsVerifiedAppts = appts.filter((a) => a.isUserArrived === true);
+  const totalCommission  = gpsVerifiedAppts.length * 2000;
 
   return (
     <div style={{
@@ -3344,7 +3350,7 @@ function DoctorCard({
                     background: `${C.green}08`,
                     borderBottom: `1px solid ${C.border}`,
                   }}>
-                    {["#", "اسم الزبون", "معرّف الزبون (UID)", "وقت الحجز", "تاريخ اليوم", "حالة الاستقطاع"].map((h) => (
+                    {["#", "اسم الزبون", "معرّف الزبون (UID)", "وقت الحجز", "تاريخ اليوم", "التحقق الجغرافي / الاستقطاع"].map((h) => (
                       <th key={h} style={{
                         padding: "9px 12px", textAlign: "right",
                         fontSize: "9px", color: C.green,
@@ -3388,17 +3394,44 @@ function DoctorCard({
                         {ap.date ?? "—"}
                       </td>
                       <td style={{ padding: "9px 12px", whiteSpace: "nowrap" }}>
-                        <span style={{
-                          display: "inline-flex", alignItems: "center", gap: "5px",
-                          padding: "3px 10px",
-                          background: "rgba(0,245,212,0.07)",
-                          border: "1px solid rgba(0,245,212,0.25)",
-                          borderRadius: "3px",
-                          fontFamily: "Rajdhani, sans-serif", fontSize: "13px", fontWeight: 600,
-                          color: C.green,
-                        }}>
-                          تم استقطاع 2,000 د.ع بنجاح 🟢
-                        </span>
+                        {ap.isUserArrived ? (
+                          <div style={{ display: "flex", flexDirection: "column", gap: "3px" }}>
+                            <span style={{
+                              display: "inline-flex", alignItems: "center", gap: "5px",
+                              padding: "3px 10px",
+                              background: "rgba(0,245,212,0.10)",
+                              border: "1px solid rgba(0,245,212,0.5)",
+                              borderRadius: "3px",
+                              fontFamily: "Rajdhani, sans-serif", fontSize: "13px", fontWeight: 700,
+                              color: C.green,
+                              boxShadow: "0 0 8px rgba(0,245,212,0.2)",
+                            }}>
+                              مؤكد بالـ GPS 🛰️✅
+                            </span>
+                            {ap.arrivalTime?.toDate && (
+                              <span style={{
+                                fontFamily: "Orbitron, sans-serif", fontSize: "9px",
+                                color: C.dim, letterSpacing: "0.05em", paddingRight: "2px",
+                              }}>
+                                {(ap.arrivalTime.toDate() as Date).toLocaleTimeString("ar-IQ", {
+                                  hour: "2-digit", minute: "2-digit",
+                                })}
+                              </span>
+                            )}
+                          </div>
+                        ) : (
+                          <span style={{
+                            display: "inline-flex", alignItems: "center", gap: "5px",
+                            padding: "3px 10px",
+                            background: "rgba(255,255,255,0.03)",
+                            border: "1px solid rgba(255,255,255,0.10)",
+                            borderRadius: "3px",
+                            fontFamily: "Rajdhani, sans-serif", fontSize: "12px", fontWeight: 500,
+                            color: C.dim,
+                          }}>
+                            حجز مسجل — لم يُرصد حضور جغرافي
+                          </span>
+                        )}
                       </td>
                     </tr>
                   ))}
@@ -3407,25 +3440,52 @@ function DoctorCard({
 
               {/* Summary footer */}
               <div style={{
-                display: "flex", justifyContent: "flex-end", gap: "24px",
-                padding: "10px 18px",
+                display: "flex", flexWrap: "wrap", justifyContent: "flex-end",
+                gap: "20px", padding: "10px 18px",
                 borderTop: `1px solid ${C.border}`,
                 background: `${C.yellow}05`,
+                direction: "rtl",
               }}>
-                <span style={{
-                  fontFamily: "Rajdhani, sans-serif", fontSize: "13px", color: C.dim,
-                }}>إجمالي الحجوزات:</span>
-                <span style={{
-                  fontFamily: "Orbitron, sans-serif", fontSize: "13px",
-                  color: C.blue, fontWeight: 700,
-                }}>{appts.length} حجز</span>
-                <span style={{
-                  fontFamily: "Rajdhani, sans-serif", fontSize: "13px", color: C.dim,
-                }}>إجمالي العمولة:</span>
-                <span style={{
-                  fontFamily: "Orbitron, sans-serif", fontSize: "13px",
-                  color: C.yellow, fontWeight: 700,
-                }}>{totalCommission.toLocaleString()} د.ع</span>
+                {/* Total bookings */}
+                <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                  <span style={{ fontFamily: "Rajdhani, sans-serif", fontSize: "13px", color: C.dim }}>
+                    إجمالي الحجوزات:
+                  </span>
+                  <span style={{ fontFamily: "Orbitron, sans-serif", fontSize: "13px", color: C.blue, fontWeight: 700 }}>
+                    {appts.length} حجز
+                  </span>
+                </div>
+
+                {/* GPS-verified count */}
+                <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                  <span style={{ fontFamily: "Rajdhani, sans-serif", fontSize: "13px", color: C.dim }}>
+                    مؤكد بـ GPS 🛰️:
+                  </span>
+                  <span style={{
+                    fontFamily: "Orbitron, sans-serif", fontSize: "13px", fontWeight: 700,
+                    color: gpsVerifiedAppts.length > 0 ? C.green : C.dim,
+                  }}>
+                    {gpsVerifiedAppts.length} / {appts.length}
+                  </span>
+                </div>
+
+                {/* Guaranteed commission (GPS only) */}
+                <div style={{
+                  display: "flex", alignItems: "center", gap: "6px",
+                  paddingRight: "14px",
+                  borderRight: `2px solid ${C.yellow}44`,
+                }}>
+                  <span style={{ fontFamily: "Rajdhani, sans-serif", fontSize: "13px", color: C.dim }}>
+                    العمولة المضمونة:
+                  </span>
+                  <span style={{
+                    fontFamily: "Orbitron, sans-serif", fontSize: "14px", fontWeight: 700,
+                    color: C.yellow,
+                    textShadow: totalCommission > 0 ? `0 0 10px ${C.yellow}66` : "none",
+                  }}>
+                    {totalCommission.toLocaleString()} د.ع
+                  </span>
+                </div>
               </div>
             </div>
           )}
