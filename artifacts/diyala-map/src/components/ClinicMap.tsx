@@ -2006,57 +2006,10 @@ export function ClinicMap({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   },[]);
 
-  // ── Driver marker icon factory ────────────────────────────────────────────
-  function makeDriverIcon(): L.DivIcon {
-    return L.divIcon({
-      className: '',
-      html: `<div style="width:46px;height:46px;position:relative;display:flex;align-items:center;justify-content:center;">
-        <div style="position:absolute;inset:0;border-radius:50%;background:#f5c518;opacity:0.14;animation:lf-ping 1.8s cubic-bezier(0,0,0.2,1) infinite;"></div>
-        <div style="position:absolute;inset:4px;border-radius:50%;border:2px solid #f5c518;box-shadow:0 0 20px #f5c518,0 0 40px #f5c51866;"></div>
-        <span style="position:relative;z-index:1;font-size:20px;line-height:1;user-select:none;">🚕</span>
-      </div>`,
-      iconSize: [46,46], iconAnchor: [23,23],
-    });
-  }
-
-  // ── Smooth driver marker update (CSS transition via setLatLng) ────────────
-  const updateDriverMarker = useCallback((lat: number, lng: number)=>{
-    if (!mapRef.current) return;
-    if (driverMarkerRef.current) {
-      driverMarkerRef.current.setLatLng([lat, lng]);
-    } else {
-      driverMarkerRef.current = L.marker([lat, lng],{
-        icon: makeDriverIcon(),
-        zIndexOffset: 900,
-      }).addTo(mapRef.current);
-    }
-    // Enable CSS smooth transition on the marker DOM element
-    const el = driverMarkerRef.current.getElement();
-    if (el) el.style.transition = 'transform 0.9s linear';
-    prevDriverPosRef.current = { lat, lng };
-  },[]);
-
-  // ── Online-driver icon (smaller cyan taxi, distinct from active-order marker)
-  function makeOnlineDriverIcon(name: string): L.DivIcon {
-    const label = name ? name.slice(0,6) : '🚕';
-    return L.divIcon({
-      className: '',
-      html: `<div style="position:relative;display:flex;flex-direction:column;align-items:center;gap:2px;">
-        <div style="width:38px;height:38px;position:relative;display:flex;align-items:center;justify-content:center;">
-          <div style="position:absolute;inset:0;border-radius:50%;background:#00d4ff;opacity:0.12;animation:lf-ping 2.2s cubic-bezier(0,0,0.2,1) infinite;"></div>
-          <div style="position:absolute;inset:3px;border-radius:50%;border:1.5px solid #00d4ff;box-shadow:0 0 14px #00d4ff88;"></div>
-          <span style="position:relative;z-index:1;font-size:17px;line-height:1;user-select:none;">🚕</span>
-        </div>
-        <div style="background:rgba(0,212,255,0.18);border:1px solid rgba(0,212,255,0.5);color:#00d4ff;font-family:Rajdhani,sans-serif;font-size:9px;padding:1px 5px;white-space:nowrap;max-width:64px;overflow:hidden;text-overflow:ellipsis;backdrop-filter:blur(4px);">${label}</div>
-      </div>`,
-      iconSize: [38, 58], iconAnchor: [19, 58],
-    });
-  }
-
-  // ── Driver markers are intentionally removed from the public map ─────────
-  // Drivers are only shown via ActiveOrderTracker (Firestore) when an order
-  // reaches status 'accepted'. No polling, no SSE driver_update, no public map
-  // markers. The booking flow still fetches /api/drivers-online for search only.
+  // ── Driver markers are handled exclusively by <ActiveOrderTracker> ──────
+  // ActiveOrderTracker (Firestore) shows a marker only when an order reaches
+  // status 'accepted'/'in_progress'/'driving' for the current user.
+  // No global driver stream, no public map markers, no duplicate icons.
 
   // ── SSE listener for system messages (works even when chat panel is closed) ─
   // Shows a Snackbar notification for any incoming message with isSystemMsg=true,
@@ -2120,20 +2073,24 @@ export function ClinicMap({
       }
       return;
     }
-    if (typeof data.driverLat === 'number' && typeof data.driverLng === 'number') {
+    // Only update driver position state (UI bar) for active statuses.
+    // The Leaflet marker itself is rendered exclusively by <ActiveOrderTracker>
+    // which gates on status ∈ ['accepted','in_progress','driving'] via Firestore.
+    const ACTIVE_STATUSES = new Set(['accepted','in_progress','driving','pending']);
+    if (ACTIVE_STATUSES.has(data.status) &&
+        typeof data.driverLat === 'number' && typeof data.driverLng === 'number') {
       setDriverLat(data.driverLat);
       setDriverLng(data.driverLng);
-      updateDriverMarker(data.driverLat, data.driverLng);
-      // Compute distance & ETA from driver → pickup point
+      // Compute distance & ETA from driver → pickup point (status bar display only)
       const refLat = data.fromLat ?? null;
       const refLng = data.fromLng ?? null;
       if (typeof refLat === 'number' && typeof refLng === 'number') {
         const distKm = haversineKm(data.driverLat, data.driverLng, refLat, refLng);
         setDriverDistKm(distKm);
-        setDriverEtaMin(Math.round(distKm * 2.5)); // ~24 km/h avg urban speed
+        setDriverEtaMin(Math.round(distKm * 2.5));
       }
     }
-  },[updateDriverMarker, stopOrderTracking]);
+  },[stopOrderTracking]);
 
   // ── Poll order status every 3 s ───────────────────────────────────────────
   useEffect(()=>{
