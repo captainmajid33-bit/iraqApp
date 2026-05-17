@@ -34,10 +34,10 @@ function haversineMeters(
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-// ── Helper: today as "YYYY-MM-DD" ─────────────────────────────────────────────
+// ── Helper: today as "DD-MM-YYYY" ─────────────────────────────────────────────
 function todayStr(): string {
   const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  return `${String(d.getDate()).padStart(2, '0')}-${String(d.getMonth() + 1).padStart(2, '0')}-${d.getFullYear()}`;
 }
 
 interface PendingAppt {
