@@ -1785,8 +1785,8 @@ function BountyMissionsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
       mapRef.current = map;
 
       L.tileLayer(
-        'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png',
-        { subdomains: 'abcd', maxZoom: 20, attribution: '© OpenStreetMap © CARTO' },
+        'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+        { subdomains: 'abc', maxZoom: 20, attribution: '© OpenStreetMap contributors' },
       ).addTo(map);
 
       const makeRealIcon = () => L.divIcon({
@@ -2220,6 +2220,122 @@ function BountyMissionsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
           </table>
         </div>
       )}
+
+      {/* ══════════════════════════════════════════════════════════════════
+          ── 🏆 Live Winners Log — يتحدث لحظة بلحظة من Firestore ─────────
+      ══════════════════════════════════════════════════════════════════ */}
+      {(() => {
+        const activePair = pairList.find(p => p.status === 'active');
+        if (!activePair) return null;
+
+        const prizes = [activePair.first_reward, activePair.second_reward, activePair.third_reward];
+        const medals = ['🥇', '🥈', '🥉'];
+        const medalsColor = ['#FFD700', '#C0C0C0', '#CD7F32'];
+        const log: any[] = activePair.winners_log ?? [];
+
+        const fmtTime = (ts: any): string => {
+          if (!ts) return '—';
+          try {
+            const d = typeof ts.toDate === 'function' ? ts.toDate() : new Date(ts);
+            return d.toLocaleTimeString('ar-IQ', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+          } catch { return '—'; }
+        };
+
+        return (
+          <div style={{ marginTop: '28px', border: `1px solid ${C.yellow}33`, borderRadius: '6px', overflow: 'hidden', background: `${C.yellow}05` }}>
+            {/* Header */}
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '11px 16px', background: `${C.yellow}0e`, borderBottom: `1px solid ${C.yellow}22` }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <span style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '10px', color: C.yellow, letterSpacing: '0.15em' }}>
+                  🏆 أسماء الفائزين بـ مهمة ديالى GTA الحالية
+                </span>
+                <span style={{ fontFamily: 'Rajdhani, sans-serif', fontSize: '12px', color: C.dim }}>
+                  — {activePair.sponsor_name}
+                </span>
+              </div>
+              {/* Live pulse */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                <div style={{ width: '7px', height: '7px', borderRadius: '50%', background: C.green, boxShadow: `0 0 8px ${C.green}`, animation: 'lf-ping 1.5s infinite' }} />
+                <span style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '8px', color: C.green, letterSpacing: '0.1em' }}>LIVE</span>
+                <span style={{ fontFamily: 'Rajdhani, sans-serif', fontSize: '12px', color: C.dim, marginRight: '4px' }}>{log.length}/3</span>
+              </div>
+            </div>
+
+            {/* Body */}
+            <div style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+              {log.length === 0 ? (
+                <div style={{ textAlign: 'center', padding: '22px 0', fontFamily: 'Rajdhani, sans-serif', fontSize: '15px', color: C.dim }}>
+                  بانتظار وصول أول فائز للحفاظ على الحماس... ⏱️🔥
+                </div>
+              ) : (
+                [0, 1, 2].map(i => {
+                  const w = log.find((e: any) => e.rank === i + 1);
+                  const color = medalsColor[i];
+                  return (
+                    <div key={i} style={{
+                      display: 'flex', alignItems: 'center', gap: '14px',
+                      padding: '12px 16px',
+                      background: w ? `${color}0c` : 'rgba(255,255,255,0.02)',
+                      border: `1px solid ${w ? color + '44' : 'rgba(255,255,255,0.07)'}`,
+                      borderRadius: '5px',
+                      opacity: w ? 1 : 0.45,
+                      transition: 'all 0.3s',
+                    }}>
+                      {/* Medal */}
+                      <div style={{ fontSize: '26px', lineHeight: 1, minWidth: '32px', textAlign: 'center', filter: w ? 'none' : 'grayscale(1)' }}>
+                        {medals[i]}
+                      </div>
+                      {/* Rank label */}
+                      <div style={{ minWidth: '72px' }}>
+                        <div style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '8px', color: w ? color : C.dim, letterSpacing: '0.1em' }}>
+                          المركز {i === 0 ? 'الأول' : i === 1 ? 'الثاني' : 'الثالث'}
+                        </div>
+                        <div style={{ fontFamily: 'Rajdhani, sans-serif', fontSize: '11px', color: C.dim, marginTop: '2px' }}>
+                          {prizes[i] || '—'}
+                        </div>
+                      </div>
+                      {/* Winner info */}
+                      <div style={{ flex: 1 }}>
+                        {w ? (
+                          <>
+                            <div style={{ fontFamily: 'Rajdhani, sans-serif', fontSize: '17px', fontWeight: 700, color: '#e8f8f5', lineHeight: 1.1 }}>
+                              {w.name || w.uid || 'مجهول'}
+                            </div>
+                            <div style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '8px', color: C.dim, marginTop: '3px', letterSpacing: '0.08em' }}>
+                              ⏱ {fmtTime(w.claimedAt)}
+                            </div>
+                          </>
+                        ) : (
+                          <div style={{ fontFamily: 'Rajdhani, sans-serif', fontSize: '14px', color: 'rgba(255,255,255,0.2)' }}>
+                            في الانتظار...
+                          </div>
+                        )}
+                      </div>
+                      {/* Prize badge */}
+                      {w && (
+                        <div style={{
+                          padding: '5px 12px',
+                          background: `${color}18`,
+                          border: `1px solid ${color}55`,
+                          color: color,
+                          fontFamily: 'Rajdhani, sans-serif',
+                          fontSize: '13px', fontWeight: 700,
+                          borderRadius: '4px',
+                          boxShadow: `0 0 10px ${color}33`,
+                          whiteSpace: 'nowrap',
+                        }}>
+                          {prizes[i] || '🎁'}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        );
+      })()}
+
     </div>
   );
 }
@@ -2289,8 +2405,8 @@ function FuelStationsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
 
       // Voyager: shows all real POIs (mosques, schools, shops, streets) clearly
       L.tileLayer(
-        'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png',
-        { subdomains: 'abcd', maxZoom: 20, attribution: '© OpenStreetMap © CARTO' },
+        'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+        { subdomains: 'abc', maxZoom: 20, attribution: '© OpenStreetMap contributors' },
       ).addTo(map);
 
       // Custom yellow fuel-pin icon
