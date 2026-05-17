@@ -87,7 +87,7 @@ function Btn({ label, color, onClick, full }: { label: string; color: string; on
 }
 
 // ── Location Form ─────────────────────────────────────────────────────────────
-const BLANK = { name: "", category: "clinic", details: "", address: "بعقوبة - ", phone: "077", hours: "9:00 ص - 5:00 م", status: "مفتوح", lat: "33.7451", lng: "44.6488", rating: "" };
+const BLANK = { name: "", category: "clinic", details: "", address: "بعقوبة - ", phone: "077", password: "", hours: "9:00 ص - 5:00 م", status: "مفتوح", lat: "33.7451", lng: "44.6488", rating: "" };
 type FormState = typeof BLANK;
 
 function LocForm({ init, cats, onSave, onCancel }: { init?: Partial<FormState & { id: number; icon_url?: string | null }>; cats: Cat[]; onSave: (d: any) => Promise<void>; onCancel: () => void }) {
@@ -160,6 +160,19 @@ function LocForm({ init, cats, onSave, onCancel }: { init?: Partial<FormState & 
       </div>
       <div style={{ marginBottom: "10px" }}>{row("التفاصيل", "details", "تخصص، وصف...")}</div>
       <div style={{ ...g2, marginBottom: "10px" }}>{row("العنوان", "address")} {row("الهاتف", "phone")}</div>
+      <div style={{ marginBottom: "10px" }}>
+        <label style={LBL}>الرمز السري (password) — لتسجيل دخول تطبيق التاجر 🔑</label>
+        <input
+          style={{ ...FLD, fontFamily: "monospace", letterSpacing: "0.08em" }}
+          type="text"
+          value={f.password}
+          onChange={s("password")}
+          placeholder="مثال: 1234 أو أي رمز نصي"
+          onFocus={ff}
+          onBlur={fb}
+          autoComplete="off"
+        />
+      </div>
       <div style={{ ...g2, marginBottom: "10px" }}>{row("ساعات العمل", "hours")}
         <div><label style={LBL}>الحالة</label>
           <select style={{ ...FLD, cursor: "pointer" }} value={f.status} onChange={s("status")}>
@@ -264,21 +277,46 @@ function MerchantsTab({ cats, toast }: { cats: Cat[]; toast: ReturnType<typeof u
 
   useEffect(() => { load(); }, [load]);
 
+  // ── Write merchant login doc to Firestore after PostgreSQL save ─────────
+  const syncMerchantDoc = async (
+    id: number,
+    d: { phone?: string; password?: string; category?: string; name?: string },
+    overwritePassword: boolean,
+  ) => {
+    const payload: Record<string, string> = {
+      phone:    String(d.phone    ?? '').trim(),
+      category: String(d.category ?? '').toLowerCase().trim(),
+      name:     String(d.name     ?? '').trim(),
+    };
+    if (overwritePassword || (d.password ?? '').trim()) {
+      payload.password = String(d.password ?? '').trim();
+    }
+    await setDoc(doc(db, 'merchants', String(id)), payload, { merge: true });
+  };
+
   const handleAdd = async (d: any) => {
-    const r = await api.post("/api/locations", d);
-    if (r.id) { toast.show("تمت الإضافة بنجاح"); setShowAdd(false); load(); }
-    else toast.show(r.error ?? "فشلت الإضافة", false);
+    const { password, ...apiData } = d;          // strip password — not in SQL schema
+    const r = await api.post("/api/locations", apiData);
+    if (r.id) {
+      try { await syncMerchantDoc(r.id, { ...apiData, password }, true); } catch {}
+      toast.show("تمت الإضافة بنجاح"); setShowAdd(false); load();
+    } else toast.show(r.error ?? "فشلت الإضافة", false);
   };
 
   const handleEdit = async (id: number, d: any) => {
-    const r = await api.patch(`/api/locations/${id}`, d);
-    if (r.id) { toast.show("تم التعديل بنجاح"); setEditId(null); load(); }
-    else toast.show(r.error ?? "فشل التعديل", false);
+    const { password, ...apiData } = d;
+    const r = await api.patch(`/api/locations/${id}`, apiData);
+    if (r.id) {
+      // Only overwrite password in Firestore if admin typed a new one
+      try { await syncMerchantDoc(id, { ...apiData, password }, false); } catch {}
+      toast.show("تم التعديل بنجاح"); setEditId(null); load();
+    } else toast.show(r.error ?? "فشل التعديل", false);
   };
 
   const handleDelete = async (id: number, name: string) => {
     if (!confirm(`حذف "${name}" نهائياً من قاعدة البيانات؟`)) return;
     await api.delete(`/api/locations/${id}`);
+    try { await deleteDoc(doc(db, 'merchants', String(id))); } catch {}
     toast.show("تم الحذف نهائياً"); load();
   };
 
