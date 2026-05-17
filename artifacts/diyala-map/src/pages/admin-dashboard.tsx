@@ -3860,6 +3860,311 @@ function DoctorsBookingsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
   );
 }
 
+// ── Users Radar Tab ───────────────────────────────────────────────────────────
+interface RadarUser {
+  id:         string;
+  name?:      string;
+  phone?:     string;
+  latitude:   number;
+  longitude:  number;
+  last_seen?: { toDate: () => Date } | null;
+}
+
+function UsersRadarTab() {
+  const mapContainer = useRef<HTMLDivElement>(null);
+  const mapRef       = useRef<L.Map | null>(null);
+  const markersRef   = useRef<Map<string, L.Marker>>(new Map());
+  const [users,   setUsers]   = useState<RadarUser[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [count,   setCount]   = useState(0);
+
+  // ── Stream users from Firestore ──────────────────────────────────────────
+  useEffect(() => {
+    const unsub = onSnapshot(
+      collection(db, 'users'),
+      snap => {
+        const rows: RadarUser[] = [];
+        snap.forEach(d => {
+          const data = d.data() as Record<string, unknown>;
+          if (typeof data.latitude === 'number' && typeof data.longitude === 'number') {
+            rows.push({
+              id:        d.id,
+              name:      (data.name || data.displayName || data.userName || '—') as string,
+              phone:     (data.phone || data.phoneNumber || '—') as string,
+              latitude:  data.latitude,
+              longitude: data.longitude,
+              last_seen: data.last_seen as RadarUser['last_seen'],
+            });
+          }
+        });
+        setUsers(rows);
+        setCount(rows.length);
+        setLoading(false);
+      },
+      err => { console.error('[UsersRadarTab]', err); setLoading(false); }
+    );
+    return unsub;
+  }, []);
+
+  // ── Init Leaflet map once ────────────────────────────────────────────────
+  useEffect(() => {
+    if (!mapContainer.current || mapRef.current) return;
+    const map = L.map(mapContainer.current, {
+      center: [33.7451, 44.6488], zoom: 11, zoomControl: true,
+    });
+    L.tileLayer(
+      'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+      { attribution: '©OpenStreetMap ©CartoDB', subdomains: 'abcd', maxZoom: 19 }
+    ).addTo(map);
+    mapRef.current = map;
+    return () => { map.remove(); mapRef.current = null; };
+  }, []);
+
+  // ── Sync markers whenever users list changes ─────────────────────────────
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    const currentIds = new Set(users.map(u => u.id));
+    // Remove stale markers
+    markersRef.current.forEach((m, id) => {
+      if (!currentIds.has(id)) { m.remove(); markersRef.current.delete(id); }
+    });
+    // Add / update
+    users.forEach(u => {
+      const existing = markersRef.current.get(u.id);
+      if (existing) {
+        existing.setLatLng([u.latitude, u.longitude]);
+        return;
+      }
+      const icon = L.divIcon({
+        className: '',
+        html: `<div style="display:flex;flex-direction:column;align-items:center;gap:2px">
+          <div style="position:absolute;inset:-6px;border-radius:50%;border:2px solid #00d4ff;opacity:0.4;animation:lf-ping 2s cubic-bezier(0,0,0.2,1) infinite"></div>
+          <div style="width:30px;height:30px;border-radius:50%;background:rgba(0,212,255,0.15);
+            border:2px solid #00d4ff;display:flex;align-items:center;justify-content:center;
+            box-shadow:0 0 14px #00d4ff66;position:relative;z-index:1;font-size:14px">👤</div>
+        </div>`,
+        iconSize: [30, 38], iconAnchor: [15, 38],
+      });
+      const popup = `
+        <div style="background:#0d1117;padding:10px 13px;direction:rtl;min-width:160px;
+          border:1px solid #00d4ff33;border-radius:4px">
+          <div style="font-family:Orbitron,sans-serif;font-size:9px;color:#00d4ff88;
+            letter-spacing:0.1em;margin-bottom:4px">USER · ${u.id.slice(0,8)}</div>
+          <div style="font-family:Rajdhani,sans-serif;font-size:15px;font-weight:700;
+            color:#e8f8ff;margin-bottom:2px">${u.name}</div>
+          <div style="font-family:monospace;font-size:12px;color:#00d4ff99">${u.phone}</div>
+          <div style="font-family:monospace;font-size:10px;color:#ffffff33;margin-top:4px">
+            ${u.latitude.toFixed(6)}, ${u.longitude.toFixed(6)}</div>
+        </div>`;
+      const m = L.marker([u.latitude, u.longitude], { icon })
+        .addTo(map)
+        .bindPopup(popup, { closeButton: false, offset: [0, -10] });
+      markersRef.current.set(u.id, m);
+    });
+  }, [users]);
+
+  // ── Fly to user on map ───────────────────────────────────────────────────
+  const flyTo = (u: RadarUser) => {
+    mapRef.current?.flyTo([u.latitude, u.longitude], 16, { animate: true, duration: 1.0 });
+    setTimeout(() => markersRef.current.get(u.id)?.openPopup(), 1100);
+  };
+
+  const fmtLastSeen = (ts: RadarUser['last_seen']) => {
+    if (!ts?.toDate) return '—';
+    try {
+      const d = ts.toDate();
+      return d.toLocaleDateString('ar-IQ') + ' · ' +
+             d.toLocaleTimeString('ar-IQ', { hour: '2-digit', minute: '2-digit' });
+    } catch { return '—'; }
+  };
+
+  return (
+    <div>
+      {/* ── Header ── */}
+      <div style={{ marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '14px', flexWrap: 'wrap' }}>
+        <div>
+          <div style={{
+            fontFamily: 'Orbitron, sans-serif', fontSize: '10px',
+            color: C.blue, letterSpacing: '0.15em', marginBottom: '3px',
+          }}>📡 USERS RADAR — رادار المستخدمين</div>
+          <div style={{
+            fontFamily: 'Rajdhani, sans-serif', fontSize: '14px', color: C.dim,
+          }}>مواقع المستخدمين اللايف على الخريطة — يتحدث تلقائياً عبر Firestore</div>
+        </div>
+        <div style={{ marginRight: 'auto', display: 'flex', alignItems: 'center', gap: '8px' }}>
+          {/* Live counter */}
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: '8px',
+            padding: '8px 16px',
+            background: `${C.blue}10`, border: `1px solid ${C.blue}33`, borderRadius: '4px',
+          }}>
+            <div style={{
+              width: '8px', height: '8px', borderRadius: '50%',
+              background: C.blue, boxShadow: `0 0 8px ${C.blue}`,
+              animation: 'lf-ping 2s cubic-bezier(0,0,0.2,1) infinite',
+            }} />
+            <span style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '18px', fontWeight: 700, color: C.blue }}>
+              {count}
+            </span>
+            <span style={{ fontFamily: 'Rajdhani, sans-serif', fontSize: '12px', color: C.dim }}>
+              مستخدم نشط
+            </span>
+          </div>
+        </div>
+      </div>
+
+      {/* ── Map ── */}
+      <div style={{
+        border: `1px solid ${C.blue}33`,
+        borderRadius: '6px', overflow: 'hidden', marginBottom: '18px',
+        boxShadow: `0 0 24px ${C.blue}12`,
+        position: 'relative',
+      }}>
+        {loading && (
+          <div style={{
+            position: 'absolute', inset: 0, zIndex: 500,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            background: 'rgba(5,8,15,0.7)', backdropFilter: 'blur(4px)',
+          }}>
+            <div style={{
+              width: '32px', height: '32px',
+              border: `2px solid ${C.blue}22`,
+              borderTop: `2px solid ${C.blue}`,
+              borderRadius: '50%', animation: 'spin 0.9s linear infinite',
+            }} />
+          </div>
+        )}
+        <div ref={mapContainer} style={{ height: '440px', width: '100%' }} />
+      </div>
+
+      {/* ── Users Table ── */}
+      <div style={{
+        border: `1px solid ${C.border}`, borderRadius: '6px', overflow: 'hidden',
+      }}>
+        {/* Table header */}
+        <div style={{
+          padding: '10px 16px',
+          background: C.surface,
+          borderBottom: `1px solid ${C.border}`,
+          display: 'flex', alignItems: 'center', gap: '10px',
+        }}>
+          <span style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '9px', color: C.blue, letterSpacing: '0.12em' }}>
+            USER LIST · {count} RECORD{count !== 1 ? 'S' : ''}
+          </span>
+        </div>
+
+        {users.length === 0 && !loading ? (
+          <div style={{
+            padding: '32px', textAlign: 'center',
+            fontFamily: 'Rajdhani, sans-serif', fontSize: '14px', color: C.dim,
+          }}>
+            لا يوجد مستخدمون مع بيانات موقع مُفعَّلة بعد
+          </div>
+        ) : (
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontFamily: 'Rajdhani, sans-serif' }}>
+              <thead>
+                <tr style={{ background: `${C.blue}07`, borderBottom: `1px solid ${C.border}` }}>
+                  {['#', 'الاسم', 'الهاتف', 'الإحداثيات', 'آخر ظهور', 'الإجراءات'].map(h => (
+                    <th key={h} style={{
+                      padding: '8px 12px', textAlign: 'right',
+                      fontFamily: 'Orbitron, sans-serif', fontSize: '8px',
+                      color: C.blue, letterSpacing: '0.1em', fontWeight: 700,
+                      whiteSpace: 'nowrap',
+                    }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {users.map((u, i) => (
+                  <tr key={u.id} style={{
+                    borderBottom: `1px solid ${C.border}`,
+                    transition: 'background 0.15s',
+                  }}
+                  onMouseEnter={e => (e.currentTarget.style.background = `${C.blue}06`)}
+                  onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                  >
+                    {/* # */}
+                    <td style={{ padding: '10px 12px', color: C.dim, fontSize: '12px',
+                      fontFamily: 'Orbitron, sans-serif' }}>
+                      {String(i + 1).padStart(2, '0')}
+                    </td>
+                    {/* Name */}
+                    <td style={{ padding: '10px 12px' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <div style={{
+                          width: '28px', height: '28px', borderRadius: '50%', flexShrink: 0,
+                          background: `${C.blue}12`, border: `1px solid ${C.blue}33`,
+                          display: 'flex', alignItems: 'center', justifyContent: 'center',
+                          fontSize: '13px',
+                        }}>👤</div>
+                        <span style={{ fontSize: '14px', fontWeight: 600, color: C.text }}>
+                          {u.name}
+                        </span>
+                      </div>
+                    </td>
+                    {/* Phone */}
+                    <td style={{ padding: '10px 12px', color: C.green, fontFamily: 'monospace', fontSize: '13px' }}>
+                      {u.phone}
+                    </td>
+                    {/* Coords */}
+                    <td style={{ padding: '10px 12px', fontFamily: 'monospace', fontSize: '11px', color: C.dim, whiteSpace: 'nowrap' }}>
+                      {u.latitude.toFixed(5)}, {u.longitude.toFixed(5)}
+                    </td>
+                    {/* Last seen */}
+                    <td style={{ padding: '10px 12px', fontSize: '12px', color: C.dim, whiteSpace: 'nowrap' }}>
+                      {fmtLastSeen(u.last_seen)}
+                    </td>
+                    {/* Actions */}
+                    <td style={{ padding: '10px 12px' }}>
+                      <div style={{ display: 'flex', gap: '6px', flexWrap: 'nowrap' }}>
+                        {/* Locate on map */}
+                        <button
+                          onClick={() => flyTo(u)}
+                          title="تحديد الموقع على الخريطة"
+                          style={{
+                            padding: '5px 10px', cursor: 'pointer', whiteSpace: 'nowrap',
+                            background: `${C.blue}12`, border: `1px solid ${C.blue}40`,
+                            color: C.blue, borderRadius: '3px',
+                            fontFamily: 'Orbitron, sans-serif', fontSize: '8px', letterSpacing: '0.06em',
+                            transition: 'all 0.18s',
+                          }}
+                          onMouseEnter={e => (e.currentTarget.style.background = `${C.blue}22`)}
+                          onMouseLeave={e => (e.currentTarget.style.background = `${C.blue}12`)}
+                        >📍 تحديد</button>
+                        {/* External Google Maps */}
+                        <a
+                          href={`https://www.google.com/maps/search/?api=1&query=${u.latitude},${u.longitude}`}
+                          target="_blank"
+                          rel="noreferrer"
+                          title="فتح في خرائط غوغل الخارجية"
+                          style={{
+                            padding: '5px 10px', cursor: 'pointer', whiteSpace: 'nowrap',
+                            background: `${C.green}10`, border: `1px solid ${C.green}35`,
+                            color: C.green, borderRadius: '3px',
+                            fontFamily: 'Orbitron, sans-serif', fontSize: '8px', letterSpacing: '0.06em',
+                            textDecoration: 'none', display: 'inline-flex', alignItems: 'center',
+                            transition: 'all 0.18s',
+                          }}
+                          onMouseEnter={e => ((e.currentTarget as HTMLElement).style.background = `${C.green}1e`)}
+                          onMouseLeave={e => ((e.currentTarget as HTMLElement).style.background = `${C.green}10`)}
+                        >🚗 توجيه</a>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      <style>{`@keyframes lf-ping{0%{transform:scale(1);opacity:0.7}70%{transform:scale(2.2);opacity:0}100%{transform:scale(2.2);opacity:0}}`}</style>
+    </div>
+  );
+}
+
 // ── Services Settings Tab ─────────────────────────────────────────────────────
 function ServicesSettingsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
   const [isTaxiActive, setIsTaxiActive] = useState<boolean | null>(null);
@@ -4102,7 +4407,7 @@ function ServicesSettingsTab({ toast }: { toast: ReturnType<typeof useToast> }) 
 // ── Admin Dashboard ───────────────────────────────────────────────────────────
 export function AdminDashboard() {
   const [, navigate] = useLocation();
-  const [tab, setTab] = useState<"merchants" | "map" | "categories" | "settings" | "taxi" | "drivers" | "fuel" | "bounty" | "users" | "doctors_bookings" | "services_settings">("merchants");
+  const [tab, setTab] = useState<"merchants" | "map" | "categories" | "settings" | "taxi" | "drivers" | "fuel" | "bounty" | "users" | "users_radar" | "doctors_bookings" | "services_settings">("merchants");
   const [cats, setCats] = useState<Cat[]>([]);
   const [authChecked, setAuthChecked] = useState(false);
   const toast = useToast();
@@ -4146,6 +4451,7 @@ export function AdminDashboard() {
     { key: "fuel"       as const, en: "FUEL",        ar: "⛽ محطات الوقود" },
     { key: "bounty"     as const, en: "BOUNTY",      ar: "⭐ المهمات والجوائز" },
     { key: "users"            as const, en: "USERS",           ar: "👥 المستخدمون" },
+    { key: "users_radar"      as const, en: "USERS RADAR",     ar: "📡 رادار المستخدمين" },
     { key: "doctors_bookings"   as const, en: "DOCTORS BOOKINGS",  ar: "🏥 حجوزات الأطباء" },
     { key: "services_settings" as const, en: "SERVICES SETTINGS", ar: "⚙️ إعدادات الخدمات" },
     { key: "settings"          as const, en: "SETTINGS",          ar: "الإعدادات" },
@@ -4200,6 +4506,7 @@ export function AdminDashboard() {
         {tab === "fuel"       && <FuelStationsTab toast={toast} />}
         {tab === "bounty"     && <BountyMissionsTab toast={toast} />}
         {tab === "users"            && <UsersTab toast={toast} />}
+        {tab === "users_radar"      && <UsersRadarTab />}
         {tab === "doctors_bookings"   && <DoctorsBookingsTab toast={toast} />}
         {tab === "services_settings"  && <ServicesSettingsTab toast={toast} />}
         {tab === "settings"           && <SettingsTab toast={toast} />}
