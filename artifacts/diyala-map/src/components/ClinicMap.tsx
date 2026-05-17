@@ -602,6 +602,40 @@ export function ClinicMap({
   // ── Doctor Geo-Fence: silent background arrival detection ────────────────
   useDoctorGeofence(userLocationRef);
 
+  // ── User Presence Tracker — mirrors AppLifecycleState.resumed / paused ──
+  // Equivalent of Flutter WidgetsBindingObserver for web:
+  //   visible  → isOnline: true   (app foregrounded / tab active)
+  //   hidden   → isOnline: false  (app backgrounded / tab hidden / closed)
+  useEffect(() => {
+    const syncPresence = (online: boolean) => {
+      const uid = auth.currentUser?.uid;
+      if (!uid) return;
+      setDoc(
+        doc(db, 'users', uid),
+        { isOnline: online, last_seen: serverTimestamp() },
+        { merge: true },
+      ).catch(() => {/* silent */});
+    };
+
+    // Mark online immediately on mount (resumed)
+    syncPresence(true);
+
+    // visibilitychange covers tab switch, minimize, and most closures
+    const onVisibility = () => syncPresence(!document.hidden);
+    document.addEventListener('visibilitychange', onVisibility);
+
+    // beforeunload — best-effort for browser/tab close
+    const onUnload = () => syncPresence(false);
+    window.addEventListener('beforeunload', onUnload);
+
+    return () => {
+      // Mark offline on component unmount
+      syncPresence(false);
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('beforeunload', onUnload);
+    };
+  }, []); // runs once; auth.currentUser resolved by the time map mounts
+
   // ── Rating dialog (auto-opens when ride finishes) ─────────────────────────
   const [showRating,        setShowRating]        = useState(false);
   const [ratingOrderId,     setRatingOrderId]     = useState<number>(0);
