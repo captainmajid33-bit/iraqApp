@@ -1,8 +1,8 @@
 import { useState, useEffect, useCallback } from 'react';
 import {
   collection, query, where, onSnapshot,
-  addDoc, serverTimestamp, getDoc, doc,
-  getDocs, limit,
+  serverTimestamp, getDoc, doc,
+  getDocs, limit, runTransaction,
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { getUserFromStorage } from '@/components/UserLoginOverlay';
@@ -56,7 +56,7 @@ export function DoctorBookingModal({ doctorId, doctorName, onClose }: Props) {
   const [availableSlots, setAvailableSlots] = useState<SlotEntry[]>([]);
   const [slotsLoading,   setSlotsLoading]   = useState(true);
   const [selected,       setSelected]       = useState<string | null>(null);
-  const [phase,          setPhase]          = useState<'checking' | 'insufficient' | 'already_booked' | 'slots' | 'confirming' | 'success'>('checking');
+  const [phase,          setPhase]          = useState<'checking' | 'insufficient' | 'already_booked' | 'slots' | 'cost_confirm' | 'confirming' | 'success'>('checking');
   const [errMsg,         setErrMsg]         = useState('');
   const [userBalance,    setUserBalance]    = useState<number>(0);
 
@@ -135,19 +135,49 @@ export function DoctorBookingModal({ doctorId, doctorName, onClose }: Props) {
     return unsub;
   }, [doctorId, today, phase]);
 
-  // ── Confirm booking ────────────────────────────────────────────────────────
-  const confirmBooking = useCallback(async () => {
+  // ── Open cost-confirm dialog when user taps "تأكيد الحجز" ─────────────────
+  const requestConfirm = useCallback(() => {
+    if (!selected) return;
+    setErrMsg('');
+    setPhase('cost_confirm');
+  }, [selected]);
+
+  // ── Run transaction: deduct balance + create appointment ──────────────────
+  const executeBooking = useCallback(async () => {
     if (!selected) return;
     setPhase('confirming');
     setErrMsg('');
     try {
-      await addDoc(
-        collection(db, 'doctors', String(doctorId), 'appointments'),
-        { slot_time: selected, userId, userName, date: today, createdAt: serverTimestamp() },
-      );
+      const userRef  = doc(db, 'users', userId);
+      const apptCol  = collection(db, 'doctors', String(doctorId), 'appointments');
+
+      await runTransaction(db, async (txn) => {
+        const userSnap = await txn.get(userRef);
+        const bal = userSnap.exists() ? (Number(userSnap.data()?.balance) || 0) : 0;
+        if (bal < MIN_BALANCE) throw new Error('INSUFFICIENT');
+
+        // Deduct 2000 from balance
+        txn.update(userRef, { balance: bal - MIN_BALANCE });
+
+        // Create appointment document
+        const newApptRef = doc(apptCol);
+        txn.set(newApptRef, {
+          slot_time:  selected,
+          userId,
+          userName,
+          date:       today,
+          createdAt:  serverTimestamp(),
+        });
+      });
+
       setPhase('success');
-    } catch {
-      setErrMsg('فشل الحجز، يرجى المحاولة مرة أخرى.');
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : '';
+      if (msg === 'INSUFFICIENT') {
+        setErrMsg('رصيدك غير كافٍ!');
+      } else {
+        setErrMsg('فشل الحجز، يرجى المحاولة مرة أخرى.');
+      }
       setPhase('slots');
     }
   }, [selected, doctorId, userId, userName, today]);
@@ -207,6 +237,13 @@ export function DoctorBookingModal({ doctorId, doctorName, onClose }: Props) {
         {phase === 'checking'      && <CheckingView />}
         {phase === 'insufficient'  && <InsufficientView balance={userBalance} onClose={onClose} />}
         {phase === 'already_booked'&& <AlreadyBookedView onClose={onClose} />}
+        {phase === 'cost_confirm'  && (
+          <CostConfirmView
+            label={selectedLabel}
+            onConfirm={executeBooking}
+            onCancel={() => setPhase('slots')}
+          />
+        )}
         {phase === 'success'       && <SuccessView label={selectedLabel} onClose={onClose} />}
 
         {(phase === 'slots' || phase === 'confirming') && (
@@ -312,7 +349,7 @@ export function DoctorBookingModal({ doctorId, doctorName, onClose }: Props) {
             {/* Confirm button */}
             {availableSlots.length > 0 && !slotsLoading && (
               <button
-                onClick={confirmBooking}
+                onClick={requestConfirm}
                 disabled={!selected || phase === 'confirming'}
                 style={{
                   width: '100%', padding: '14px',
@@ -443,6 +480,89 @@ function InsufficientView({ balance, onClose }: { balance: number; onClose: () =
   );
 }
 
+// ── Cost-confirm dialog ─────────────────────────────────────────────────────
+function CostConfirmView({
+  label, onConfirm, onCancel,
+}: { label: string; onConfirm: () => void; onCancel: () => void }) {
+  return (
+    <div style={{ padding: '28px 22px', direction: 'rtl' }}>
+
+      {/* Warning icon */}
+      <div style={{
+        width: '64px', height: '64px', borderRadius: '50%',
+        background: 'rgba(245,197,24,0.1)',
+        border: '2px solid rgba(245,197,24,0.55)',
+        boxShadow: '0 0 28px rgba(245,197,24,0.2)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        margin: '0 auto 18px', fontSize: '28px',
+      }}>💳</div>
+
+      {/* Title */}
+      <div style={{
+        fontFamily: 'Orbitron, sans-serif', fontSize: '10px',
+        color: '#f5c518', letterSpacing: '0.15em',
+        textAlign: 'center', marginBottom: '14px',
+        textShadow: '0 0 10px rgba(245,197,24,0.4)',
+      }}>تنبيه — استقطاع من المحفظة</div>
+
+      {/* Body */}
+      <div style={{
+        background: 'rgba(245,197,24,0.06)',
+        border: '1px solid rgba(245,197,24,0.22)',
+        borderRadius: '6px',
+        padding: '14px 16px',
+        marginBottom: '22px',
+        fontFamily: 'Rajdhani, sans-serif', fontSize: '15px', fontWeight: 500,
+        color: 'rgba(255,255,255,0.85)', lineHeight: 1.8, textAlign: 'center',
+      }}>
+        سيتم استقطاع{' '}
+        <span style={{ color: '#f5c518', fontWeight: 700, fontSize: '17px' }}>2,000 دينار عراقي</span>
+        {' '}من محفظتك لتأكيد موعدك بالساعة{' '}
+        <span style={{ color: '#00f5d4', fontWeight: 700 }}>{label}</span>.
+        <br/>
+        <span style={{ fontSize: '13px', color: 'rgba(255,255,255,0.45)' }}>
+          هل تريد الاستمرار؟
+        </span>
+      </div>
+
+      {/* Divider */}
+      <div style={{ height: '1px', background: 'rgba(255,255,255,0.07)', marginBottom: '18px' }} />
+
+      {/* Buttons */}
+      <div style={{ display: 'flex', gap: '10px' }}>
+        <button
+          onClick={onCancel}
+          style={{
+            flex: 1, padding: '13px',
+            fontFamily: 'Orbitron, sans-serif', fontSize: '10px', letterSpacing: '0.13em',
+            background: 'rgba(255,45,120,0.08)', border: '1.5px solid rgba(255,45,120,0.4)',
+            color: 'rgba(255,45,120,0.8)', borderRadius: '5px', cursor: 'pointer',
+            transition: 'background 0.2s',
+          }}
+          onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,45,120,0.16)')}
+          onMouseLeave={e => (e.currentTarget.style.background = 'rgba(255,45,120,0.08)')}
+        >إلغاء</button>
+
+        <button
+          onClick={onConfirm}
+          style={{
+            flex: 2, padding: '13px',
+            fontFamily: 'Orbitron, sans-serif', fontSize: '10px', letterSpacing: '0.13em',
+            background: 'linear-gradient(135deg,rgba(0,245,212,0.22),rgba(0,245,212,0.08))',
+            border: '2px solid #00f5d4',
+            color: '#00f5d4', borderRadius: '5px', cursor: 'pointer',
+            boxShadow: '0 0 18px rgba(0,245,212,0.25)',
+            transition: 'background 0.2s',
+          }}
+          onMouseEnter={e => (e.currentTarget.style.background = 'rgba(0,245,212,0.28)')}
+          onMouseLeave={e => (e.currentTarget.style.background = 'linear-gradient(135deg,rgba(0,245,212,0.22),rgba(0,245,212,0.08))')}
+        >نعم، استمر</button>
+      </div>
+
+    </div>
+  );
+}
+
 // ── Already booked dialog ───────────────────────────────────────────────────
 function AlreadyBookedView({ onClose }: { onClose: () => void }) {
   return (
@@ -506,20 +626,49 @@ function SuccessView({ label, onClose }: { label: string; onClose: () => void })
   return (
     <div style={{ padding: '32px 24px', textAlign: 'center', direction: 'rtl' }}>
       <div style={{ fontSize: '52px', marginBottom: '14px' }}>✅</div>
+
       <div style={{
         fontFamily: 'Rajdhani, sans-serif', fontSize: '20px', fontWeight: 700,
-        color: '#00f5d4', marginBottom: '10px', lineHeight: 1.5,
+        color: '#00f5d4', marginBottom: '12px', lineHeight: 1.6,
       }}>
-        تم الحجز، حجزك بالساعة {label}
+        تم الحجز بنجاح!
         <br/>
-        لا تتأخر على الموعد
+        حجزك بالساعة{' '}
+        <span style={{ color: '#fff', fontWeight: 800 }}>{label}</span>
+        <br/>
+        لا تتأخر على الموعد 🏥
       </div>
+
+      {/* Deduction badge */}
+      <div style={{
+        display: 'inline-flex', alignItems: 'center', gap: '8px',
+        padding: '8px 18px',
+        background: 'rgba(245,197,24,0.07)',
+        border: '1px solid rgba(245,197,24,0.3)',
+        borderRadius: '4px',
+        marginBottom: '20px',
+      }}>
+        <span style={{
+          fontFamily: 'Rajdhani, sans-serif', fontSize: '13px',
+          color: 'rgba(255,255,255,0.5)',
+        }}>تم استقطاع</span>
+        <span style={{
+          fontFamily: 'Orbitron, sans-serif', fontSize: '13px', fontWeight: 700,
+          color: '#f5c518',
+        }}>2,000 د.ع</span>
+        <span style={{
+          fontFamily: 'Rajdhani, sans-serif', fontSize: '13px',
+          color: 'rgba(255,255,255,0.5)',
+        }}>من محفظتك</span>
+      </div>
+
       <div style={{
         fontFamily: 'Orbitron, sans-serif', fontSize: '8px',
         color: 'rgba(0,245,212,0.4)', letterSpacing: '0.14em', marginBottom: '26px',
       }}>
         APPOINTMENT CONFIRMED · DIYALA HEALTH SYSTEM
       </div>
+
       <button onClick={onClose} style={{
         padding: '12px 44px',
         fontFamily: 'Orbitron, sans-serif', fontSize: '10px', letterSpacing: '0.15em',
