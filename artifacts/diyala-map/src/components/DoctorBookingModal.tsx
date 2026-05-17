@@ -6,24 +6,38 @@ import {
 import { db } from '@/lib/firebase';
 import { getUserFromStorage } from '@/components/UserLoginOverlay';
 
-// ── Time slots 3:00 PM → 9:00 PM every 30 min ─────────────────────────────
-const SLOTS = [
-  { key: '15:00', label: '3:00 م' },
-  { key: '15:30', label: '3:30 م' },
-  { key: '16:00', label: '4:00 م' },
-  { key: '16:30', label: '4:30 م' },
-  { key: '17:00', label: '5:00 م' },
-  { key: '17:30', label: '5:30 م' },
-  { key: '18:00', label: '6:00 م' },
-  { key: '18:30', label: '6:30 م' },
-  { key: '19:00', label: '7:00 م' },
-  { key: '19:30', label: '7:30 م' },
-  { key: '20:00', label: '8:00 م' },
-  { key: '20:30', label: '8:30 م' },
-  { key: '21:00', label: '9:00 م' },
-];
-
 const MIN_BALANCE = 2000;
+
+// ── Convert 24h key → Arabic label ──────────────────────────────────────────
+function keyToLabel(key: string): string {
+  const [hStr, mStr] = key.split(':');
+  const h = parseInt(hStr, 10);
+  const m = parseInt(mStr || '0', 10);
+  const period = h < 12 ? 'ص' : 'م';
+  const h12    = h === 0 ? 12 : h > 12 ? h - 12 : h;
+  return `${h12}:${String(m).padStart(2, '0')} ${period}`;
+}
+
+// ── Normalize a raw slot entry → { key, label } ───────────────────────────
+interface SlotEntry { key: string; label: string; }
+
+function normalizeSlots(raw: unknown): SlotEntry[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((s: unknown) => {
+      if (typeof s === 'string' && s.trim()) {
+        return { key: s.trim(), label: keyToLabel(s.trim()) };
+      }
+      if (s && typeof s === 'object') {
+        const obj = s as Record<string, unknown>;
+        const key = String(obj.key ?? obj.time ?? obj.slot ?? '').trim();
+        const label = String(obj.label ?? obj.name ?? '').trim() || keyToLabel(key);
+        if (key) return { key, label };
+      }
+      return null;
+    })
+    .filter((x): x is SlotEntry => x !== null);
+}
 
 function todayStr() {
   const d = new Date();
@@ -37,23 +51,24 @@ interface Props {
 }
 
 export function DoctorBookingModal({ doctorId, doctorName, onClose }: Props) {
-  const [bookedSlots, setBookedSlots] = useState<Set<string>>(new Set());
-  const [selected,    setSelected]    = useState<string | null>(null);
-  const [phase,       setPhase]       = useState<'checking' | 'insufficient' | 'slots' | 'confirming' | 'success'>('checking');
-  const [errMsg,      setErrMsg]      = useState('');
-  const [userBalance, setUserBalance] = useState<number>(0);
+  const [bookedSlots,    setBookedSlots]    = useState<Set<string>>(new Set());
+  const [availableSlots, setAvailableSlots] = useState<SlotEntry[]>([]);
+  const [slotsLoading,   setSlotsLoading]   = useState(true);
+  const [selected,       setSelected]       = useState<string | null>(null);
+  const [phase,          setPhase]          = useState<'checking' | 'insufficient' | 'slots' | 'confirming' | 'success'>('checking');
+  const [errMsg,         setErrMsg]         = useState('');
+  const [userBalance,    setUserBalance]    = useState<number>(0);
 
   const today    = todayStr();
   const user     = getUserFromStorage();
   const userId   = user?.uid  ?? 'anonymous';
   const userName = user?.name ?? 'زبون';
 
-  // ── Step 1: Check balance before showing slots ────────────────────────────
+  // ── Step 1: Check balance ─────────────────────────────────────────────────
   useEffect(() => {
     let cancelled = false;
     async function checkBalance() {
       if (!userId || userId === 'anonymous') {
-        // Not logged in — treat as zero balance
         if (!cancelled) setPhase('insufficient');
         return;
       }
@@ -64,14 +79,35 @@ export function DoctorBookingModal({ doctorId, doctorName, onClose }: Props) {
         setUserBalance(bal);
         setPhase(bal >= MIN_BALANCE ? 'slots' : 'insufficient');
       } catch {
-        if (!cancelled) setPhase('slots'); // On error, allow booking (fail-open)
+        if (!cancelled) setPhase('slots');
       }
     }
     checkBalance();
     return () => { cancelled = true; };
   }, [userId]);
 
-  // ── Step 2: Real-time listener — today's booked slots (only when allowed) ─
+  // ── Step 2: Fetch available_slots from merchants/{doctorId} ───────────────
+  useEffect(() => {
+    if (phase !== 'slots' && phase !== 'confirming' && phase !== 'success') return;
+    let cancelled = false;
+    async function fetchSlots() {
+      setSlotsLoading(true);
+      try {
+        const snap = await getDoc(doc(db, 'merchants', String(doctorId)));
+        if (cancelled) return;
+        const raw = snap.exists() ? snap.data()?.available_slots : undefined;
+        setAvailableSlots(normalizeSlots(raw));
+      } catch {
+        if (!cancelled) setAvailableSlots([]);
+      } finally {
+        if (!cancelled) setSlotsLoading(false);
+      }
+    }
+    fetchSlots();
+    return () => { cancelled = true; };
+  }, [doctorId, phase]);
+
+  // ── Step 3: Real-time listener — today's booked appointments ─────────────
   useEffect(() => {
     if (phase !== 'slots' && phase !== 'confirming' && phase !== 'success') return;
     const colRef = collection(db, 'doctors', String(doctorId), 'appointments');
@@ -101,7 +137,7 @@ export function DoctorBookingModal({ doctorId, doctorName, onClose }: Props) {
     }
   }, [selected, doctorId, userId, userName, today]);
 
-  const selectedLabel = SLOTS.find(s => s.key === selected)?.label ?? selected ?? '';
+  const selectedLabel = availableSlots.find(s => s.key === selected)?.label ?? selected ?? '';
 
   return (
     <div style={{
@@ -153,9 +189,10 @@ export function DoctorBookingModal({ doctorId, doctorName, onClose }: Props) {
         </div>
 
         {/* ── Content ── */}
-        {phase === 'checking'      && <CheckingView />}
-        {phase === 'insufficient'  && <InsufficientView balance={userBalance} onClose={onClose} />}
-        {phase === 'success'       && <SuccessView label={selectedLabel} onClose={onClose} />}
+        {phase === 'checking'     && <CheckingView />}
+        {phase === 'insufficient' && <InsufficientView balance={userBalance} onClose={onClose} />}
+        {phase === 'success'      && <SuccessView label={selectedLabel} onClose={onClose} />}
+
         {(phase === 'slots' || phase === 'confirming') && (
           <div style={{ padding: '18px' }}>
 
@@ -164,56 +201,89 @@ export function DoctorBookingModal({ doctorId, doctorName, onClose }: Props) {
               fontFamily: 'Rajdhani, sans-serif', fontSize: '13px',
               color: 'rgba(255,255,255,0.45)', marginBottom: '14px',
             }}>
-              الأوقات المتاحة ليوم <span style={{ color: '#00f5d4' }}>{today}</span> — اختر وقتاً مناسباً:
+              الأوقات المتاحة ليوم{' '}
+              <span style={{ color: '#00f5d4' }}>{today}</span>
+              {' '}— اختر وقتاً مناسباً:
             </div>
 
-            {/* Slots grid */}
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '8px', marginBottom: '18px' }}>
-              {SLOTS.map(slot => {
-                const isBooked   = bookedSlots.has(slot.key);
-                const isSelected = selected === slot.key;
-                return (
-                  <button
-                    key={slot.key}
-                    disabled={isBooked}
-                    onClick={() => setSelected(slot.key)}
-                    style={{
-                      padding: '10px 4px',
-                      fontFamily: 'Rajdhani, sans-serif', fontSize: '15px', fontWeight: 600,
-                      borderRadius: '5px', cursor: isBooked ? 'not-allowed' : 'pointer',
-                      transition: 'all 0.15s',
-                      background: isBooked
-                        ? 'rgba(255,45,120,0.06)'
-                        : isSelected
-                        ? 'rgba(0,245,212,0.22)'
-                        : 'rgba(0,245,212,0.05)',
-                      border: isBooked
-                        ? '1px solid rgba(255,45,120,0.22)'
-                        : isSelected
-                        ? '2px solid #00f5d4'
-                        : '1px solid rgba(0,245,212,0.22)',
-                      color: isBooked
-                        ? 'rgba(255,255,255,0.2)'
-                        : isSelected
-                        ? '#00f5d4'
-                        : 'rgba(255,255,255,0.78)',
-                      boxShadow: isSelected ? '0 0 14px rgba(0,245,212,0.3)' : 'none',
-                      textDecoration: isBooked ? 'line-through' : 'none',
-                      lineHeight: 1.2,
-                    }}
-                  >
-                    {slot.label}
-                    {isBooked && (
-                      <div style={{
-                        fontSize: '8px', color: 'rgba(255,45,120,0.55)',
-                        fontFamily: 'Orbitron, sans-serif', marginTop: '2px',
-                        textDecoration: 'none',
-                      }}>محجوز</div>
-                    )}
-                  </button>
-                );
-              })}
-            </div>
+            {/* Slots grid — dynamic from Firestore */}
+            {slotsLoading ? (
+              <div style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                gap: '10px', padding: '32px 0',
+              }}>
+                <svg width="22" height="22" viewBox="0 0 28 28" fill="none"
+                  style={{ animation: 'lf-spin 0.85s linear infinite' }}>
+                  <circle cx="14" cy="14" r="10" stroke="#00f5d4" strokeWidth="2.5"
+                    strokeDasharray="22 14" strokeLinecap="round"/>
+                </svg>
+                <span style={{
+                  fontFamily: 'Rajdhani, sans-serif', fontSize: '14px',
+                  color: 'rgba(0,245,212,0.6)',
+                }}>جاري تحميل الأوقات...</span>
+              </div>
+            ) : availableSlots.length === 0 ? (
+              <div style={{
+                textAlign: 'center', padding: '32px 0',
+                fontFamily: 'Rajdhani, sans-serif', fontSize: '15px',
+                color: 'rgba(255,255,255,0.3)',
+              }}>
+                <div style={{ fontSize: '36px', marginBottom: '10px', opacity: 0.4 }}>📅</div>
+                لا توجد أوقات متاحة لهذا الطبيب حالياً
+              </div>
+            ) : (
+              <div style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(3, 1fr)',
+                gap: '8px', marginBottom: '18px',
+              }}>
+                {availableSlots.map(slot => {
+                  const isBooked   = bookedSlots.has(slot.key);
+                  const isSelected = selected === slot.key;
+                  return (
+                    <button
+                      key={slot.key}
+                      disabled={isBooked || phase === 'confirming'}
+                      onClick={() => !isBooked && setSelected(slot.key)}
+                      style={{
+                        padding: '10px 4px',
+                        fontFamily: 'Rajdhani, sans-serif', fontSize: '15px', fontWeight: 600,
+                        borderRadius: '5px',
+                        cursor: isBooked || phase === 'confirming' ? 'not-allowed' : 'pointer',
+                        transition: 'all 0.15s',
+                        background: isBooked
+                          ? 'rgba(255,45,120,0.06)'
+                          : isSelected
+                          ? 'rgba(0,245,212,0.22)'
+                          : 'rgba(0,245,212,0.05)',
+                        border: isBooked
+                          ? '1px solid rgba(255,45,120,0.22)'
+                          : isSelected
+                          ? '2px solid #00f5d4'
+                          : '1px solid rgba(0,245,212,0.22)',
+                        color: isBooked
+                          ? 'rgba(255,255,255,0.2)'
+                          : isSelected
+                          ? '#00f5d4'
+                          : 'rgba(255,255,255,0.78)',
+                        boxShadow: isSelected ? '0 0 14px rgba(0,245,212,0.3)' : 'none',
+                        textDecoration: isBooked ? 'line-through' : 'none',
+                        lineHeight: 1.2,
+                      }}
+                    >
+                      {slot.label}
+                      {isBooked && (
+                        <div style={{
+                          fontSize: '8px', color: 'rgba(255,45,120,0.55)',
+                          fontFamily: 'Orbitron, sans-serif', marginTop: '2px',
+                          textDecoration: 'none',
+                        }}>محجوز</div>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
 
             {/* Error */}
             {errMsg && (
@@ -224,38 +294,40 @@ export function DoctorBookingModal({ doctorId, doctorName, onClose }: Props) {
             )}
 
             {/* Confirm button */}
-            <button
-              onClick={confirmBooking}
-              disabled={!selected || phase === 'confirming'}
-              style={{
-                width: '100%', padding: '14px',
-                fontFamily: 'Orbitron, sans-serif', fontSize: '11px', letterSpacing: '0.13em',
-                background: selected
-                  ? 'linear-gradient(135deg,rgba(0,245,212,0.22),rgba(0,245,212,0.08))'
-                  : 'rgba(0,245,212,0.04)',
-                border: `2px solid ${selected ? '#00f5d4' : 'rgba(0,245,212,0.18)'}`,
-                color: selected ? '#00f5d4' : 'rgba(0,245,212,0.28)',
-                borderRadius: '5px',
-                cursor: selected && phase !== 'confirming' ? 'pointer' : 'not-allowed',
-                boxShadow: selected ? '0 0 22px rgba(0,245,212,0.28)' : 'none',
-                transition: 'all 0.2s',
-                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px',
-              }}
-            >
-              {phase === 'confirming'
-                ? (
-                  <>
-                    <svg width="14" height="14" viewBox="0 0 28 28" fill="none"
-                      style={{ animation: 'lf-spin 0.9s linear infinite', flexShrink: 0 }}>
-                      <circle cx="14" cy="14" r="10" stroke="#00f5d4" strokeWidth="2.5"
-                        strokeDasharray="22 14" strokeLinecap="round"/>
-                    </svg>
-                    جاري الحجز...
-                  </>
-                )
-                : 'تأكيد الحجز'
-              }
-            </button>
+            {availableSlots.length > 0 && !slotsLoading && (
+              <button
+                onClick={confirmBooking}
+                disabled={!selected || phase === 'confirming'}
+                style={{
+                  width: '100%', padding: '14px',
+                  fontFamily: 'Orbitron, sans-serif', fontSize: '11px', letterSpacing: '0.13em',
+                  background: selected
+                    ? 'linear-gradient(135deg,rgba(0,245,212,0.22),rgba(0,245,212,0.08))'
+                    : 'rgba(0,245,212,0.04)',
+                  border: `2px solid ${selected ? '#00f5d4' : 'rgba(0,245,212,0.18)'}`,
+                  color: selected ? '#00f5d4' : 'rgba(0,245,212,0.28)',
+                  borderRadius: '5px',
+                  cursor: selected && phase !== 'confirming' ? 'pointer' : 'not-allowed',
+                  boxShadow: selected ? '0 0 22px rgba(0,245,212,0.28)' : 'none',
+                  transition: 'all 0.2s',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px',
+                }}
+              >
+                {phase === 'confirming'
+                  ? (
+                    <>
+                      <svg width="14" height="14" viewBox="0 0 28 28" fill="none"
+                        style={{ animation: 'lf-spin 0.9s linear infinite', flexShrink: 0 }}>
+                        <circle cx="14" cy="14" r="10" stroke="#00f5d4" strokeWidth="2.5"
+                          strokeDasharray="22 14" strokeLinecap="round"/>
+                      </svg>
+                      جاري الحجز...
+                    </>
+                  )
+                  : 'تأكيد الحجز'
+                }
+              </button>
+            )}
 
           </div>
         )}
@@ -288,7 +360,6 @@ function InsufficientView({ balance, onClose }: { balance: number; onClose: () =
   return (
     <div style={{ padding: '32px 24px', textAlign: 'center', direction: 'rtl' }}>
 
-      {/* Warning icon */}
       <div style={{
         width: '72px', height: '72px', borderRadius: '50%',
         background: 'rgba(255,45,120,0.1)',
@@ -297,21 +368,15 @@ function InsufficientView({ balance, onClose }: { balance: number; onClose: () =
         display: 'flex', alignItems: 'center', justifyContent: 'center',
         margin: '0 auto 20px',
         fontSize: '32px',
-      }}>
-        💸
-      </div>
+      }}>💸</div>
 
-      {/* Title */}
       <div style={{
         fontFamily: 'Orbitron, sans-serif', fontSize: '11px',
         color: '#ff2d78', letterSpacing: '0.14em',
         marginBottom: '14px',
         textShadow: '0 0 12px rgba(255,45,120,0.5)',
-      }}>
-        رصيد غير كافٍ
-      </div>
+      }}>رصيد غير كافٍ</div>
 
-      {/* Message */}
       <div style={{
         fontFamily: 'Rajdhani, sans-serif', fontSize: '16px', fontWeight: 600,
         color: 'rgba(255,255,255,0.88)', lineHeight: 1.7,
@@ -319,16 +384,13 @@ function InsufficientView({ balance, onClose }: { balance: number; onClose: () =
       }}>
         عذراً، رصيدك الحالي غير كافٍ.
         <br/>
-        يجب أن يكون في محفظتك
-        {' '}
-        <span style={{ color: '#f5c518', fontWeight: 700 }}>2,000 دينار</span>
-        {' '}
+        يجب أن يكون في محفظتك{' '}
+        <span style={{ color: '#f5c518', fontWeight: 700 }}>2,000 دينار</span>{' '}
         على الأقل للتمكن من حجز موعد!
         <br/>
         يرجى شحن رصيدك أولاً 💸
       </div>
 
-      {/* Current balance badge */}
       <div style={{
         display: 'inline-flex', alignItems: 'center', gap: '8px',
         padding: '8px 20px',
@@ -337,22 +399,16 @@ function InsufficientView({ balance, onClose }: { balance: number; onClose: () =
         borderRadius: '4px',
         marginBottom: '24px',
       }}>
-        <span style={{
-          fontFamily: 'Rajdhani, sans-serif', fontSize: '13px',
-          color: 'rgba(255,255,255,0.45)',
-        }}>رصيدك الحالي:</span>
-        <span style={{
-          fontFamily: 'Orbitron, sans-serif', fontSize: '13px', fontWeight: 700,
-          color: '#ff2d78',
-        }}>
+        <span style={{ fontFamily: 'Rajdhani, sans-serif', fontSize: '13px', color: 'rgba(255,255,255,0.45)' }}>
+          رصيدك الحالي:
+        </span>
+        <span style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '13px', fontWeight: 700, color: '#ff2d78' }}>
           {balance.toLocaleString()} د.ع
         </span>
       </div>
 
-      {/* Divider */}
       <div style={{ height: '1px', background: 'rgba(255,45,120,0.15)', marginBottom: '22px' }} />
 
-      {/* Close button */}
       <button onClick={onClose} style={{
         width: '100%', padding: '13px',
         fontFamily: 'Orbitron, sans-serif', fontSize: '10px', letterSpacing: '0.15em',
@@ -371,7 +427,7 @@ function InsufficientView({ balance, onClose }: { balance: number; onClose: () =
   );
 }
 
-// ── Success dialog ─────────────────────────────────────────────────────────
+// ── Success dialog ──────────────────────────────────────────────────────────
 function SuccessView({ label, onClose }: { label: string; onClose: () => void }) {
   return (
     <div style={{ padding: '32px 24px', textAlign: 'center', direction: 'rtl' }}>
