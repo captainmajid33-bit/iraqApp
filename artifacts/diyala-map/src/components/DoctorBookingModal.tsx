@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import {
   collection, query, where, onSnapshot,
   serverTimestamp, getDoc, doc,
-  getDocs, limit, runTransaction,
+  getDocs, limit, runTransaction, setDoc,
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { getUserFromStorage } from '@/components/UserLoginOverlay';
@@ -48,10 +48,12 @@ function todayStr() {
 interface Props {
   doctorId:   string | number;
   doctorName: string;
+  doctorLat?: number;
+  doctorLng?: number;
   onClose:    () => void;
 }
 
-export function DoctorBookingModal({ doctorId, doctorName, onClose }: Props) {
+export function DoctorBookingModal({ doctorId, doctorName, doctorLat, doctorLng, onClose }: Props) {
   const [bookedSlots,    setBookedSlots]    = useState<Set<string>>(new Set());
   const [availableSlots, setAvailableSlots] = useState<SlotEntry[]>([]);
   const [slotsLoading,   setSlotsLoading]   = useState(true);
@@ -148,8 +150,10 @@ export function DoctorBookingModal({ doctorId, doctorName, onClose }: Props) {
     setPhase('confirming');
     setErrMsg('');
     try {
-      const userRef  = doc(db, 'users', userId);
-      const apptCol  = collection(db, 'doctors', String(doctorId), 'appointments');
+      const userRef    = doc(db, 'users', userId);
+      const apptCol    = collection(db, 'doctors', String(doctorId), 'appointments');
+      // Pre-create ref so we can read its ID after the transaction
+      const newApptRef = doc(apptCol);
 
       await runTransaction(db, async (txn) => {
         const userSnap = await txn.get(userRef);
@@ -160,7 +164,6 @@ export function DoctorBookingModal({ doctorId, doctorName, onClose }: Props) {
         txn.update(userRef, { balance: bal - MIN_BALANCE });
 
         // Create appointment document
-        const newApptRef = doc(apptCol);
         txn.set(newApptRef, {
           slot_time:  selected,
           userId,
@@ -169,6 +172,21 @@ export function DoctorBookingModal({ doctorId, doctorName, onClose }: Props) {
           createdAt:  serverTimestamp(),
         });
       });
+
+      // ── Write geo-mirror doc for client-side geofencing ──────────────────
+      if (userId !== 'anonymous') {
+        const mirrorRef = doc(collection(db, 'users', userId, 'myAppointments'));
+        await setDoc(mirrorRef, {
+          doctorId:      String(doctorId),
+          apptDocId:     newApptRef.id,
+          slot_time:     selected,
+          date:          today,
+          doctorLat:     doctorLat ?? null,
+          doctorLng:     doctorLng ?? null,
+          isUserArrived: false,
+          createdAt:     serverTimestamp(),
+        });
+      }
 
       setPhase('success');
     } catch (err: unknown) {
@@ -180,7 +198,7 @@ export function DoctorBookingModal({ doctorId, doctorName, onClose }: Props) {
       }
       setPhase('slots');
     }
-  }, [selected, doctorId, userId, userName, today]);
+  }, [selected, doctorId, userId, userName, today, doctorLat, doctorLng]);
 
   const selectedLabel = availableSlots.find(s => s.key === selected)?.label ?? selected ?? '';
 

@@ -16,6 +16,8 @@ import TrafficLayer from './TrafficLayer';
 import { useMapTheme } from '@/lib/mapTheme';
 import { collection, query, where, getDocs, onSnapshot, orderBy, limit, doc, setDoc, serverTimestamp, getDoc } from 'firebase/firestore';
 import { auth, db } from '@/lib/firebase';
+import { getUserFromStorage } from '@/components/UserLoginOverlay';
+import { useDoctorGeofence } from '@/hooks/useDoctorGeofence';
 
 // ── Fetch phones of AVAILABLE agents from Firestore (cross-check filter) ──
 // Returns a Set of phone strings, or null if Firestore is unreachable.
@@ -595,6 +597,9 @@ export function ClinicMap({
     );
     return unsub;
   }, []);
+
+  // ── Doctor Geo-Fence: silent background arrival detection ────────────────
+  useDoctorGeofence(userLocationRef);
 
   // ── Rating dialog (auto-opens when ride finishes) ─────────────────────────
   const [showRating,        setShowRating]        = useState(false);
@@ -5283,6 +5288,8 @@ export function ClinicMap({
         <DoctorBookingModal
           doctorId={bookingTargetItem.id}
           doctorName={bookingTargetItem.name}
+          doctorLat={bookingTargetItem.lat}
+          doctorLng={bookingTargetItem.lng}
           onClose={() => setBookingTargetItem(null)}
         />
       )}
