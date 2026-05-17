@@ -1617,8 +1617,9 @@ function UsersTab({ toast }: { toast: ReturnType<typeof useToast> }) {
   const [resetting,      setResetting]      = useState<string | null>(null);
   const [balanceInputs,  setBalanceInputs]  = useState<Record<string, string>>({});
   const [savingBalance,  setSavingBalance]  = useState<string | null>(null);
+  const [liveCount,      setLiveCount]      = useState(0);
 
-  // ── Live Firestore listener ───────────────────────────────────────────────
+  // ── Live Firestore listener — all users ──────────────────────────────────
   useEffect(() => {
     const unsub = onSnapshot(
       collection(db, 'users'),
@@ -1640,6 +1641,16 @@ function UsersTab({ toast }: { toast: ReturnType<typeof useToast> }) {
         setLoading(false);
       },
       err => { console.error('[UsersTab]', err); setLoading(false); }
+    );
+    return () => unsub();
+  }, []);
+
+  // ── Live counter — isOnline == true ──────────────────────────────────────
+  useEffect(() => {
+    const unsub = onSnapshot(
+      query(collection(db, 'users'), where('isOnline', '==', true)),
+      snap => setLiveCount(snap.size),
+      () => {}
     );
     return () => unsub();
   }, []);
@@ -1683,6 +1694,113 @@ function UsersTab({ toast }: { toast: ReturnType<typeof useToast> }) {
   // ── Render ────────────────────────────────────────────────────────────────
   return (
     <div style={{ direction: 'rtl' }}>
+
+      {/* ── Stats Counter Cards ─────────────────────────────────────────── */}
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
+        gap: '14px',
+        marginBottom: '22px',
+      }}>
+
+        {/* Card 1 — Total users */}
+        <div style={{
+          background: C.surface,
+          border: `1px solid ${C.blue}30`,
+          borderRadius: '6px',
+          padding: '18px 20px',
+          display: 'flex', alignItems: 'center', gap: '16px',
+          boxShadow: `0 0 20px ${C.blue}0a`,
+          position: 'relative', overflow: 'hidden',
+        }}>
+          {/* Glow strip */}
+          <div style={{
+            position: 'absolute', top: 0, right: 0,
+            width: '3px', height: '100%',
+            background: `linear-gradient(to bottom, ${C.blue}00, ${C.blue}88, ${C.blue}00)`,
+          }} />
+          {/* Icon */}
+          <div style={{
+            width: '44px', height: '44px', borderRadius: '8px', flexShrink: 0,
+            background: `${C.blue}12`, border: `1px solid ${C.blue}30`,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            fontSize: '20px',
+          }}>👥</div>
+          {/* Text */}
+          <div>
+            <div style={{
+              fontFamily: 'Orbitron, sans-serif', fontSize: '8px',
+              color: `${C.blue}99`, letterSpacing: '0.12em', marginBottom: '4px',
+            }}>TOTAL USERS</div>
+            <div style={{
+              fontFamily: 'Orbitron, sans-serif', fontSize: '28px', fontWeight: 700,
+              color: C.blue, lineHeight: 1,
+              textShadow: `0 0 20px ${C.blue}55`,
+            }}>
+              {loading
+                ? <div style={{ width: '40px', height: '28px', background: `${C.blue}15`, borderRadius: '3px' }} />
+                : users.length}
+            </div>
+            <div style={{
+              fontFamily: 'Rajdhani, sans-serif', fontSize: '12px',
+              color: C.dim, marginTop: '3px',
+            }}>إجمالي مستخدمي النظام</div>
+          </div>
+        </div>
+
+        {/* Card 2 — Live online now */}
+        <div style={{
+          background: C.surface,
+          border: `1px solid ${C.green}35`,
+          borderRadius: '6px',
+          padding: '18px 20px',
+          display: 'flex', alignItems: 'center', gap: '16px',
+          boxShadow: liveCount > 0 ? `0 0 24px ${C.green}12` : 'none',
+          position: 'relative', overflow: 'hidden',
+          transition: 'box-shadow 0.4s',
+        }}>
+          {/* Glow strip */}
+          <div style={{
+            position: 'absolute', top: 0, right: 0,
+            width: '3px', height: '100%',
+            background: `linear-gradient(to bottom, ${C.green}00, ${C.green}99, ${C.green}00)`,
+          }} />
+          {/* Icon + ping */}
+          <div style={{
+            width: '44px', height: '44px', borderRadius: '8px', flexShrink: 0,
+            background: `${C.green}10`, border: `1px solid ${C.green}35`,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            position: 'relative',
+          }}>
+            <span style={{ fontSize: '20px', position: 'relative', zIndex: 1 }}>🟢</span>
+            {liveCount > 0 && (
+              <div style={{
+                position: 'absolute', inset: '-4px', borderRadius: '10px',
+                border: `1.5px solid ${C.green}`,
+                animation: 'lf-ping 2s cubic-bezier(0,0,0.2,1) infinite',
+                opacity: 0.5,
+              }} />
+            )}
+          </div>
+          {/* Text */}
+          <div>
+            <div style={{
+              fontFamily: 'Orbitron, sans-serif', fontSize: '8px',
+              color: `${C.green}88`, letterSpacing: '0.12em', marginBottom: '4px',
+            }}>LIVE NOW</div>
+            <div style={{
+              fontFamily: 'Orbitron, sans-serif', fontSize: '28px', fontWeight: 700,
+              color: C.green, lineHeight: 1,
+              textShadow: liveCount > 0 ? `0 0 20px ${C.green}66` : 'none',
+            }}>{liveCount}</div>
+            <div style={{
+              fontFamily: 'Rajdhani, sans-serif', fontSize: '12px',
+              color: C.dim, marginTop: '3px',
+            }}>المتواجدون لايف الآن</div>
+          </div>
+        </div>
+
+      </div>
 
       {/* Section header */}
       <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: '20px', flexWrap: 'wrap', gap: '10px' }}>
