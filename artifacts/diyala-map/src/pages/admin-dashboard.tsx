@@ -1460,10 +1460,12 @@ interface AppUser {
 }
 
 function UsersTab({ toast }: { toast: ReturnType<typeof useToast> }) {
-  const [users,      setUsers]      = useState<AppUser[]>([]);
-  const [loading,    setLoading]    = useState(true);
-  const [confirmReset, setConfirmReset] = useState<AppUser | null>(null);
-  const [resetting,  setResetting]  = useState<string | null>(null);
+  const [users,          setUsers]          = useState<AppUser[]>([]);
+  const [loading,        setLoading]        = useState(true);
+  const [confirmReset,   setConfirmReset]   = useState<AppUser | null>(null);
+  const [resetting,      setResetting]      = useState<string | null>(null);
+  const [balanceInputs,  setBalanceInputs]  = useState<Record<string, string>>({});
+  const [savingBalance,  setSavingBalance]  = useState<string | null>(null);
 
   // ── Live Firestore listener ───────────────────────────────────────────────
   useEffect(() => {
@@ -1502,6 +1504,26 @@ function UsersTab({ toast }: { toast: ReturnType<typeof useToast> }) {
     } finally {
       setResetting(null);
       setConfirmReset(null);
+    }
+  }
+
+  // ── Set balance manually ─────────────────────────────────────────────────
+  async function doSetBalance(user: AppUser) {
+    const raw = balanceInputs[user.id] ?? '';
+    const val = Number(raw.replace(/,/g, '').trim());
+    if (raw.trim() === '' || isNaN(val) || val < 0) {
+      toast.show('يرجى إدخال رقم صحيح ≥ 0', false);
+      return;
+    }
+    setSavingBalance(user.id);
+    try {
+      await updateDoc(doc(db, 'users', user.id), { balance: val });
+      setBalanceInputs(prev => { const n = { ...prev }; delete n[user.id]; return n; });
+      toast.show(`تم تحديث رصيد المستخدم بنجاح! 🟢`);
+    } catch (e: any) {
+      toast.show(`فشل الحفظ: ${e?.message ?? e}`, false);
+    } finally {
+      setSavingBalance(null);
     }
   }
 
@@ -1622,7 +1644,7 @@ function UsersTab({ toast }: { toast: ReturnType<typeof useToast> }) {
           <table style={{ width: '100%', borderCollapse: 'collapse', fontFamily: 'Rajdhani, sans-serif' }}>
             <thead>
               <tr style={{ borderBottom: `1px solid ${C.border}` }}>
-                {['#', 'الاسم', 'رقم الهاتف', 'معرّف الحساب (UID)', 'الرصيد الحالي', 'إجراء التسوية'].map(h => (
+                {['#', 'الاسم', 'رقم الهاتف', 'معرّف الحساب (UID)', 'الرصيد الحالي', 'تعديل الرصيد', 'إجراء التسوية'].map(h => (
                   <th key={h} style={{ padding: '10px 12px', textAlign: 'right', fontFamily: 'Orbitron, sans-serif', fontSize: '8px', color: C.blue, letterSpacing: '0.1em', whiteSpace: 'nowrap', background: `${C.blue}07` }}>{h}</th>
                 ))}
               </tr>
@@ -1665,6 +1687,58 @@ function UsersTab({ toast }: { toast: ReturnType<typeof useToast> }) {
                           0 د.ع
                         </span>
                       )}
+                    </td>
+
+                    {/* ── Manual balance editor ── */}
+                    <td style={{ padding: '8px 12px', whiteSpace: 'nowrap' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        <input
+                          type="number"
+                          min="0"
+                          placeholder={u.balance.toString()}
+                          value={balanceInputs[u.id] ?? ''}
+                          onChange={e => setBalanceInputs(prev => ({ ...prev, [u.id]: e.target.value }))}
+                          onKeyDown={e => { if (e.key === 'Enter') doSetBalance(u); }}
+                          style={{
+                            width: '100px', padding: '5px 8px',
+                            background: 'rgba(0,212,255,0.06)',
+                            border: `1px solid ${balanceInputs[u.id] != null && balanceInputs[u.id] !== '' ? C.blue : 'rgba(0,212,255,0.2)'}`,
+                            color: C.text,
+                            fontFamily: 'Orbitron, monospace', fontSize: '11px',
+                            borderRadius: '3px', outline: 'none',
+                            transition: 'border-color 0.15s',
+                          }}
+                        />
+                        <button
+                          onClick={() => doSetBalance(u)}
+                          disabled={savingBalance === u.id || !balanceInputs[u.id]}
+                          title="حفظ الرصيد الجديد"
+                          style={{
+                            padding: '5px 10px',
+                            background: balanceInputs[u.id] ? `${C.blue}18` : 'rgba(0,212,255,0.04)',
+                            border: `1px solid ${balanceInputs[u.id] ? C.blue : 'rgba(0,212,255,0.18)'}`,
+                            color: balanceInputs[u.id] ? C.blue : 'rgba(0,212,255,0.25)',
+                            fontFamily: 'Orbitron, sans-serif', fontSize: '8px',
+                            letterSpacing: '0.08em', cursor: balanceInputs[u.id] ? 'pointer' : 'not-allowed',
+                            borderRadius: '2px', transition: 'all 0.15s',
+                            display: 'flex', alignItems: 'center', gap: '4px',
+                            boxShadow: balanceInputs[u.id] ? `0 0 8px ${C.blue}33` : 'none',
+                          }}
+                          onMouseEnter={e => { if (balanceInputs[u.id]) (e.currentTarget.style.background = `${C.blue}28`); }}
+                          onMouseLeave={e => { if (balanceInputs[u.id]) (e.currentTarget.style.background = `${C.blue}18`); }}
+                        >
+                          {savingBalance === u.id ? (
+                            <svg width="10" height="10" viewBox="0 0 28 28" fill="none" style={{ animation: 'spin 0.9s linear infinite' }}>
+                              <circle cx="14" cy="14" r="10" stroke={C.blue} strokeWidth="2.5" strokeDasharray="22 14" strokeLinecap="round"/>
+                            </svg>
+                          ) : (
+                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none">
+                              <path d="M20 6L9 17l-5-5" stroke={balanceInputs[u.id] ? C.blue : 'rgba(0,212,255,0.25)'} strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"/>
+                            </svg>
+                          )}
+                          حفظ
+                        </button>
+                      </div>
                     </td>
 
                     {/* Reset action */}
