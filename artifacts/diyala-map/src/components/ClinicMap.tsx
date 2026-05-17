@@ -10,10 +10,11 @@ import { MarketTicker } from './MarketTicker';
 import { FuelStationRadar } from './FuelStationRadar';
 import { BountyMissionSystem } from './BountyMissionSystem';
 import { BountyShortcutButton } from './BountyShortcutButton';
+import { DoctorBookingModal } from './DoctorBookingModal';
 import { ActiveOrderTracker } from './ActiveOrderTracker';
 import TrafficLayer from './TrafficLayer';
 import { useMapTheme } from '@/lib/mapTheme';
-import { collection, query, where, getDocs, onSnapshot, orderBy, limit, doc, setDoc, serverTimestamp } from 'firebase/firestore';
+import { collection, query, where, getDocs, onSnapshot, orderBy, limit, doc, setDoc, serverTimestamp, getDoc } from 'firebase/firestore';
 import { auth, db } from '@/lib/firebase';
 
 // ── Fetch phones of AVAILABLE agents from Firestore (cross-check filter) ──
@@ -336,6 +337,11 @@ export function ClinicMap({
     blockTaxiTimerRef.current = setTimeout(()=> setBlockTaxiMsg(false), 4000);
   },[]);
 
+  // Bridge: Leaflet popup button → open doctor booking modal
+  useEffect(()=>{
+    setBookingTargetRef.current = (item: MapItem) => setBookingTargetItem(item);
+  },[]);
+
   // Bridge: Leaflet popup button → open taxi routing flow
   useEffect(()=>{
     setTaxiItemRef.current = (item: MapItem) => {
@@ -650,6 +656,10 @@ export function ClinicMap({
   const taxiFromMarkerRef = useRef<L.Marker|null>(null);
   const taxiToMarkerRef   = useRef<L.Marker|null>(null);
   const driverMarkerRef   = useRef<L.Marker|null>(null);
+  // ── Doctor booking bridge ────────────────────────────────────────────────
+  const [bookingTargetItem,  setBookingTargetItem]  = useState<MapItem|null>(null);
+  const setBookingTargetRef = useRef<((item:MapItem)=>void)|null>(null);
+
   // Bridge refs — stable handles for Leaflet DOM callbacks & map click
   const setTaxiItemRef    = useRef<((item:MapItem)=>void)|null>(null);
   const taxiPickPointRef  = useRef<((lat:number,lng:number)=>void)|null>(null);
@@ -1211,6 +1221,65 @@ export function ClinicMap({
         mapRef.current?.closePopup();
       });
       el.appendChild(taxiBtn);
+    }
+
+    // ── Doctor booking button (clinic kind only) ─────────────────────────────
+    if (item.kind === 'clinic') {
+      const bookSep = document.createElement('div');
+      bookSep.style.cssText = 'height:1px;background:rgba(0,245,212,0.15);margin:8px 0 6px;';
+      el.appendChild(bookSep);
+
+      const bookBtn = document.createElement('button');
+      bookBtn.className = 'popup-book-btn';
+      // Initial loading state
+      bookBtn.innerHTML = `<svg width="12" height="12" viewBox="0 0 28 28" fill="none"
+        style="animation:lf-spin 0.9s linear infinite;flex-shrink:0">
+        <circle cx="14" cy="14" r="10" stroke="#00f5d4" stroke-width="2.5"
+          stroke-dasharray="22 14" stroke-linecap="round"/>
+      </svg>جاري التحقق...`;
+      bookBtn.style.cssText = `
+        display:flex;align-items:center;gap:7px;width:100%;padding:7px 12px;
+        background:rgba(0,245,212,0.06);border:1px solid rgba(0,245,212,0.25);
+        color:rgba(0,245,212,0.5);font-family:Rajdhani,sans-serif;font-size:13px;
+        font-weight:600;cursor:default;border-radius:3px;text-align:right;
+        direction:rtl;transition:all 0.2s;
+      `;
+      el.appendChild(bookBtn);
+
+      // Async availability check
+      getDoc(doc(db, 'doctors', String(item.id)))
+        .then(snap => {
+          const available = snap.exists() ? (snap.data()?.isAvailable === true) : false;
+          if (available) {
+            bookBtn.innerHTML = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" style="flex-shrink:0">
+              <rect x="3" y="4" width="18" height="18" rx="2" stroke="#00f5d4" stroke-width="1.8"/>
+              <path d="M8 2v4M16 2v4M3 10h18" stroke="#00f5d4" stroke-width="1.8" stroke-linecap="round"/>
+              <path d="M8 14h2v2H8z" fill="#00f5d4"/>
+            </svg>حجز موعد`;
+            bookBtn.style.background   = 'rgba(0,245,212,0.1)';
+            bookBtn.style.border       = '1px solid rgba(0,245,212,0.6)';
+            bookBtn.style.color        = '#00f5d4';
+            bookBtn.style.cursor       = 'pointer';
+            bookBtn.style.boxShadow    = '0 0 10px rgba(0,245,212,0.2)';
+            bookBtn.addEventListener('click', () => {
+              setBookingTargetRef.current?.(item);
+              mapRef.current?.closePopup();
+            });
+          } else {
+            bookBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" style="flex-shrink:0">
+              <circle cx="12" cy="12" r="9" stroke="#ff2d78" stroke-width="1.8"/>
+              <path d="M15 9l-6 6M9 9l6 6" stroke="#ff2d78" stroke-width="1.8" stroke-linecap="round"/>
+            </svg>الطبيب غير متوفر للحجز`;
+            bookBtn.style.background = 'rgba(255,45,120,0.06)';
+            bookBtn.style.border     = '1px solid rgba(255,45,120,0.25)';
+            bookBtn.style.color      = 'rgba(255,45,120,0.65)';
+            bookBtn.style.cursor     = 'not-allowed';
+          }
+        })
+        .catch(() => {
+          bookBtn.innerHTML = '⚠ تعذّر التحقق';
+          bookBtn.style.color = 'rgba(255,255,255,0.3)';
+        });
     }
 
     if (adminModeRef.current) {
@@ -4881,6 +4950,15 @@ export function ClinicMap({
 
       {/* ── Live Market Ticker ── */}
       <MarketTicker />
+
+      {/* ── Doctor Booking Modal — opened from popup "حجز موعد" button ── */}
+      {bookingTargetItem && (
+        <DoctorBookingModal
+          doctorId={bookingTargetItem.id}
+          doctorName={bookingTargetItem.name}
+          onClose={() => setBookingTargetItem(null)}
+        />
+      )}
 
     </div>
   );
