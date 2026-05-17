@@ -4646,6 +4646,168 @@ export function ClinicMap({
 
 
       {/* ══════════════════════════════════════════════════════════════════════
+          ── Category Bottom List — slides up when a filter is active ──────
+          ══════════════════════════════════════════════════════════════════ */}
+      {(() => {
+        const showList =
+          !!activeFilter &&
+          activeFilter !== '__fuel_stations__' &&
+          !routeTarget &&
+          !selectedPlace;
+        if (!showList) return null;
+
+        const activeCat = categories.find(c => c.slug === activeFilter);
+        const catColor  = activeCat?.color ?? '#00d4ff';
+        const catIcon   = activeCat?.icon  ?? '📍';
+        const catLabel  = activeCat?.labelAr ?? activeFilter;
+        const listItems = items.filter(i => i.kind === activeFilter && i.status !== 'معطّل');
+
+        if (listItems.length === 0) return null;
+
+        return (
+          <div style={{
+            position:'absolute', bottom:'80px', left:0, right:0, zIndex:1005,
+            background:`linear-gradient(to top, rgba(3,5,12,0.97) 60%, rgba(3,5,12,0.82))`,
+            borderTop:`2px solid ${catColor}55`,
+            boxShadow:`0 -4px 32px rgba(0,0,0,0.6), 0 -1px 0 ${catColor}22`,
+            backdropFilter:'blur(14px)',
+            direction:'rtl',
+          }}>
+            {/* List header */}
+            <div style={{
+              display:'flex', alignItems:'center', justifyContent:'space-between',
+              padding:'8px 14px 4px',
+              borderBottom:`1px solid ${catColor}18`,
+            }}>
+              <div style={{ display:'flex', alignItems:'center', gap:'7px' }}>
+                <span style={{ fontSize:'14px' }}>{catIcon}</span>
+                <span style={{
+                  fontFamily:'Orbitron,sans-serif', fontSize:'8px', letterSpacing:'0.16em',
+                  color:catColor,
+                }}>{catLabel.toUpperCase()} · {listItems.length} موقع</span>
+                <span style={{
+                  width:'5px', height:'5px', borderRadius:'50%',
+                  background:catColor, display:'inline-block',
+                  boxShadow:`0 0 6px ${catColor}`,
+                  animation:'lf-ping 1.8s ease-in-out infinite',
+                }}/>
+              </div>
+              <button
+                onClick={() => { onFilterChange(''); }}
+                style={{
+                  background:'rgba(255,45,80,0.1)', border:'1px solid rgba(255,45,80,0.4)',
+                  color:'#ff2d50', fontFamily:'Orbitron,sans-serif', fontSize:'8px',
+                  letterSpacing:'0.1em', padding:'3px 9px', borderRadius:'20px',
+                  cursor:'pointer', display:'flex', alignItems:'center', gap:'4px',
+                  transition:'background 0.18s',
+                }}
+                onMouseEnter={e=>(e.currentTarget.style.background='rgba(255,45,80,0.2)')}
+                onMouseLeave={e=>(e.currentTarget.style.background='rgba(255,45,80,0.1)')}
+              >
+                <svg width="8" height="8" viewBox="0 0 12 12" fill="none">
+                  <path d="M1 1l10 10M11 1L1 11" stroke="#ff2d50" strokeWidth="2" strokeLinecap="round"/>
+                </svg>
+                عرض الكل
+              </button>
+            </div>
+
+            {/* Horizontal scrollable cards */}
+            <div style={{
+              display:'flex', flexDirection:'row', gap:'10px',
+              overflowX:'auto', overflowY:'hidden',
+              padding:'10px 14px 12px',
+              scrollbarWidth:'none', msOverflowStyle:'none',
+            } as React.CSSProperties}>
+              {listItems.map(item => {
+                const isOpen   = item.status === 'مفتوح';
+                const subtitle = item.specialty || item.details || item.cuisine || item.type || activeCat?.labelAr || '';
+                return (
+                  <button
+                    key={item.id}
+                    onClick={() => {
+                      if (!mapRef.current) return;
+                      mapRef.current.flyTo([item.lat, item.lng], 16.5, { animate:true, duration:0.85 });
+                      setTimeout(() => {
+                        markersRef.current[item.id]?.openPopup();
+                      }, 700);
+                    }}
+                    style={{
+                      flexShrink:0,
+                      width:'130px',
+                      background:`rgba(5,8,15,0.92)`,
+                      border:`1.5px solid ${catColor}33`,
+                      borderRadius:'8px',
+                      padding:'0',
+                      cursor:'pointer',
+                      overflow:'hidden',
+                      transition:'border-color 0.2s, box-shadow 0.2s, transform 0.15s',
+                      textAlign:'right',
+                      boxShadow:`0 2px 12px rgba(0,0,0,0.5)`,
+                    }}
+                    onMouseEnter={e=>{
+                      (e.currentTarget as HTMLElement).style.borderColor=catColor;
+                      (e.currentTarget as HTMLElement).style.boxShadow=`0 0 18px ${catColor}44, 0 4px 20px rgba(0,0,0,0.6)`;
+                      (e.currentTarget as HTMLElement).style.transform='translateY(-2px)';
+                    }}
+                    onMouseLeave={e=>{
+                      (e.currentTarget as HTMLElement).style.borderColor=`${catColor}33`;
+                      (e.currentTarget as HTMLElement).style.boxShadow='0 2px 12px rgba(0,0,0,0.5)';
+                      (e.currentTarget as HTMLElement).style.transform='translateY(0)';
+                    }}
+                  >
+                    {/* Icon strip */}
+                    <div style={{
+                      width:'100%', height:'52px',
+                      background: item.icon_url
+                        ? `url(${item.icon_url}) center/cover no-repeat`
+                        : `${catColor}10`,
+                      display:'flex', alignItems:'center', justifyContent:'center',
+                      borderBottom:`1px solid ${catColor}18`,
+                      position:'relative', overflow:'hidden',
+                    }}>
+                      {!item.icon_url && (
+                        <span style={{ fontSize:'22px', opacity:0.85 }}>{catIcon}</span>
+                      )}
+                      {/* Status dot */}
+                      <div style={{
+                        position:'absolute', top:'6px', left:'6px',
+                        width:'7px', height:'7px', borderRadius:'50%',
+                        background: isOpen ? '#00dc64' : '#ff2d50',
+                        boxShadow: isOpen ? '0 0 6px #00dc64' : '0 0 6px #ff2d50',
+                      }}/>
+                    </div>
+
+                    {/* Text */}
+                    <div style={{ padding:'7px 8px 8px' }}>
+                      <div style={{
+                        fontFamily:'Rajdhani,sans-serif', fontSize:'13px', fontWeight:700,
+                        color:'rgba(255,255,255,0.9)', lineHeight:1.2,
+                        overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap',
+                        marginBottom:'3px',
+                      }}>{item.name}</div>
+                      {subtitle ? (
+                        <div style={{
+                          fontFamily:'Rajdhani,sans-serif', fontSize:'10px',
+                          color:`${catColor}99`,
+                          overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap',
+                        }}>{subtitle}</div>
+                      ) : null}
+                      <div style={{
+                        marginTop:'5px',
+                        fontFamily:'Orbitron,sans-serif', fontSize:'7px',
+                        color: isOpen ? '#00dc64' : '#ff2d50',
+                        letterSpacing:'0.08em',
+                      }}>{isOpen ? '● مفتوح' : '● مغلق'}</div>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ══════════════════════════════════════════════════════════════════════
           ── Selected Place Panel (slides up above bottom bar) ─────────────
           ══════════════════════════════════════════════════════════════════ */}
       {selectedPlace && (
