@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import {
   collection, query, where, onSnapshot,
-  addDoc, serverTimestamp,
+  addDoc, serverTimestamp, getDoc, doc,
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { getUserFromStorage } from '@/components/UserLoginOverlay';
@@ -23,6 +23,8 @@ const SLOTS = [
   { key: '21:00', label: '9:00 م' },
 ];
 
+const MIN_BALANCE = 2000;
+
 function todayStr() {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -37,16 +39,41 @@ interface Props {
 export function DoctorBookingModal({ doctorId, doctorName, onClose }: Props) {
   const [bookedSlots, setBookedSlots] = useState<Set<string>>(new Set());
   const [selected,    setSelected]    = useState<string | null>(null);
-  const [phase,       setPhase]       = useState<'slots' | 'confirming' | 'success'>('slots');
+  const [phase,       setPhase]       = useState<'checking' | 'insufficient' | 'slots' | 'confirming' | 'success'>('checking');
   const [errMsg,      setErrMsg]      = useState('');
+  const [userBalance, setUserBalance] = useState<number>(0);
 
   const today    = todayStr();
   const user     = getUserFromStorage();
   const userId   = user?.uid  ?? 'anonymous';
   const userName = user?.name ?? 'زبون';
 
-  // ── Real-time listener — today's booked slots ─────────────────────────────
+  // ── Step 1: Check balance before showing slots ────────────────────────────
   useEffect(() => {
+    let cancelled = false;
+    async function checkBalance() {
+      if (!userId || userId === 'anonymous') {
+        // Not logged in — treat as zero balance
+        if (!cancelled) setPhase('insufficient');
+        return;
+      }
+      try {
+        const snap = await getDoc(doc(db, 'users', userId));
+        const bal  = snap.exists() ? (Number(snap.data()?.balance) || 0) : 0;
+        if (cancelled) return;
+        setUserBalance(bal);
+        setPhase(bal >= MIN_BALANCE ? 'slots' : 'insufficient');
+      } catch {
+        if (!cancelled) setPhase('slots'); // On error, allow booking (fail-open)
+      }
+    }
+    checkBalance();
+    return () => { cancelled = true; };
+  }, [userId]);
+
+  // ── Step 2: Real-time listener — today's booked slots (only when allowed) ─
+  useEffect(() => {
+    if (phase !== 'slots' && phase !== 'confirming' && phase !== 'success') return;
     const colRef = collection(db, 'doctors', String(doctorId), 'appointments');
     const q      = query(colRef, where('date', '==', today));
     const unsub  = onSnapshot(q, snap => {
@@ -55,7 +82,7 @@ export function DoctorBookingModal({ doctorId, doctorName, onClose }: Props) {
       setBookedSlots(booked);
     }, () => {});
     return unsub;
-  }, [doctorId, today]);
+  }, [doctorId, today, phase]);
 
   // ── Confirm booking ────────────────────────────────────────────────────────
   const confirmBooking = useCallback(async () => {
@@ -86,26 +113,34 @@ export function DoctorBookingModal({ doctorId, doctorName, onClose }: Props) {
       <div style={{
         width: '100%', maxWidth: '400px',
         background: 'rgba(5,8,15,0.99)',
-        border: '2px solid #00f5d4',
+        border: `2px solid ${phase === 'insufficient' ? '#ff2d78' : '#00f5d4'}`,
         borderRadius: '8px',
-        boxShadow: '0 0 60px rgba(0,245,212,0.25), 0 0 120px rgba(0,245,212,0.08)',
+        boxShadow: phase === 'insufficient'
+          ? '0 0 60px rgba(255,45,120,0.25), 0 0 120px rgba(255,45,120,0.08)'
+          : '0 0 60px rgba(0,245,212,0.25), 0 0 120px rgba(0,245,212,0.08)',
         overflow: 'hidden',
+        transition: 'border-color 0.3s, box-shadow 0.3s',
       }}>
 
         {/* ── Header ── */}
         <div style={{
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          padding: '14px 18px', borderBottom: '1px solid rgba(0,245,212,0.18)',
-          background: 'rgba(0,245,212,0.05)',
+          padding: '14px 18px',
+          borderBottom: `1px solid ${phase === 'insufficient' ? 'rgba(255,45,120,0.18)' : 'rgba(0,245,212,0.18)'}`,
+          background: phase === 'insufficient' ? 'rgba(255,45,120,0.05)' : 'rgba(0,245,212,0.05)',
         }}>
           <div>
             <div style={{
               fontFamily: 'Orbitron, sans-serif', fontSize: '9px',
-              color: 'rgba(0,245,212,0.55)', letterSpacing: '0.16em', marginBottom: '3px',
+              color: phase === 'insufficient' ? 'rgba(255,45,120,0.55)' : 'rgba(0,245,212,0.55)',
+              letterSpacing: '0.16em', marginBottom: '3px',
             }}>
               🏥 APPOINTMENT BOOKING
             </div>
-            <div style={{ fontFamily: 'Rajdhani, sans-serif', fontSize: '16px', fontWeight: 700, color: '#00f5d4' }}>
+            <div style={{
+              fontFamily: 'Rajdhani, sans-serif', fontSize: '16px', fontWeight: 700,
+              color: phase === 'insufficient' ? '#ff2d78' : '#00f5d4',
+            }}>
               {doctorName}
             </div>
           </div>
@@ -118,113 +153,220 @@ export function DoctorBookingModal({ doctorId, doctorName, onClose }: Props) {
         </div>
 
         {/* ── Content ── */}
-        {phase === 'success'
-          ? <SuccessView label={selectedLabel} onClose={onClose} />
-          : (
-            <div style={{ padding: '18px' }}>
+        {phase === 'checking'      && <CheckingView />}
+        {phase === 'insufficient'  && <InsufficientView balance={userBalance} onClose={onClose} />}
+        {phase === 'success'       && <SuccessView label={selectedLabel} onClose={onClose} />}
+        {(phase === 'slots' || phase === 'confirming') && (
+          <div style={{ padding: '18px' }}>
 
-              {/* Date label */}
-              <div style={{
-                fontFamily: 'Rajdhani, sans-serif', fontSize: '13px',
-                color: 'rgba(255,255,255,0.45)', marginBottom: '14px',
-              }}>
-                الأوقات المتاحة ليوم <span style={{ color: '#00f5d4' }}>{today}</span> — اختر وقتاً مناسباً:
-              </div>
-
-              {/* Slots grid */}
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '8px', marginBottom: '18px' }}>
-                {SLOTS.map(slot => {
-                  const isBooked   = bookedSlots.has(slot.key);
-                  const isSelected = selected === slot.key;
-                  return (
-                    <button
-                      key={slot.key}
-                      disabled={isBooked}
-                      onClick={() => setSelected(slot.key)}
-                      style={{
-                        padding: '10px 4px',
-                        fontFamily: 'Rajdhani, sans-serif', fontSize: '15px', fontWeight: 600,
-                        borderRadius: '5px', cursor: isBooked ? 'not-allowed' : 'pointer',
-                        transition: 'all 0.15s',
-                        background: isBooked
-                          ? 'rgba(255,45,120,0.06)'
-                          : isSelected
-                          ? 'rgba(0,245,212,0.22)'
-                          : 'rgba(0,245,212,0.05)',
-                        border: isBooked
-                          ? '1px solid rgba(255,45,120,0.22)'
-                          : isSelected
-                          ? '2px solid #00f5d4'
-                          : '1px solid rgba(0,245,212,0.22)',
-                        color: isBooked
-                          ? 'rgba(255,255,255,0.2)'
-                          : isSelected
-                          ? '#00f5d4'
-                          : 'rgba(255,255,255,0.78)',
-                        boxShadow: isSelected ? '0 0 14px rgba(0,245,212,0.3)' : 'none',
-                        textDecoration: isBooked ? 'line-through' : 'none',
-                        lineHeight: 1.2,
-                      }}
-                    >
-                      {slot.label}
-                      {isBooked && (
-                        <div style={{
-                          fontSize: '8px', color: 'rgba(255,45,120,0.55)',
-                          fontFamily: 'Orbitron, sans-serif', marginTop: '2px',
-                          textDecoration: 'none',
-                        }}>محجوز</div>
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-
-              {/* Error */}
-              {errMsg && (
-                <div style={{
-                  color: '#ff2d78', fontFamily: 'Rajdhani, sans-serif',
-                  fontSize: '14px', marginBottom: '10px',
-                }}>{errMsg}</div>
-              )}
-
-              {/* Confirm button */}
-              <button
-                onClick={confirmBooking}
-                disabled={!selected || phase === 'confirming'}
-                style={{
-                  width: '100%', padding: '14px',
-                  fontFamily: 'Orbitron, sans-serif', fontSize: '11px', letterSpacing: '0.13em',
-                  background: selected
-                    ? 'linear-gradient(135deg,rgba(0,245,212,0.22),rgba(0,245,212,0.08))'
-                    : 'rgba(0,245,212,0.04)',
-                  border: `2px solid ${selected ? '#00f5d4' : 'rgba(0,245,212,0.18)'}`,
-                  color: selected ? '#00f5d4' : 'rgba(0,245,212,0.28)',
-                  borderRadius: '5px',
-                  cursor: selected && phase !== 'confirming' ? 'pointer' : 'not-allowed',
-                  boxShadow: selected ? '0 0 22px rgba(0,245,212,0.28)' : 'none',
-                  transition: 'all 0.2s',
-                  display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px',
-                }}
-              >
-                {phase === 'confirming'
-                  ? (
-                    <>
-                      <svg width="14" height="14" viewBox="0 0 28 28" fill="none"
-                        style={{ animation: 'lf-spin 0.9s linear infinite', flexShrink: 0 }}>
-                        <circle cx="14" cy="14" r="10" stroke="#00f5d4" strokeWidth="2.5"
-                          strokeDasharray="22 14" strokeLinecap="round"/>
-                      </svg>
-                      جاري الحجز...
-                    </>
-                  )
-                  : 'تأكيد الحجز'
-                }
-              </button>
-
+            {/* Date label */}
+            <div style={{
+              fontFamily: 'Rajdhani, sans-serif', fontSize: '13px',
+              color: 'rgba(255,255,255,0.45)', marginBottom: '14px',
+            }}>
+              الأوقات المتاحة ليوم <span style={{ color: '#00f5d4' }}>{today}</span> — اختر وقتاً مناسباً:
             </div>
-          )
-        }
+
+            {/* Slots grid */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '8px', marginBottom: '18px' }}>
+              {SLOTS.map(slot => {
+                const isBooked   = bookedSlots.has(slot.key);
+                const isSelected = selected === slot.key;
+                return (
+                  <button
+                    key={slot.key}
+                    disabled={isBooked}
+                    onClick={() => setSelected(slot.key)}
+                    style={{
+                      padding: '10px 4px',
+                      fontFamily: 'Rajdhani, sans-serif', fontSize: '15px', fontWeight: 600,
+                      borderRadius: '5px', cursor: isBooked ? 'not-allowed' : 'pointer',
+                      transition: 'all 0.15s',
+                      background: isBooked
+                        ? 'rgba(255,45,120,0.06)'
+                        : isSelected
+                        ? 'rgba(0,245,212,0.22)'
+                        : 'rgba(0,245,212,0.05)',
+                      border: isBooked
+                        ? '1px solid rgba(255,45,120,0.22)'
+                        : isSelected
+                        ? '2px solid #00f5d4'
+                        : '1px solid rgba(0,245,212,0.22)',
+                      color: isBooked
+                        ? 'rgba(255,255,255,0.2)'
+                        : isSelected
+                        ? '#00f5d4'
+                        : 'rgba(255,255,255,0.78)',
+                      boxShadow: isSelected ? '0 0 14px rgba(0,245,212,0.3)' : 'none',
+                      textDecoration: isBooked ? 'line-through' : 'none',
+                      lineHeight: 1.2,
+                    }}
+                  >
+                    {slot.label}
+                    {isBooked && (
+                      <div style={{
+                        fontSize: '8px', color: 'rgba(255,45,120,0.55)',
+                        fontFamily: 'Orbitron, sans-serif', marginTop: '2px',
+                        textDecoration: 'none',
+                      }}>محجوز</div>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Error */}
+            {errMsg && (
+              <div style={{
+                color: '#ff2d78', fontFamily: 'Rajdhani, sans-serif',
+                fontSize: '14px', marginBottom: '10px',
+              }}>{errMsg}</div>
+            )}
+
+            {/* Confirm button */}
+            <button
+              onClick={confirmBooking}
+              disabled={!selected || phase === 'confirming'}
+              style={{
+                width: '100%', padding: '14px',
+                fontFamily: 'Orbitron, sans-serif', fontSize: '11px', letterSpacing: '0.13em',
+                background: selected
+                  ? 'linear-gradient(135deg,rgba(0,245,212,0.22),rgba(0,245,212,0.08))'
+                  : 'rgba(0,245,212,0.04)',
+                border: `2px solid ${selected ? '#00f5d4' : 'rgba(0,245,212,0.18)'}`,
+                color: selected ? '#00f5d4' : 'rgba(0,245,212,0.28)',
+                borderRadius: '5px',
+                cursor: selected && phase !== 'confirming' ? 'pointer' : 'not-allowed',
+                boxShadow: selected ? '0 0 22px rgba(0,245,212,0.28)' : 'none',
+                transition: 'all 0.2s',
+                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px',
+              }}
+            >
+              {phase === 'confirming'
+                ? (
+                  <>
+                    <svg width="14" height="14" viewBox="0 0 28 28" fill="none"
+                      style={{ animation: 'lf-spin 0.9s linear infinite', flexShrink: 0 }}>
+                      <circle cx="14" cy="14" r="10" stroke="#00f5d4" strokeWidth="2.5"
+                        strokeDasharray="22 14" strokeLinecap="round"/>
+                    </svg>
+                    جاري الحجز...
+                  </>
+                )
+                : 'تأكيد الحجز'
+              }
+            </button>
+
+          </div>
+        )}
       </div>
+    </div>
+  );
+}
+
+// ── Checking balance spinner ────────────────────────────────────────────────
+function CheckingView() {
+  return (
+    <div style={{ padding: '48px 24px', textAlign: 'center', direction: 'rtl' }}>
+      <svg width="40" height="40" viewBox="0 0 40 40" fill="none"
+        style={{ animation: 'lf-spin 1s linear infinite', margin: '0 auto 16px' }}>
+        <circle cx="20" cy="20" r="15" stroke="#00f5d4" strokeWidth="3"
+          strokeDasharray="30 20" strokeLinecap="round"/>
+      </svg>
+      <div style={{
+        fontFamily: 'Orbitron, sans-serif', fontSize: '10px',
+        color: 'rgba(0,245,212,0.5)', letterSpacing: '0.14em',
+      }}>
+        جاري التحقق من رصيدك...
+      </div>
+    </div>
+  );
+}
+
+// ── Insufficient balance dialog ─────────────────────────────────────────────
+function InsufficientView({ balance, onClose }: { balance: number; onClose: () => void }) {
+  return (
+    <div style={{ padding: '32px 24px', textAlign: 'center', direction: 'rtl' }}>
+
+      {/* Warning icon */}
+      <div style={{
+        width: '72px', height: '72px', borderRadius: '50%',
+        background: 'rgba(255,45,120,0.1)',
+        border: '2px solid rgba(255,45,120,0.5)',
+        boxShadow: '0 0 30px rgba(255,45,120,0.25)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        margin: '0 auto 20px',
+        fontSize: '32px',
+      }}>
+        💸
+      </div>
+
+      {/* Title */}
+      <div style={{
+        fontFamily: 'Orbitron, sans-serif', fontSize: '11px',
+        color: '#ff2d78', letterSpacing: '0.14em',
+        marginBottom: '14px',
+        textShadow: '0 0 12px rgba(255,45,120,0.5)',
+      }}>
+        رصيد غير كافٍ
+      </div>
+
+      {/* Message */}
+      <div style={{
+        fontFamily: 'Rajdhani, sans-serif', fontSize: '16px', fontWeight: 600,
+        color: 'rgba(255,255,255,0.88)', lineHeight: 1.7,
+        marginBottom: '18px',
+      }}>
+        عذراً، رصيدك الحالي غير كافٍ.
+        <br/>
+        يجب أن يكون في محفظتك
+        {' '}
+        <span style={{ color: '#f5c518', fontWeight: 700 }}>2,000 دينار</span>
+        {' '}
+        على الأقل للتمكن من حجز موعد!
+        <br/>
+        يرجى شحن رصيدك أولاً 💸
+      </div>
+
+      {/* Current balance badge */}
+      <div style={{
+        display: 'inline-flex', alignItems: 'center', gap: '8px',
+        padding: '8px 20px',
+        background: 'rgba(255,45,120,0.07)',
+        border: '1px solid rgba(255,45,120,0.3)',
+        borderRadius: '4px',
+        marginBottom: '24px',
+      }}>
+        <span style={{
+          fontFamily: 'Rajdhani, sans-serif', fontSize: '13px',
+          color: 'rgba(255,255,255,0.45)',
+        }}>رصيدك الحالي:</span>
+        <span style={{
+          fontFamily: 'Orbitron, sans-serif', fontSize: '13px', fontWeight: 700,
+          color: '#ff2d78',
+        }}>
+          {balance.toLocaleString()} د.ع
+        </span>
+      </div>
+
+      {/* Divider */}
+      <div style={{ height: '1px', background: 'rgba(255,45,120,0.15)', marginBottom: '22px' }} />
+
+      {/* Close button */}
+      <button onClick={onClose} style={{
+        width: '100%', padding: '13px',
+        fontFamily: 'Orbitron, sans-serif', fontSize: '10px', letterSpacing: '0.15em',
+        background: 'rgba(255,45,120,0.12)', border: '2px solid rgba(255,45,120,0.55)',
+        color: '#ff2d78', borderRadius: '5px', cursor: 'pointer',
+        boxShadow: '0 0 18px rgba(255,45,120,0.2)',
+        transition: 'background 0.2s',
+      }}
+        onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,45,120,0.2)')}
+        onMouseLeave={e => (e.currentTarget.style.background = 'rgba(255,45,120,0.12)')}
+      >
+        حسناً — إغلاق
+      </button>
+
     </div>
   );
 }
