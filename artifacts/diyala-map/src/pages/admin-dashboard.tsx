@@ -4637,10 +4637,354 @@ function ServicesSettingsTab({ toast }: { toast: ReturnType<typeof useToast> }) 
   );
 }
 
+// ══════════════════════════════════════════════════════════════════════════════
+// ── GiftCardsTab — توليد كارتات الشحن وبطاقات الهدايا ────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+interface GiftCard {
+  id:        string;   // Firestore doc ID = code itself
+  code:      string;
+  amount:    number;
+  isUsed:    boolean;
+  createdAt: string;
+}
+
+/** توليد كود عشوائي بصيغة  XXXX-XXXX-XXXX  (حروف كبيرة+صغيرة+أرقام) */
+function genCode(): string {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789';
+  const seg = (n: number) =>
+    Array.from({ length: n }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
+  return `${seg(4)}-${seg(4)}-${seg(4)}`;
+}
+
+function GiftCardsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
+  const [cards,      setCards]      = useState<GiftCard[]>([]);
+  const [amount,     setAmount]     = useState('10000');
+  const [countStr,   setCountStr]   = useState('1');
+  const [generating, setGenerating] = useState(false);
+  const [copied,     setCopied]     = useState<string | null>(null);
+  const [deleting,   setDeleting]   = useState<string | null>(null);
+  const [filterUsed, setFilterUsed] = useState<'unused' | 'used' | 'all'>('unused');
+
+  // ── Live listener ─────────────────────────────────────────────────────────
+  useEffect(() => {
+    const unsub = onSnapshot(
+      query(collection(db, 'gift_cards'), orderBy('createdAt', 'desc')),
+      snap => {
+        const rows: GiftCard[] = [];
+        snap.forEach(d => {
+          const r = d.data();
+          rows.push({
+            id:        d.id,
+            code:      String(r.code      ?? d.id),
+            amount:    Number(r.amount    ?? 0),
+            isUsed:    Boolean(r.isUsed   ?? false),
+            createdAt: r.createdAt?.toDate
+              ? r.createdAt.toDate().toLocaleString('ar-IQ')
+              : '—',
+          });
+        });
+        setCards(rows);
+      },
+      err => console.error('[GiftCardsTab]', err),
+    );
+    return () => unsub();
+  }, []);
+
+  // ── توليد الكارتات ────────────────────────────────────────────────────────
+  async function generate() {
+    const amt = Number(amount.replace(/,/g, '').trim());
+    const cnt = Math.min(Math.max(parseInt(countStr, 10) || 1, 1), 100);
+    if (!amt || amt <= 0) { toast.show('يرجى إدخال قيمة صحيحة للكارت', false); return; }
+    setGenerating(true);
+    try {
+      const batch = writeBatch(db);
+      for (let i = 0; i < cnt; i++) {
+        const code = genCode();
+        batch.set(doc(db, 'gift_cards', code), {
+          code,
+          amount:    amt,
+          isUsed:    false,
+          createdBy: 'Admin',
+          createdAt: serverTimestamp(),
+        });
+      }
+      await batch.commit();
+      toast.show(`✅ تم توليد ${cnt} كارت بقيمة ${amt.toLocaleString('ar-IQ')} دينار`);
+      setCountStr('1');
+    } catch (e: any) {
+      toast.show(`فشل التوليد: ${e?.message ?? e}`, false);
+    } finally {
+      setGenerating(false);
+    }
+  }
+
+  // ── نسخ الكود ─────────────────────────────────────────────────────────────
+  async function copyCode(code: string) {
+    try { await navigator.clipboard.writeText(code); } catch { /* noop */ }
+    setCopied(code);
+    setTimeout(() => setCopied(null), 1800);
+  }
+
+  // ── حذف كارت ─────────────────────────────────────────────────────────────
+  async function deleteCard(id: string) {
+    setDeleting(id);
+    try {
+      await deleteDoc(doc(db, 'gift_cards', id));
+      toast.show('تم حذف الكارت');
+    } catch (e: any) {
+      toast.show(`فشل الحذف: ${e?.message ?? e}`, false);
+    } finally {
+      setDeleting(null);
+    }
+  }
+
+  // ── طباعة الكارتات الظاهرة ────────────────────────────────────────────────
+  function printCards() {
+    const rows = filtered.map(c =>
+      `<tr style="border-bottom:1px solid #333">
+        <td style="padding:8px 12px;font-family:monospace;font-size:16px;letter-spacing:2px;font-weight:700">${c.code}</td>
+        <td style="padding:8px 12px;text-align:center">${c.amount.toLocaleString('ar-IQ')} IQD</td>
+        <td style="padding:8px 12px;font-size:11px;color:#888">${c.createdAt}</td>
+      </tr>`
+    ).join('');
+    const win = window.open('', '_blank');
+    if (!win) return;
+    win.document.write(`
+      <html><head><title>كارتات الشحن</title>
+      <style>body{direction:rtl;font-family:Arial;background:#fff;padding:20px}
+      table{border-collapse:collapse;width:100%}
+      th{background:#111;color:#fff;padding:10px 12px}
+      @media print{button{display:none!important}}</style>
+      </head><body>
+      <h2 style="text-align:center">كارتات شحن المحفظة — ديالى</h2>
+      <button onclick="window.print()" style="margin-bottom:16px;padding:8px 20px;background:#111;color:#fff;border:none;cursor:pointer;border-radius:4px">🖨 طباعة</button>
+      <table><thead><tr><th>الكود</th><th>القيمة</th><th>تاريخ الإنشاء</th></tr></thead>
+      <tbody>${rows}</tbody></table>
+      </body></html>`);
+    win.document.close();
+  }
+
+  const filtered = cards.filter(c =>
+    filterUsed === 'all' ? true : filterUsed === 'used' ? c.isUsed : !c.isUsed
+  );
+  const unusedCount = cards.filter(c => !c.isUsed).length;
+  const usedCount   = cards.filter(c => c.isUsed).length;
+
+  const AMOUNT_PRESETS = [5000, 10000, 25000, 50000, 100000];
+
+  return (
+    <div style={{ direction: 'rtl' }}>
+
+      {/* ── Header ──────────────────────────────────────────────────────── */}
+      <div style={{ marginBottom: '22px' }}>
+        <div style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '11px', color: C.yellow, letterSpacing: '0.18em', marginBottom: '4px' }}>
+          🎁 GIFT CARDS · إدارة كارتات الشحن
+        </div>
+        <div style={{ fontFamily: 'Rajdhani, sans-serif', fontSize: '13px', color: C.dim }}>
+          توليد أكواد شحن فريدة وآمنة لتوزيعها على الوكلاء والزبائن
+        </div>
+      </div>
+
+      {/* ── Stats row ───────────────────────────────────────────────────── */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(140px,1fr))', gap: '12px', marginBottom: '22px' }}>
+        {[
+          { label: 'إجمالي الكارتات', value: cards.length, color: C.blue },
+          { label: 'غير مستخدمة',     value: unusedCount,  color: C.green },
+          { label: 'مستخدمة',         value: usedCount,    color: C.dim },
+        ].map(s => (
+          <div key={s.label} style={{ background: C.surface, border: `1px solid ${s.color}22`, borderRadius: '6px', padding: '14px 16px' }}>
+            <div style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '22px', fontWeight: 700, color: s.color, textShadow: `0 0 14px ${s.color}44` }}>{s.value}</div>
+            <div style={{ fontFamily: 'Rajdhani, sans-serif', fontSize: '12px', color: C.dim, marginTop: '2px' }}>{s.label}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* ── Generator panel ─────────────────────────────────────────────── */}
+      <div style={{ background: C.surface, border: `1px solid ${C.yellow}28`, borderRadius: '6px', padding: '20px', marginBottom: '24px' }}>
+
+        <div style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '9px', color: `${C.yellow}88`, letterSpacing: '0.14em', marginBottom: '14px' }}>
+          ⚡ GENERATOR — توليد كارتات جديدة
+        </div>
+
+        {/* Amount presets */}
+        <div style={{ marginBottom: '14px' }}>
+          <div style={{ fontFamily: 'Rajdhani, sans-serif', fontSize: '12px', color: C.dim, marginBottom: '8px' }}>قيمة الكارت (دينار عراقي)</div>
+          <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginBottom: '8px' }}>
+            {AMOUNT_PRESETS.map(p => (
+              <button key={p} onClick={() => setAmount(String(p))}
+                style={{
+                  padding: '5px 14px', borderRadius: '4px', cursor: 'pointer',
+                  fontFamily: 'Orbitron, sans-serif', fontSize: '10px',
+                  background: amount === String(p) ? `${C.yellow}22` : 'transparent',
+                  border: `1px solid ${amount === String(p) ? C.yellow : C.border}`,
+                  color: amount === String(p) ? C.yellow : C.dim,
+                  transition: 'all 0.15s',
+                }}>
+                {p.toLocaleString('ar-IQ')}
+              </button>
+            ))}
+          </div>
+          <input
+            type="number" value={amount} onChange={e => setAmount(e.target.value)}
+            placeholder="أو أدخل قيمة مخصصة..."
+            style={{ ...FLD, width: '220px' }}
+          />
+        </div>
+
+        {/* Count */}
+        <div style={{ marginBottom: '18px' }}>
+          <div style={{ fontFamily: 'Rajdhani, sans-serif', fontSize: '12px', color: C.dim, marginBottom: '8px' }}>عدد الكارتات (الحد الأقصى 100)</div>
+          <input
+            type="number" min={1} max={100} value={countStr}
+            onChange={e => setCountStr(e.target.value)}
+            style={{ ...FLD, width: '120px' }}
+          />
+        </div>
+
+        {/* Generate button */}
+        <button onClick={generate} disabled={generating}
+          style={{
+            padding: '10px 28px', borderRadius: '4px', cursor: generating ? 'not-allowed' : 'pointer',
+            fontFamily: 'Orbitron, sans-serif', fontSize: '11px', letterSpacing: '0.1em',
+            background: generating ? `${C.yellow}10` : `${C.yellow}18`,
+            border: `1px solid ${generating ? C.border : C.yellow}`,
+            color: generating ? C.dim : C.yellow,
+            textShadow: generating ? 'none' : `0 0 10px ${C.yellow}66`,
+            transition: 'all 0.18s',
+          }}>
+          {generating ? '⏳ جاري التوليد...' : '⚡ توليد الكارتات'}
+        </button>
+      </div>
+
+      {/* ── Cards table ─────────────────────────────────────────────────── */}
+      <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: '6px', overflow: 'hidden' }}>
+
+        {/* Table toolbar */}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 16px', borderBottom: `1px solid ${C.border}`, flexWrap: 'wrap', gap: '10px' }}>
+          <div style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '9px', color: C.dim, letterSpacing: '0.12em' }}>
+            قائمة الكارتات · {filtered.length} نتيجة
+          </div>
+          <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+            {/* Filter buttons */}
+            {(['unused', 'used', 'all'] as const).map(f => {
+              const labels = { unused: 'غير مستخدمة', used: 'مستخدمة', all: 'الكل' };
+              const active = filterUsed === f;
+              return (
+                <button key={f} onClick={() => setFilterUsed(f)}
+                  style={{
+                    padding: '5px 12px', borderRadius: '3px', cursor: 'pointer',
+                    fontFamily: 'Rajdhani, sans-serif', fontSize: '12px',
+                    background: active ? `${C.blue}18` : 'transparent',
+                    border: `1px solid ${active ? C.blue : C.border}`,
+                    color: active ? C.blue : C.dim,
+                  }}>
+                  {labels[f]}
+                </button>
+              );
+            })}
+            {/* Print button */}
+            {filtered.length > 0 && (
+              <button onClick={printCards}
+                style={{ padding: '5px 14px', borderRadius: '3px', cursor: 'pointer', fontFamily: 'Rajdhani, sans-serif', fontSize: '12px', background: `${C.green}12`, border: `1px solid ${C.green}44`, color: C.green }}>
+                🖨 طباعة
+              </button>
+            )}
+          </div>
+        </div>
+
+        {filtered.length === 0 ? (
+          <div style={{ padding: '40px', textAlign: 'center', fontFamily: 'Rajdhani, sans-serif', fontSize: '14px', color: C.dim }}>
+            لا توجد كارتات — اضغط "توليد الكارتات" لإنشاء أكواد جديدة
+          </div>
+        ) : (
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+              <thead>
+                <tr style={{ background: `${C.yellow}08` }}>
+                  {['الكود', 'القيمة', 'الحالة', 'تاريخ الإنشاء', 'إجراءات'].map(h => (
+                    <th key={h} style={{ padding: '10px 14px', fontFamily: 'Orbitron, sans-serif', fontSize: '8px', color: `${C.yellow}88`, letterSpacing: '0.1em', textAlign: 'right', borderBottom: `1px solid ${C.border}`, whiteSpace: 'nowrap' }}>
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {filtered.map((card, i) => (
+                  <tr key={card.id}
+                    style={{
+                      background: i % 2 === 0 ? 'transparent' : `${C.yellow}03`,
+                      borderBottom: `1px solid ${C.border}22`,
+                      opacity: card.isUsed ? 0.45 : 1,
+                    }}>
+                    {/* Code */}
+                    <td style={{ padding: '11px 14px', fontFamily: 'Courier New, monospace', fontSize: '15px', fontWeight: 700, color: card.isUsed ? C.dim : C.text, letterSpacing: '1.5px' }}>
+                      {card.code}
+                    </td>
+                    {/* Amount */}
+                    <td style={{ padding: '11px 14px', fontFamily: 'Orbitron, sans-serif', fontSize: '12px', color: C.yellow, whiteSpace: 'nowrap' }}>
+                      {card.amount.toLocaleString('ar-IQ')} IQD
+                    </td>
+                    {/* Status */}
+                    <td style={{ padding: '11px 14px' }}>
+                      <span style={{
+                        padding: '3px 9px', borderRadius: '20px', fontSize: '11px',
+                        fontFamily: 'Rajdhani, sans-serif',
+                        background: card.isUsed ? `${C.dim}18` : `${C.green}14`,
+                        border: `1px solid ${card.isUsed ? C.border : C.green + '44'}`,
+                        color: card.isUsed ? C.dim : C.green,
+                      }}>
+                        {card.isUsed ? 'مستخدم' : '🟢 متاح'}
+                      </span>
+                    </td>
+                    {/* Date */}
+                    <td style={{ padding: '11px 14px', fontFamily: 'Rajdhani, sans-serif', fontSize: '12px', color: C.dim, whiteSpace: 'nowrap' }}>
+                      {card.createdAt}
+                    </td>
+                    {/* Actions */}
+                    <td style={{ padding: '11px 14px' }}>
+                      <div style={{ display: 'flex', gap: '6px', flexWrap: 'nowrap' }}>
+                        {/* Copy */}
+                        <button onClick={() => copyCode(card.code)}
+                          style={{
+                            padding: '4px 10px', borderRadius: '3px', cursor: 'pointer',
+                            fontFamily: 'Rajdhani, sans-serif', fontSize: '11px',
+                            background: copied === card.code ? `${C.green}18` : `${C.blue}12`,
+                            border: `1px solid ${copied === card.code ? C.green + '55' : C.blue + '44'}`,
+                            color: copied === card.code ? C.green : C.blue,
+                            whiteSpace: 'nowrap', transition: 'all 0.15s',
+                          }}>
+                          {copied === card.code ? '✅ تم النسخ' : '📋 نسخ'}
+                        </button>
+                        {/* Delete */}
+                        {!card.isUsed && (
+                          <button onClick={() => deleteCard(card.id)}
+                            disabled={deleting === card.id}
+                            style={{
+                              padding: '4px 10px', borderRadius: '3px', cursor: deleting === card.id ? 'not-allowed' : 'pointer',
+                              fontFamily: 'Rajdhani, sans-serif', fontSize: '11px',
+                              background: `${C.red}0e`, border: `1px solid ${C.red}33`, color: C.red,
+                            }}>
+                            {deleting === card.id ? '...' : '🗑 حذف'}
+                          </button>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+    </div>
+  );
+}
+
 // ── Admin Dashboard ───────────────────────────────────────────────────────────
 export function AdminDashboard() {
   const [, navigate] = useLocation();
-  const [tab, setTab] = useState<"merchants" | "map" | "categories" | "settings" | "taxi" | "drivers" | "fuel" | "bounty" | "users" | "users_radar" | "doctors_bookings" | "services_settings">("merchants");
+  const [tab, setTab] = useState<"merchants" | "map" | "categories" | "settings" | "taxi" | "drivers" | "fuel" | "bounty" | "users" | "users_radar" | "gift_cards" | "doctors_bookings" | "services_settings">("merchants");
   const [cats, setCats] = useState<Cat[]>([]);
   const [authChecked, setAuthChecked] = useState(false);
   const toast = useToast();
@@ -4685,6 +5029,7 @@ export function AdminDashboard() {
     { key: "bounty"     as const, en: "BOUNTY",      ar: "⭐ المهمات والجوائز" },
     { key: "users"            as const, en: "USERS",           ar: "👥 المستخدمون" },
     { key: "users_radar"      as const, en: "USERS RADAR",     ar: "📡 رادار المستخدمين" },
+    { key: "gift_cards"       as const, en: "GIFT CARDS",      ar: "🎁 كارتات الشحن" },
     { key: "doctors_bookings"   as const, en: "DOCTORS BOOKINGS",  ar: "🏥 حجوزات الأطباء" },
     { key: "services_settings" as const, en: "SERVICES SETTINGS", ar: "⚙️ إعدادات الخدمات" },
     { key: "settings"          as const, en: "SETTINGS",          ar: "الإعدادات" },
@@ -4740,6 +5085,7 @@ export function AdminDashboard() {
         {tab === "bounty"     && <BountyMissionsTab toast={toast} />}
         {tab === "users"            && <UsersTab toast={toast} />}
         {tab === "users_radar"      && <UsersRadarTab />}
+        {tab === "gift_cards"       && <GiftCardsTab toast={toast} />}
         {tab === "doctors_bookings"   && <DoctorsBookingsTab toast={toast} />}
         {tab === "services_settings"  && <ServicesSettingsTab toast={toast} />}
         {tab === "settings"           && <SettingsTab toast={toast} />}
