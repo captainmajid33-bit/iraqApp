@@ -3390,6 +3390,44 @@ function DoctorCard({
   const [slotEnd,     setSlotEnd]     = useState(9);   // default 9 PM
   const [slotsSaving, setSlotsSaving] = useState(false);
 
+  // ── Reset / delete state ──────────────────────────────────────────────────
+  const [showResetConfirm, setShowResetConfirm] = useState(false);
+  const [resetting,        setResetting]        = useState(false);
+  const [confirmDelAppt,   setConfirmDelAppt]   = useState<Appt | null>(null);
+  const [deletingAppt,     setDeletingAppt]     = useState<string | null>(null);
+
+  // ── Reset ALL appointments for this doctor ────────────────────────────────
+  async function resetAllAppts() {
+    setResetting(true);
+    try {
+      const colRef = collection(db, "doctors", String(doctor.id), "appointments");
+      const snap   = await getDocs(colRef);
+      const batch  = writeBatch(db);
+      snap.forEach(d => batch.delete(d.ref));
+      await batch.commit();
+      setShowResetConfirm(false);
+    } catch {
+      // silent — user can retry
+    } finally {
+      setResetting(false);
+    }
+  }
+
+  // ── Delete a single appointment ───────────────────────────────────────────
+  async function deleteSingleAppt(appt: Appt) {
+    setDeletingAppt(appt.id);
+    try {
+      await deleteDoc(
+        doc(db, "doctors", String(doctor.id), "appointments", appt.id)
+      );
+      setConfirmDelAppt(null);
+    } catch {
+      // silent
+    } finally {
+      setDeletingAppt(null);
+    }
+  }
+
   useEffect(() => {
     if (!open) return;
     setLoading(true);
@@ -3585,6 +3623,161 @@ function DoctorCard({
         </div>
       )}
 
+      {/* ── Reset ALL appointments confirm dialog ── */}
+      {showResetConfirm && (
+        <div
+          style={{
+            position: "fixed", inset: 0, zIndex: 700,
+            background: "rgba(0,0,0,0.82)", backdropFilter: "blur(7px)",
+            display: "flex", alignItems: "center", justifyContent: "center", padding: "16px",
+          }}
+          onClick={e => { if (e.target === e.currentTarget) setShowResetConfirm(false); }}
+        >
+          <div style={{
+            width: "min(400px, 100%)", background: C.surface,
+            border: `1px solid ${C.red}55`, borderRadius: "5px",
+            boxShadow: `0 0 50px ${C.red}18, 0 8px 40px rgba(0,0,0,0.95)`,
+            overflow: "hidden", direction: "rtl",
+          }}>
+            {/* Header */}
+            <div style={{
+              display: "flex", alignItems: "center", gap: "12px",
+              padding: "16px 18px", borderBottom: `1px solid ${C.red}22`,
+              background: `${C.red}07`,
+            }}>
+              <span style={{ fontSize: "22px" }}>⚠️</span>
+              <div>
+                <div style={{ fontFamily: "Orbitron, sans-serif", fontSize: "9px", color: C.red, letterSpacing: "0.14em" }}>
+                  تصفير كافة الحجوزات
+                </div>
+                <div style={{ fontFamily: "Rajdhani, sans-serif", fontSize: "13px", color: C.text, marginTop: "3px" }}>
+                  {doctor.name}
+                </div>
+              </div>
+            </div>
+            {/* Body */}
+            <div style={{ padding: "20px 18px" }}>
+              <div style={{
+                fontFamily: "Rajdhani, sans-serif", fontSize: "15px",
+                color: C.text, lineHeight: 1.7, marginBottom: "20px",
+              }}>
+                هل أنت متأكد من تصفير وحذف جميع حجوزات هذا الطبيب؟
+                <br />
+                <span style={{ color: C.red, fontSize: "13px" }}>
+                  سيتم تحرير جميع السلوتات وتحويلها لـ&rdquo;متاح&rdquo; فوراً.
+                </span>
+              </div>
+              <div style={{ display: "flex", gap: "10px" }}>
+                <button
+                  onClick={resetAllAppts}
+                  disabled={resetting}
+                  style={{
+                    flex: 1, padding: "11px",
+                    background: resetting ? `${C.red}08` : `${C.red}18`,
+                    border: `1px solid ${resetting ? `${C.red}22` : `${C.red}66`}`,
+                    color: resetting ? C.dim : C.red,
+                    fontFamily: "Orbitron, sans-serif", fontSize: "10px",
+                    letterSpacing: "0.08em", cursor: resetting ? "not-allowed" : "pointer",
+                    borderRadius: "4px", transition: "all 0.18s",
+                  }}
+                >
+                  {resetting ? "⏳ جاري الحذف..." : "🧹 تأكيد التصفير"}
+                </button>
+                <button
+                  onClick={() => setShowResetConfirm(false)}
+                  style={{
+                    padding: "11px 18px",
+                    background: "transparent",
+                    border: `1px solid ${C.border}`,
+                    color: C.dim, cursor: "pointer",
+                    fontFamily: "Orbitron, sans-serif", fontSize: "10px",
+                    letterSpacing: "0.08em", borderRadius: "4px",
+                  }}
+                >
+                  إلغاء
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Delete single appointment confirm dialog ── */}
+      {confirmDelAppt && (
+        <div
+          style={{
+            position: "fixed", inset: 0, zIndex: 700,
+            background: "rgba(0,0,0,0.8)", backdropFilter: "blur(6px)",
+            display: "flex", alignItems: "center", justifyContent: "center", padding: "16px",
+          }}
+          onClick={e => { if (e.target === e.currentTarget) setConfirmDelAppt(null); }}
+        >
+          <div style={{
+            width: "min(380px, 100%)", background: C.surface,
+            border: `1px solid ${C.red}44`, borderRadius: "5px",
+            boxShadow: `0 0 40px ${C.red}14, 0 8px 40px rgba(0,0,0,0.95)`,
+            overflow: "hidden", direction: "rtl",
+          }}>
+            <div style={{
+              display: "flex", alignItems: "center", gap: "12px",
+              padding: "14px 18px", borderBottom: `1px solid ${C.red}22`,
+              background: `${C.red}06`,
+            }}>
+              <span style={{ fontSize: "20px" }}>🗑️</span>
+              <span style={{ fontFamily: "Orbitron, sans-serif", fontSize: "9px", color: C.red, letterSpacing: "0.12em" }}>
+                حذف حجز
+              </span>
+            </div>
+            <div style={{ padding: "18px 18px" }}>
+              <div style={{
+                fontFamily: "Rajdhani, sans-serif", fontSize: "15px",
+                color: C.text, lineHeight: 1.6, marginBottom: "18px",
+              }}>
+                حذف حجز{" "}
+                <span style={{ color: C.yellow, fontWeight: 700 }}>
+                  {confirmDelAppt.userName ?? "الزبون"}
+                </span>
+                {confirmDelAppt.date && (
+                  <span style={{ color: C.dim }}>{" "}بتاريخ {confirmDelAppt.date}</span>
+                )}
+                {confirmDelAppt.slot_time && (
+                  <span style={{ color: C.blue }}>{" "}الساعة {confirmDelAppt.slot_time}</span>
+                )}
+                ؟
+              </div>
+              <div style={{ display: "flex", gap: "10px" }}>
+                <button
+                  onClick={() => deleteSingleAppt(confirmDelAppt)}
+                  disabled={deletingAppt === confirmDelAppt.id}
+                  style={{
+                    flex: 1, padding: "10px",
+                    background: deletingAppt ? `${C.red}08` : `${C.red}16`,
+                    border: `1px solid ${deletingAppt ? `${C.red}22` : `${C.red}55`}`,
+                    color: deletingAppt ? C.dim : C.red,
+                    fontFamily: "Orbitron, sans-serif", fontSize: "10px",
+                    letterSpacing: "0.08em", cursor: deletingAppt ? "not-allowed" : "pointer",
+                    borderRadius: "4px", transition: "all 0.18s",
+                  }}
+                >
+                  {deletingAppt === confirmDelAppt.id ? "⏳ جاري الحذف..." : "🗑️ تأكيد الحذف"}
+                </button>
+                <button
+                  onClick={() => setConfirmDelAppt(null)}
+                  style={{
+                    padding: "10px 16px", background: "transparent",
+                    border: `1px solid ${C.border}`, color: C.dim,
+                    cursor: "pointer", fontFamily: "Orbitron, sans-serif",
+                    fontSize: "10px", borderRadius: "4px",
+                  }}
+                >
+                  إلغاء
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ── Card Header ── */}
       <div
         style={{
@@ -3642,6 +3835,28 @@ function DoctorCard({
             fontFamily: "Orbitron, sans-serif", fontSize: "8px",
             color: C.blue, marginTop: "3px", whiteSpace: "nowrap", letterSpacing: "0.06em",
           }}>الأوقات</span>
+        </button>
+
+        {/* Reset all appointments button */}
+        <button
+          onClick={(e) => { e.stopPropagation(); setShowResetConfirm(true); }}
+          title="تصفير كافة الحجوزات"
+          style={{
+            display: "flex", flexDirection: "column", alignItems: "center",
+            padding: "6px 12px",
+            background: `${C.red}0a`,
+            border: `1px solid ${C.red}33`,
+            borderRadius: "4px", flexShrink: 0, cursor: "pointer",
+            transition: "all 0.2s",
+          }}
+          onMouseEnter={(e) => (e.currentTarget.style.background = `${C.red}1a`)}
+          onMouseLeave={(e) => (e.currentTarget.style.background = `${C.red}0a`)}
+        >
+          <span style={{ fontSize: "15px", lineHeight: 1 }}>🧹</span>
+          <span style={{
+            fontFamily: "Orbitron, sans-serif", fontSize: "7px",
+            color: C.red, marginTop: "3px", whiteSpace: "nowrap", letterSpacing: "0.05em",
+          }}>تصفير</span>
         </button>
 
         {/* Bookings counter */}
@@ -3707,7 +3922,7 @@ function DoctorCard({
                     background: `${C.green}08`,
                     borderBottom: `1px solid ${C.border}`,
                   }}>
-                    {["#", "اسم الزبون", "معرّف الزبون (UID)", "وقت الحجز", "تاريخ اليوم", "التحقق الجغرافي / الاستقطاع"].map((h) => (
+                    {["#", "اسم الزبون", "معرّف الزبون (UID)", "وقت الحجز", "تاريخ اليوم", "التحقق الجغرافي / الاستقطاع", ""].map((h) => (
                       <th key={h} style={{
                         padding: "9px 12px", textAlign: "right",
                         fontSize: "9px", color: C.green,
@@ -3750,7 +3965,7 @@ function DoctorCard({
                       }}>
                         {ap.date ?? "—"}
                       </td>
-                      <td style={{ padding: "9px 12px", whiteSpace: "nowrap" }}>
+                      <td style={{ padding: "9px 6px", whiteSpace: "nowrap" }}>
                         {ap.isUserArrived ? (
                           <div style={{ display: "flex", flexDirection: "column", gap: "3px" }}>
                             <span style={{
@@ -3789,6 +4004,31 @@ function DoctorCard({
                             حجز مسجل — لم يُرصد حضور جغرافي
                           </span>
                         )}
+                      </td>
+
+                      {/* ── Trash (delete single) ── */}
+                      <td style={{ padding: "9px 10px", textAlign: "center" }}>
+                        <button
+                          onClick={() => setConfirmDelAppt(ap)}
+                          disabled={deletingAppt === ap.id}
+                          title={`حذف حجز ${ap.userName ?? ""}`}
+                          style={{
+                            background: `${C.red}0c`,
+                            border: `1px solid ${C.red}33`,
+                            borderRadius: "4px",
+                            padding: "5px 8px",
+                            cursor: deletingAppt === ap.id ? "not-allowed" : "pointer",
+                            color: C.red,
+                            fontSize: "14px",
+                            lineHeight: 1,
+                            transition: "all 0.15s",
+                            opacity: deletingAppt === ap.id ? 0.4 : 1,
+                          }}
+                          onMouseEnter={e => (e.currentTarget.style.background = `${C.red}20`)}
+                          onMouseLeave={e => (e.currentTarget.style.background = `${C.red}0c`)}
+                        >
+                          {deletingAppt === ap.id ? "⏳" : "🗑️"}
+                        </button>
                       </td>
                     </tr>
                   ))}
