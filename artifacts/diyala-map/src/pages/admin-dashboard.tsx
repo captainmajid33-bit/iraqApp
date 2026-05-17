@@ -1852,6 +1852,7 @@ function BountyMissionsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
           second_reward: String(raw.second_reward ?? ''),
           third_reward: String(raw.third_reward ?? ''),
           fake_message: String(raw.fake_message ?? ''),
+          secret_answer: String(raw.secret_answer ?? ''),
           winners_log: Array.isArray(raw.winners_log) ? raw.winners_log : [],
           expiresAt: raw.expiresAt,
           status: raw.status ?? 'active',

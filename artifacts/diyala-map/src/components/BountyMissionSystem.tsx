@@ -129,9 +129,13 @@ export function BountyMissionSystem({
   const [internalPos, setInternalPos] = useState<{lat:number;lng:number}|null>(null);
   const [overlays,    setOverlays]    = useState<Array<{id:string;x:number;y:number;ms:number}>>([]);
 
+  const [navLoading,  setNavLoading]  = useState(false);
+
   const markersRef  = useRef<Map<string, L.Marker>>(new Map());
   const gpsWatchRef = useRef<number | null>(null);
   const bountiesRef = useRef<BountyDoc[]>([]); // stable ref to avoid stale closure in transaction
+  const navGlowRef  = useRef<L.Polyline | null>(null);
+  const navLineRef  = useRef<L.Polyline | null>(null);
 
   const pos = userLocation ?? internalPos;
 
@@ -261,6 +265,85 @@ export function BountyMissionSystem({
 
   // ── Keep bountiesRef in sync (stable ref for transaction) ─────────────────
   useEffect(() => { bountiesRef.current = bounties; }, [bounties]);
+
+  // ── Clear nav route polylines ──────────────────────────────────────────────
+  const clearNavRoute = useCallback(() => {
+    navGlowRef.current?.remove(); navGlowRef.current = null;
+    navLineRef.current?.remove(); navLineRef.current = null;
+  }, []);
+
+  // ── Cleanup nav route on unmount ──────────────────────────────────────────
+  useEffect(() => () => clearNavRoute(), [clearNavRoute]);
+
+  // ── Navigate to mission: close sheet → draw OSRM road route → fitBounds ──
+  const goToMission = useCallback(async () => {
+    if (!pos || !selected || !mapRef.current) return;
+    clearNavRoute();
+    setNavLoading(true);
+
+    // Close bottom sheet so map is fully visible
+    setSelected(null);
+    setPhase('idle');
+
+    const map = mapRef.current;
+    const { lat: uLat, lng: uLng } = pos;
+    const { latitude: dLat, longitude: dLng } = selected;
+
+    try {
+      const url =
+        `https://router.project-osrm.org/route/v1/driving/` +
+        `${uLng},${uLat};${dLng},${dLat}` +
+        `?overview=full&geometries=geojson`;
+      const res = await fetch(url, { signal: AbortSignal.timeout(12000) });
+      if (!res.ok) throw new Error('osrm');
+      const data = await res.json();
+      const coords: [number, number][] = (data.routes?.[0]?.geometry?.coordinates ?? [])
+        .map(([lng, lat]: [number, number]) => [lat, lng]);
+
+      if (coords.length >= 2) {
+        // Outer glow
+        navGlowRef.current = L.polyline(coords, {
+          color: '#f5c518', weight: 11, opacity: 0.16, lineCap: 'round', lineJoin: 'round',
+        }).addTo(map);
+        // Main neon gold line
+        navLineRef.current = L.polyline(coords, {
+          color: '#f5c518', weight: 3.5, opacity: 0.95,
+          dashArray: '10 5', lineCap: 'round', lineJoin: 'round',
+        }).addTo(map);
+
+        // Destination pin
+        const destIcon = L.divIcon({
+          className: '',
+          iconSize: [36, 36], iconAnchor: [18, 36],
+          html: `<div style="width:36px;height:36px;display:flex;align-items:center;justify-content:center;
+            background:#f5c51820;border:2px solid #f5c518;border-radius:50% 50% 50% 0;
+            transform:rotate(-45deg);box-shadow:0 0 18px #f5c518aa;">
+            <span style="transform:rotate(45deg);font-size:16px;">⭐</span></div>`,
+        });
+        L.marker([dLat, dLng], { icon: destIcon, zIndexOffset: 3000 }).addTo(map);
+
+        // Fit both endpoints in view with 60 px padding
+        map.fitBounds(
+          L.latLngBounds([[uLat, uLng], [dLat, dLng]]),
+          { padding: [60, 60], animate: true, duration: 1.0 },
+        );
+      }
+    } catch {
+      // Fallback: straight line if OSRM fails
+      navGlowRef.current = L.polyline([[uLat, uLng], [dLat, dLng]], {
+        color: '#f5c518', weight: 9, opacity: 0.14,
+      }).addTo(map);
+      navLineRef.current = L.polyline([[uLat, uLng], [dLat, dLng]], {
+        color: '#f5c518', weight: 2.5, opacity: 0.85, dashArray: '6 5',
+      }).addTo(map);
+      map.fitBounds(
+        L.latLngBounds([[uLat, uLng], [dLat, dLng]]),
+        { padding: [60, 60], animate: true, duration: 1.0 },
+      );
+    } finally {
+      setNavLoading(false);
+    }
+  }, [pos, selected, mapRef, clearNavRoute]);
 
   // ── Open question dialog when user clicks claim ─────────────────────────
   const openQuestion = useCallback(() => {
@@ -503,6 +586,47 @@ export function BountyMissionSystem({
                     }
                   </div>
                 </div>
+
+                {/* ── Go to Mission button ── */}
+                {locReady && selMs !== null && selMs > 0 && selected.winners_log.length < 3 && (
+                  <button
+                    onClick={goToMission}
+                    disabled={navLoading}
+                    style={{
+                      width: '100%', padding: '14px 20px', marginBottom: '10px',
+                      background: navLoading
+                        ? 'rgba(0,212,255,0.04)'
+                        : 'linear-gradient(135deg,rgba(0,212,255,0.18),rgba(0,212,255,0.07))',
+                      border: `2px solid ${navLoading ? 'rgba(0,212,255,0.3)' : '#00d4ff'}`,
+                      color: '#00d4ff',
+                      fontFamily: 'Orbitron, sans-serif', fontSize: '11px', letterSpacing: '0.15em',
+                      cursor: navLoading ? 'wait' : 'pointer', borderRadius: '6px',
+                      boxShadow: navLoading ? 'none' : '0 0 20px rgba(0,212,255,0.35),0 0 40px rgba(0,212,255,0.12)',
+                      display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px',
+                      transition: 'all 0.2s',
+                    }}
+                  >
+                    {navLoading ? (
+                      <>
+                        <svg width="16" height="16" viewBox="0 0 28 28" fill="none"
+                          style={{ animation: 'lf-spin 0.9s linear infinite', flexShrink: 0 }}>
+                          <circle cx="14" cy="14" r="10" stroke="#00d4ff" strokeWidth="2.5"
+                            strokeDasharray="22 14" strokeLinecap="round"/>
+                        </svg>
+                        جاري رسم المسار...
+                      </>
+                    ) : (
+                      <>
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" style={{ flexShrink: 0 }}>
+                          <path d="M12 2L19 9H15V22H9V9H5L12 2Z" fill="#00d4ff" opacity="0.9"/>
+                          <path d="M12 2L19 9H15V22H9V9H5L12 2Z" stroke="#00d4ff" strokeWidth="1.2"
+                            strokeLinejoin="round"/>
+                        </svg>
+                        الذهاب إلى المهمة
+                      </>
+                    )}
+                  </button>
+                )}
 
                 {/* Claim button → opens question dialog first */}
                 {isClose && selMs !== null && selMs > 0 && selected.winners_log.length < 3 && (
