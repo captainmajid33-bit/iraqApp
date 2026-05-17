@@ -4,7 +4,7 @@ import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import {
   collection, onSnapshot, addDoc, updateDoc, deleteDoc,
-  doc, serverTimestamp, writeBatch, Timestamp,
+  doc, serverTimestamp, writeBatch, Timestamp, query, orderBy,
 } from "firebase/firestore";
 import { db, storage } from "@/lib/firebase";
 import { ref as storageRef, uploadBytes, getDownloadURL } from "firebase/storage";
@@ -3191,10 +3191,372 @@ function FuelStationsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
   );
 }
 
+// ── Doctors Bookings Tab ──────────────────────────────────────────────────────
+interface Appt {
+  id: string;
+  userName?: string;
+  userId?: string;
+  slot_time?: string;
+  date?: string;
+}
+
+function DoctorCard({
+  doctor,
+  defaultOpen,
+}: {
+  doctor: Loc;
+  defaultOpen?: boolean;
+}) {
+  const [open, setOpen] = useState(defaultOpen ?? false);
+  const [appts, setAppts] = useState<Appt[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    setLoading(true);
+    const colRef = collection(db, "doctors", String(doctor.id), "appointments");
+    const q = query(colRef, orderBy("date", "desc"));
+    const unsub = onSnapshot(
+      q,
+      (snap) => {
+        const rows: Appt[] = [];
+        snap.forEach((d) =>
+          rows.push({ id: d.id, ...(d.data() as Omit<Appt, "id">) })
+        );
+        // secondary sort by slot_time desc (string comparison works for HH:MM)
+        rows.sort((a, b) => {
+          const dateCmp = (b.date ?? "").localeCompare(a.date ?? "");
+          if (dateCmp !== 0) return dateCmp;
+          return (b.slot_time ?? "").localeCompare(a.slot_time ?? "");
+        });
+        setAppts(rows);
+        setLoading(false);
+      },
+      () => setLoading(false)
+    );
+    return unsub;
+  }, [open, doctor.id]);
+
+  const totalCommission = appts.length * 2000;
+
+  return (
+    <div style={{
+      border: `1px solid ${open ? C.green : C.border}`,
+      borderRadius: "5px",
+      marginBottom: "10px",
+      overflow: "hidden",
+      transition: "border-color 0.2s",
+      boxShadow: open ? `0 0 16px ${C.green}18` : "none",
+    }}>
+      {/* ── Card Header ── */}
+      <button
+        onClick={() => setOpen((v) => !v)}
+        style={{
+          width: "100%", display: "flex", alignItems: "center",
+          gap: "14px", padding: "14px 18px", cursor: "pointer",
+          background: open ? `${C.green}08` : C.surface,
+          border: "none", textAlign: "right", direction: "rtl",
+          transition: "background 0.18s",
+        }}
+      >
+        {/* Expand icon */}
+        <span style={{
+          fontFamily: "Orbitron, sans-serif", fontSize: "14px",
+          color: open ? C.green : C.dim,
+          transform: open ? "rotate(90deg)" : "rotate(0deg)",
+          transition: "transform 0.2s", flexShrink: 0,
+        }}>▶</span>
+
+        {/* Doctor info */}
+        <div style={{ flex: 1, textAlign: "right" }}>
+          <div style={{
+            fontFamily: "Rajdhani, sans-serif", fontSize: "15px", fontWeight: 700,
+            color: C.text,
+          }}>{doctor.name}</div>
+          {doctor.details && (
+            <div style={{
+              fontFamily: "Rajdhani, sans-serif", fontSize: "12px",
+              color: C.dim, marginTop: "2px",
+            }}>{doctor.details}</div>
+          )}
+        </div>
+
+        {/* Bookings counter */}
+        <div style={{
+          display: "flex", flexDirection: "column", alignItems: "center",
+          padding: "6px 14px",
+          background: `${C.blue}10`,
+          border: `1px solid ${C.blue}33`,
+          borderRadius: "4px", flexShrink: 0,
+        }}>
+          <span style={{
+            fontFamily: "Orbitron, sans-serif", fontSize: "16px", fontWeight: 700,
+            color: C.blue, lineHeight: 1,
+          }}>{appts.length}</span>
+          <span style={{
+            fontFamily: "Rajdhani, sans-serif", fontSize: "10px",
+            color: C.dim, marginTop: "2px",
+          }}>📈 حجز</span>
+        </div>
+
+        {/* Commission badge */}
+        <div style={{
+          display: "flex", flexDirection: "column", alignItems: "center",
+          padding: "6px 14px",
+          background: `${C.yellow}10`,
+          border: `1px solid ${C.yellow}33`,
+          borderRadius: "4px", flexShrink: 0,
+        }}>
+          <span style={{
+            fontFamily: "Orbitron, sans-serif", fontSize: "15px", fontWeight: 700,
+            color: C.yellow, lineHeight: 1, whiteSpace: "nowrap",
+          }}>{totalCommission.toLocaleString()}</span>
+          <span style={{
+            fontFamily: "Rajdhani, sans-serif", fontSize: "10px",
+            color: C.dim, marginTop: "2px", whiteSpace: "nowrap",
+          }}>💰 عمولة د.ع</span>
+        </div>
+      </button>
+
+      {/* ── Appointments Sub-Table ── */}
+      {open && (
+        <div style={{ borderTop: `1px solid ${C.border}` }}>
+          {loading ? (
+            <div style={{
+              padding: "32px", textAlign: "center",
+              fontFamily: "Orbitron, sans-serif", fontSize: "10px",
+              color: C.dim, letterSpacing: "0.1em",
+            }}>LOADING...</div>
+          ) : appts.length === 0 ? (
+            <div style={{
+              padding: "28px", textAlign: "center",
+              fontFamily: "Rajdhani, sans-serif", fontSize: "14px",
+              color: C.dim,
+            }}>لا توجد حجوزات لهذا الطبيب حتى الآن</div>
+          ) : (
+            <div style={{ overflowX: "auto" }}>
+              <table style={{
+                width: "100%", borderCollapse: "collapse",
+                fontFamily: "Rajdhani, sans-serif",
+              }}>
+                <thead>
+                  <tr style={{
+                    background: `${C.green}08`,
+                    borderBottom: `1px solid ${C.border}`,
+                  }}>
+                    {["#", "اسم الزبون", "معرّف الزبون (UID)", "وقت الحجز", "تاريخ اليوم", "حالة الاستقطاع"].map((h) => (
+                      <th key={h} style={{
+                        padding: "9px 12px", textAlign: "right",
+                        fontSize: "9px", color: C.green,
+                        fontFamily: "Orbitron, sans-serif", letterSpacing: "0.07em",
+                        whiteSpace: "nowrap",
+                      }}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {appts.map((ap, i) => (
+                    <tr key={ap.id}
+                      style={{ borderBottom: `1px solid rgba(123,47,247,0.07)` }}
+                      onMouseEnter={(e) => (e.currentTarget.style.background = `${C.green}05`)}
+                      onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+                    >
+                      <td style={{ padding: "9px 12px", color: C.dim, fontSize: "12px" }}>
+                        {i + 1}
+                      </td>
+                      <td style={{ padding: "9px 12px", color: C.text, fontSize: "14px", fontWeight: 600 }}>
+                        {ap.userName ?? "—"}
+                      </td>
+                      <td style={{
+                        padding: "9px 12px", fontFamily: "monospace",
+                        fontSize: "11px", color: C.dim,
+                        maxWidth: "160px", overflow: "hidden",
+                        textOverflow: "ellipsis", whiteSpace: "nowrap",
+                      }}>
+                        {ap.userId ?? "—"}
+                      </td>
+                      <td style={{
+                        padding: "9px 12px", fontFamily: "Orbitron, sans-serif",
+                        fontSize: "12px", color: C.blue, whiteSpace: "nowrap",
+                      }}>
+                        {ap.slot_time ?? "—"}
+                      </td>
+                      <td style={{
+                        padding: "9px 12px", fontFamily: "Rajdhani, sans-serif",
+                        fontSize: "13px", color: C.dim, whiteSpace: "nowrap",
+                      }}>
+                        {ap.date ?? "—"}
+                      </td>
+                      <td style={{ padding: "9px 12px", whiteSpace: "nowrap" }}>
+                        <span style={{
+                          display: "inline-flex", alignItems: "center", gap: "5px",
+                          padding: "3px 10px",
+                          background: "rgba(0,245,212,0.07)",
+                          border: "1px solid rgba(0,245,212,0.25)",
+                          borderRadius: "3px",
+                          fontFamily: "Rajdhani, sans-serif", fontSize: "13px", fontWeight: 600,
+                          color: C.green,
+                        }}>
+                          تم استقطاع 2,000 د.ع بنجاح 🟢
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+
+              {/* Summary footer */}
+              <div style={{
+                display: "flex", justifyContent: "flex-end", gap: "24px",
+                padding: "10px 18px",
+                borderTop: `1px solid ${C.border}`,
+                background: `${C.yellow}05`,
+              }}>
+                <span style={{
+                  fontFamily: "Rajdhani, sans-serif", fontSize: "13px", color: C.dim,
+                }}>إجمالي الحجوزات:</span>
+                <span style={{
+                  fontFamily: "Orbitron, sans-serif", fontSize: "13px",
+                  color: C.blue, fontWeight: 700,
+                }}>{appts.length} حجز</span>
+                <span style={{
+                  fontFamily: "Rajdhani, sans-serif", fontSize: "13px", color: C.dim,
+                }}>إجمالي العمولة:</span>
+                <span style={{
+                  fontFamily: "Orbitron, sans-serif", fontSize: "13px",
+                  color: C.yellow, fontWeight: 700,
+                }}>{totalCommission.toLocaleString()} د.ع</span>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DoctorsBookingsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
+  const [doctors, setDoctors] = useState<Loc[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [search, setSearch] = useState("");
+
+  useEffect(() => {
+    api.get("/api/locations").then((d: unknown) => {
+      const locs: Loc[] = Array.isArray(d) ? d : [];
+      const doctorLocs = locs.filter((l) => {
+        const cat = (l.category ?? "").toLowerCase();
+        const name = (l.name ?? "").toLowerCase();
+        const details = (l.details ?? "").toLowerCase();
+        return (
+          cat === "clinic" || cat === "doctor" || cat === "doctors" ||
+          cat === "طبيب" || cat === "عيادة" ||
+          name.includes("د.") || name.includes("دكتور") || name.includes("طبيب") ||
+          details.includes("طبيب") || details.includes("دكتور") ||
+          details.includes("doctor") || details.includes("specialist")
+        );
+      });
+      setDoctors(doctorLocs);
+      setLoading(false);
+    }).catch(() => {
+      toast.show("فشل تحميل الأطباء", false);
+      setLoading(false);
+    });
+  }, []);
+
+  const filtered = doctors.filter(
+    (d) =>
+      !search ||
+      d.name.includes(search) ||
+      (d.details ?? "").includes(search)
+  );
+
+  return (
+    <div>
+      {/* ── Header bar ── */}
+      <div style={{
+        display: "flex", alignItems: "center", flexWrap: "wrap",
+        gap: "12px", marginBottom: "18px",
+      }}>
+        <div>
+          <div style={{
+            fontFamily: "Orbitron, sans-serif", fontSize: "12px",
+            color: C.green, letterSpacing: "0.12em",
+            textShadow: neon(C.green, 8),
+          }}>🏥 DOCTORS BOOKINGS</div>
+          <div style={{
+            fontFamily: "Rajdhani, sans-serif", fontSize: "13px",
+            color: C.dim, marginTop: "3px",
+          }}>متابعة الحجوزات والعمولات لكل طبيب</div>
+        </div>
+
+        <input
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="بحث باسم الطبيب أو التخصص..."
+          style={{ ...FLD, maxWidth: "260px", flex: 1 }}
+          onFocus={ff} onBlur={fb}
+        />
+
+        <span style={{
+          fontFamily: "Orbitron, sans-serif", fontSize: "10px", color: C.dim,
+        }}>{filtered.length} طبيب</span>
+      </div>
+
+      {/* ── Summary strip ── */}
+      <div style={{
+        display: "flex", gap: "12px", flexWrap: "wrap",
+        marginBottom: "18px",
+      }}>
+        {[
+          { label: "إجمالي الأطباء", value: String(filtered.length), color: C.purple },
+          { label: "معادلة العمولة", value: "عدد الحجوزات × 2,000 د.ع", color: C.yellow },
+        ].map(({ label, value, color }) => (
+          <div key={label} style={{
+            flex: 1, minWidth: "180px",
+            padding: "12px 16px",
+            background: `${color}08`,
+            border: `1px solid ${color}28`,
+            borderRadius: "5px",
+          }}>
+            <div style={{
+              fontFamily: "Orbitron, sans-serif", fontSize: "9px",
+              color: `${color}99`, letterSpacing: "0.1em", marginBottom: "5px",
+            }}>{label}</div>
+            <div style={{
+              fontFamily: "Orbitron, sans-serif", fontSize: "14px",
+              fontWeight: 700, color,
+            }}>{value}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* ── Doctor cards ── */}
+      {loading ? (
+        <div style={{
+          textAlign: "center", padding: "60px",
+          fontFamily: "Orbitron, sans-serif", fontSize: "11px",
+          color: C.dim, letterSpacing: "0.1em",
+        }}>LOADING DOCTORS...</div>
+      ) : filtered.length === 0 ? (
+        <div style={{
+          textAlign: "center", padding: "48px",
+          fontFamily: "Rajdhani, sans-serif", fontSize: "15px", color: C.dim,
+        }}>
+          {search ? "لا توجد نتائج للبحث" : "لا يوجد أطباء مضافون بالنظام"}
+        </div>
+      ) : (
+        filtered.map((doctor) => (
+          <DoctorCard key={doctor.id} doctor={doctor} />
+        ))
+      )}
+    </div>
+  );
+}
+
 // ── Admin Dashboard ───────────────────────────────────────────────────────────
 export function AdminDashboard() {
   const [, navigate] = useLocation();
-  const [tab, setTab] = useState<"merchants" | "map" | "categories" | "settings" | "taxi" | "drivers" | "fuel" | "bounty" | "users">("merchants");
+  const [tab, setTab] = useState<"merchants" | "map" | "categories" | "settings" | "taxi" | "drivers" | "fuel" | "bounty" | "users" | "doctors_bookings">("merchants");
   const [cats, setCats] = useState<Cat[]>([]);
   const [authChecked, setAuthChecked] = useState(false);
   const toast = useToast();
@@ -3237,8 +3599,9 @@ export function AdminDashboard() {
     { key: "taxi"       as const, en: "TAXI",        ar: "🚕 التكسي" },
     { key: "fuel"       as const, en: "FUEL",        ar: "⛽ محطات الوقود" },
     { key: "bounty"     as const, en: "BOUNTY",      ar: "⭐ المهمات والجوائز" },
-    { key: "users"      as const, en: "USERS",       ar: "👥 المستخدمون" },
-    { key: "settings"   as const, en: "SETTINGS",    ar: "الإعدادات" },
+    { key: "users"            as const, en: "USERS",           ar: "👥 المستخدمون" },
+    { key: "doctors_bookings" as const, en: "DOCTORS BOOKINGS", ar: "🏥 حجوزات الأطباء" },
+    { key: "settings"         as const, en: "SETTINGS",         ar: "الإعدادات" },
   ];
 
   return (
@@ -3289,8 +3652,9 @@ export function AdminDashboard() {
         {tab === "taxi"       && <TaxiTab toast={toast} />}
         {tab === "fuel"       && <FuelStationsTab toast={toast} />}
         {tab === "bounty"     && <BountyMissionsTab toast={toast} />}
-        {tab === "users"      && <UsersTab toast={toast} />}
-        {tab === "settings"   && <SettingsTab toast={toast} />}
+        {tab === "users"            && <UsersTab toast={toast} />}
+        {tab === "doctors_bookings" && <DoctorsBookingsTab toast={toast} />}
+        {tab === "settings"         && <SettingsTab toast={toast} />}
       </main>
 
       <Toast toast={toast.toast} />
