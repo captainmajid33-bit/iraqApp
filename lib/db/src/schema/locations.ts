@@ -13,6 +13,7 @@ export const locationsTable = pgTable("locations", {
   status:      text("status").notNull().default("مفتوح"),
   rating:      integer("rating"),
   merchantKey: text("merchant_key"),   // per-merchant auth key (admin-managed, never public)
+  iconUrl:     text("icon_url"),        // custom PNG icon URL from Firebase Storage
   lat:         real("lat").notNull(),
   lng:         real("lng").notNull(),
   createdAt:   timestamp("created_at").defaultNow(),

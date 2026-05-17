@@ -6,7 +6,8 @@ import {
   collection, onSnapshot, addDoc, updateDoc, deleteDoc,
   doc, serverTimestamp, writeBatch, Timestamp,
 } from "firebase/firestore";
-import { db } from "@/lib/firebase";
+import { db, storage } from "@/lib/firebase";
+import { ref as storageRef, uploadBytes, getDownloadURL } from "firebase/storage";
 
 // ── Design tokens ─────────────────────────────────────────────────────────────
 const C = {
@@ -50,7 +51,7 @@ const api = {
 };
 
 // ── Types ─────────────────────────────────────────────────────────────────────
-interface Loc { id: number; category: string; name: string; details: string; address: string; phone: string; hours: string; status: string; rating?: number | null; lat: number; lng: number; }
+interface Loc { id: number; category: string; name: string; details: string; address: string; phone: string; hours: string; status: string; rating?: number | null; lat: number; lng: number; icon_url?: string | null; }
 interface Cat { id: number; slug: string; labelAr: string; labelEn: string; color: string; icon: string; }
 
 // ── Shared input styles ───────────────────────────────────────────────────────
@@ -89,20 +90,63 @@ function Btn({ label, color, onClick, full }: { label: string; color: string; on
 const BLANK = { name: "", category: "clinic", details: "", address: "بعقوبة - ", phone: "077", hours: "9:00 ص - 5:00 م", status: "مفتوح", lat: "33.7451", lng: "44.6488", rating: "" };
 type FormState = typeof BLANK;
 
-function LocForm({ init, cats, onSave, onCancel }: { init?: Partial<FormState & { id: number }>; cats: Cat[]; onSave: (d: any) => Promise<void>; onCancel: () => void }) {
+function LocForm({ init, cats, onSave, onCancel }: { init?: Partial<FormState & { id: number; icon_url?: string | null }>; cats: Cat[]; onSave: (d: any) => Promise<void>; onCancel: () => void }) {
   const [f, setF] = useState<FormState>({ ...BLANK, ...(init ?? {}) });
   const [busy, setBusy] = useState(false);
+  // Icon upload state
+  const [iconFile, setIconFile]       = useState<File | null>(null);
+  const [iconPreview, setIconPreview] = useState<string>(init?.icon_url ?? "");
+  const [iconUploading, setIconUploading] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
   const s = (k: keyof FormState) => (e: any) => setF(p => ({ ...p, [k]: e.target.value }));
+
+  const handleIconPick = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (file.type !== "image/png") { alert("يُسمح فقط بملفات PNG الشفافة."); return; }
+    setIconFile(file);
+    setIconPreview(URL.createObjectURL(file));
+  };
+
   const save = async () => {
     if (!f.name.trim()) return;
     setBusy(true);
-    await onSave({ ...f, lat: parseFloat(f.lat as any), lng: parseFloat(f.lng as any), rating: f.rating ? parseInt(f.rating as any) : null });
+    let icon_url: string | undefined = init?.icon_url ?? undefined;
+
+    // Upload new PNG to Firebase Storage if one was selected
+    if (iconFile) {
+      setIconUploading(true);
+      try {
+        const fileName = `${Date.now()}_${iconFile.name.replace(/\s+/g, "_")}`;
+        const sRef = storageRef(storage, `category_icons/${fileName}`);
+        await uploadBytes(sRef, iconFile, { contentType: "image/png" });
+        icon_url = await getDownloadURL(sRef);
+      } catch (err) {
+        console.error("[LocForm] icon upload failed:", err);
+        alert("فشل رفع الأيقونة. تحقق من صلاحيات Firebase Storage.");
+        setIconUploading(false);
+        setBusy(false);
+        return;
+      }
+      setIconUploading(false);
+    }
+
+    await onSave({
+      ...f,
+      lat: parseFloat(f.lat as any),
+      lng: parseFloat(f.lng as any),
+      rating: f.rating ? parseInt(f.rating as any) : null,
+      ...(icon_url !== undefined ? { icon_url } : {}),
+    });
     setBusy(false);
   };
+
   const g2: React.CSSProperties = { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px" };
   const row = (label: string, key: keyof FormState, ph?: string) => (
     <div><label style={LBL}>{label}</label><input style={FLD} value={f[key] as string} onChange={s(key)} placeholder={ph} onFocus={ff} onBlur={fb} /></div>
   );
+
   return (
     <div style={{ background: C.surf2, border: `1px solid ${C.border}`, borderRadius: "4px", padding: "18px", marginBottom: "16px" }}>
       <div style={{ ...g2, marginBottom: "10px" }}>
@@ -125,8 +169,76 @@ function LocForm({ init, cats, onSave, onCancel }: { init?: Partial<FormState & 
       </div>
       <div style={{ ...g2, marginBottom: "10px" }}>{row("خط العرض (lat)", "lat")} {row("خط الطول (lng)", "lng")}</div>
       <div style={{ marginBottom: "14px" }}><label style={LBL}>التقييم (1–5)</label><input style={{ ...FLD, maxWidth: "110px" }} type="number" min="1" max="5" value={f.rating} onChange={s("rating")} onFocus={ff} onBlur={fb} /></div>
+
+      {/* ── Custom PNG Icon Upload ──────────────────────────────────────── */}
+      <div style={{ marginBottom: "16px" }}>
+        <label style={LBL}>أيقونة الفئة المخصصة (PNG شفاف)</label>
+        <div style={{ display: "flex", alignItems: "center", gap: "14px", flexWrap: "wrap" }}>
+          {/* Upload button */}
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            style={{
+              display: "flex", alignItems: "center", gap: "8px",
+              padding: "9px 16px",
+              background: "rgba(0,212,255,0.08)",
+              border: `1px solid ${C.blue}66`,
+              color: C.blue,
+              fontFamily: "Orbitron, sans-serif", fontSize: "10px", letterSpacing: "0.08em",
+              cursor: "pointer", borderRadius: "3px",
+              boxShadow: neon(C.blue, 6), transition: "background 0.2s",
+            }}
+            onMouseEnter={e => (e.currentTarget.style.background = "rgba(0,212,255,0.16)")}
+            onMouseLeave={e => (e.currentTarget.style.background = "rgba(0,212,255,0.08)")}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
+              <path d="M12 16V8M12 8L9 11M12 8L15 11" stroke={C.blue} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
+              <rect x="3" y="18" width="18" height="2" rx="1" fill={C.blue} opacity="0.5"/>
+            </svg>
+            رفع أيقونة PNG
+          </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/png"
+            style={{ display: "none" }}
+            onChange={handleIconPick}
+          />
+
+          {/* Preview box */}
+          <div style={{
+            width: "64px", height: "64px",
+            background: "rgba(255,255,255,0.04)",
+            border: `1px dashed ${iconPreview ? C.green : C.border}`,
+            borderRadius: "6px",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            overflow: "hidden", flexShrink: 0,
+            boxShadow: iconPreview ? neon(C.green, 6) : "none",
+            transition: "border-color 0.3s, box-shadow 0.3s",
+          }}>
+            {iconPreview
+              ? <img src={iconPreview} alt="icon preview" style={{ width: "100%", height: "100%", objectFit: "contain" }} />
+              : <span style={{ fontSize: "20px", opacity: 0.3 }}>📌</span>
+            }
+          </div>
+
+          {/* Status text */}
+          <div style={{ fontFamily: "Rajdhani, sans-serif", fontSize: "12px", color: C.dim, direction: "rtl" }}>
+            {iconUploading
+              ? <span style={{ color: C.yellow }}>⏳ جاري الرفع...</span>
+              : iconFile
+                ? <span style={{ color: C.green }}>✓ {iconFile.name}</span>
+                : iconPreview
+                  ? <span style={{ color: C.dim }}>أيقونة محفوظة — اختر ملفاً جديداً للتغيير</span>
+                  : <span>لم يتم اختيار أيقونة بعد</span>
+            }
+          </div>
+        </div>
+      </div>
+      {/* ─────────────────────────────────────────────────────────────────── */}
+
       <div style={{ display: "flex", gap: "10px" }}>
-        <Btn label={busy ? "جاري الحفظ..." : "حفظ"} color={C.purple} onClick={save} />
+        <Btn label={busy ? (iconUploading ? "جاري رفع الأيقونة..." : "جاري الحفظ...") : "حفظ"} color={C.purple} onClick={save} />
         <button onClick={onCancel} style={{ padding: "9px 16px", background: "transparent", border: `1px solid ${C.border}`, color: C.dim, fontFamily: "Rajdhani, sans-serif", fontSize: "13px", cursor: "pointer", borderRadius: "3px" }}>إلغاء</button>
       </div>
     </div>

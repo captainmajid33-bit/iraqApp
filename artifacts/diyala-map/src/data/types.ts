@@ -13,6 +13,7 @@ export interface MapItem {
   rating?: number | null;
   lat: number;
   lng: number;
+  icon_url?: string | null;
   // legacy static-data fields kept for compat
   doctor?: string;
   specialty?: string;
