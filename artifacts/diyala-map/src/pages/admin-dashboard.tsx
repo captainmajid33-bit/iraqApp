@@ -3244,6 +3244,17 @@ interface Appt {
   arrivalTime?: any;
 }
 
+// ── Generate 30-min slots in 24h string format ──────────────────────────────
+function generateSlots(startPmH: number, endPmH: number): string[] {
+  const slots: string[] = [];
+  for (let h = startPmH; h <= endPmH; h++) {
+    const h24 = h + 12; // e.g. 3 PM → 15
+    slots.push(`${h24}:00`);
+    if (h < endPmH) slots.push(`${h24}:30`);
+  }
+  return slots;
+}
+
 function DoctorCard({
   doctor,
   defaultOpen,
@@ -3254,6 +3265,12 @@ function DoctorCard({
   const [open, setOpen] = useState(defaultOpen ?? false);
   const [appts, setAppts] = useState<Appt[]>([]);
   const [loading, setLoading] = useState(false);
+
+  // ── Slots editor state ────────────────────────────────────────────────────
+  const [showSlots,   setShowSlots]   = useState(false);
+  const [slotStart,   setSlotStart]   = useState(3);   // default 3 PM
+  const [slotEnd,     setSlotEnd]     = useState(9);   // default 9 PM
+  const [slotsSaving, setSlotsSaving] = useState(false);
 
   useEffect(() => {
     if (!open) return;
@@ -3284,54 +3301,237 @@ function DoctorCard({
   const gpsVerifiedAppts = appts.filter((a) => a.isUserArrived === true);
   const totalCommission  = gpsVerifiedAppts.length * 2000;
 
+  // ── Save generated slots to Firestore ───────────────────────────────────
+  const handleSaveSlots = async () => {
+    if (slotStart >= slotEnd) return;
+    setSlotsSaving(true);
+    const slots = generateSlots(slotStart, slotEnd);
+    try {
+      await setDoc(
+        doc(db, "merchants", String(doctor.id)),
+        { available_slots: slots },
+        { merge: true },
+      );
+      setShowSlots(false);
+    } catch {
+      // silent — toast not available here; user can retry
+    }
+    setSlotsSaving(false);
+  };
+
+  const pmHours = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+
   return (
     <div style={{
       border: `1px solid ${open ? C.green : C.border}`,
       borderRadius: "5px",
       marginBottom: "10px",
-      overflow: "hidden",
+      overflow: "visible",
       transition: "border-color 0.2s",
       boxShadow: open ? `0 0 16px ${C.green}18` : "none",
+      position: "relative",
     }}>
+
+      {/* ── Slots Editor Dialog ───────────────────────────────────────────── */}
+      {showSlots && (
+        <div
+          onClick={() => setShowSlots(false)}
+          style={{
+            position: "fixed", inset: 0, zIndex: 9000,
+            background: "rgba(5,8,15,0.82)", backdropFilter: "blur(6px)",
+            display: "flex", alignItems: "center", justifyContent: "center",
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              background: "#0d1117",
+              border: `2px solid ${C.green}`,
+              borderRadius: "8px",
+              padding: "28px 28px 24px",
+              minWidth: "320px", maxWidth: "400px",
+              boxShadow: `0 0 40px ${C.green}22`,
+              direction: "rtl",
+            }}
+          >
+            {/* Title */}
+            <div style={{
+              fontFamily: "Orbitron, sans-serif", fontSize: "11px",
+              color: C.green, letterSpacing: "0.12em", marginBottom: "6px",
+            }}>⏱️ AUTO-GENERATE SLOTS</div>
+            <div style={{
+              fontFamily: "Rajdhani, sans-serif", fontSize: "17px",
+              fontWeight: 700, color: C.text, marginBottom: "22px",
+            }}>تحديد نطاق أوقات العيادة — {doctor.name}</div>
+
+            {/* Start / End selects */}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "14px", marginBottom: "20px" }}>
+              {/* Start */}
+              <div>
+                <label style={{ ...LBL, marginBottom: "6px" }}>🟢 وقت البدء (PM)</label>
+                <select
+                  value={slotStart}
+                  onChange={(e) => setSlotStart(Number(e.target.value))}
+                  style={{ ...FLD, cursor: "pointer" }}
+                >
+                  {pmHours.map((h) => (
+                    <option key={h} value={h}>{h}:00 PM</option>
+                  ))}
+                </select>
+              </div>
+              {/* End */}
+              <div>
+                <label style={{ ...LBL, marginBottom: "6px" }}>🔴 وقت الانتهاء (PM)</label>
+                <select
+                  value={slotEnd}
+                  onChange={(e) => setSlotEnd(Number(e.target.value))}
+                  style={{ ...FLD, cursor: "pointer" }}
+                >
+                  {pmHours.map((h) => (
+                    <option key={h} value={h}>{h}:00 PM</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            {/* Preview */}
+            {slotStart < slotEnd && (
+              <div style={{
+                background: `${C.green}08`,
+                border: `1px solid ${C.green}25`,
+                borderRadius: "4px", padding: "10px 14px",
+                marginBottom: "18px",
+              }}>
+                <div style={{
+                  fontFamily: "Orbitron, sans-serif", fontSize: "9px",
+                  color: C.dim, letterSpacing: "0.1em", marginBottom: "6px",
+                }}>PREVIEW — {generateSlots(slotStart, slotEnd).length} موعد</div>
+                <div style={{
+                  fontFamily: "monospace", fontSize: "12px",
+                  color: C.green, lineHeight: 1.8,
+                  display: "flex", flexWrap: "wrap", gap: "6px",
+                }}>
+                  {generateSlots(slotStart, slotEnd).map((s) => (
+                    <span key={s} style={{
+                      background: `${C.green}12`,
+                      border: `1px solid ${C.green}30`,
+                      padding: "1px 7px", borderRadius: "2px", fontSize: "11px",
+                    }}>{s}</span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {slotStart >= slotEnd && (
+              <div style={{
+                fontFamily: "Rajdhani, sans-serif", fontSize: "13px",
+                color: C.red, marginBottom: "18px", textAlign: "center",
+              }}>⚠️ وقت البدء يجب أن يكون أقل من وقت الانتهاء</div>
+            )}
+
+            {/* Action buttons */}
+            <div style={{ display: "flex", gap: "10px" }}>
+              <button
+                onClick={handleSaveSlots}
+                disabled={slotsSaving || slotStart >= slotEnd}
+                style={{
+                  flex: 1, padding: "11px",
+                  background: slotsSaving || slotStart >= slotEnd
+                    ? `${C.green}0a` : `${C.green}15`,
+                  border: `1px solid ${slotsSaving || slotStart >= slotEnd
+                    ? `${C.green}22` : `${C.green}66`}`,
+                  color: slotsSaving || slotStart >= slotEnd ? C.dim : C.green,
+                  fontFamily: "Orbitron, sans-serif", fontSize: "10px",
+                  letterSpacing: "0.08em", cursor: slotsSaving || slotStart >= slotEnd
+                    ? "not-allowed" : "pointer",
+                  borderRadius: "4px",
+                  boxShadow: slotsSaving ? "none" : `0 0 10px ${C.green}22`,
+                  transition: "all 0.2s",
+                }}
+              >
+                {slotsSaving ? "⏳ جاري الحفظ..." : "💾 حفظ الأوقات"}
+              </button>
+              <button
+                onClick={() => setShowSlots(false)}
+                style={{
+                  padding: "11px 18px",
+                  background: "rgba(255,45,120,0.08)",
+                  border: "1px solid rgba(255,45,120,0.3)",
+                  color: C.red, cursor: "pointer",
+                  fontFamily: "Orbitron, sans-serif", fontSize: "10px",
+                  letterSpacing: "0.08em", borderRadius: "4px",
+                }}
+              >✕ إلغاء</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ── Card Header ── */}
-      <button
-        onClick={() => setOpen((v) => !v)}
+      <div
         style={{
           width: "100%", display: "flex", alignItems: "center",
-          gap: "14px", padding: "14px 18px", cursor: "pointer",
+          gap: "14px", padding: "14px 18px",
           background: open ? `${C.green}08` : C.surface,
-          border: "none", textAlign: "right", direction: "rtl",
-          transition: "background 0.18s",
+          direction: "rtl", transition: "background 0.18s",
         }}
       >
-        {/* Expand icon */}
-        <span style={{
-          fontFamily: "Orbitron, sans-serif", fontSize: "14px",
-          color: open ? C.green : C.dim,
-          transform: open ? "rotate(90deg)" : "rotate(0deg)",
-          transition: "transform 0.2s", flexShrink: 0,
-        }}>▶</span>
+        {/* Expand toggle area */}
+        <div
+          onClick={() => setOpen((v) => !v)}
+          style={{ display: "flex", alignItems: "center", gap: "14px", flex: 1, cursor: "pointer" }}
+        >
+          {/* Expand icon */}
+          <span style={{
+            fontFamily: "Orbitron, sans-serif", fontSize: "14px",
+            color: open ? C.green : C.dim,
+            transform: open ? "rotate(90deg)" : "rotate(0deg)",
+            transition: "transform 0.2s", flexShrink: 0,
+          }}>▶</span>
 
-        {/* Doctor info */}
-        <div style={{ flex: 1, textAlign: "right" }}>
-          <div style={{
-            fontFamily: "Rajdhani, sans-serif", fontSize: "15px", fontWeight: 700,
-            color: C.text,
-          }}>{doctor.name}</div>
-          {doctor.details && (
+          {/* Doctor info */}
+          <div style={{ flex: 1, textAlign: "right" }}>
             <div style={{
-              fontFamily: "Rajdhani, sans-serif", fontSize: "12px",
-              color: C.dim, marginTop: "2px",
-            }}>{doctor.details}</div>
-          )}
+              fontFamily: "Rajdhani, sans-serif", fontSize: "15px", fontWeight: 700,
+              color: C.text,
+            }}>{doctor.name}</div>
+            {doctor.details && (
+              <div style={{
+                fontFamily: "Rajdhani, sans-serif", fontSize: "12px",
+                color: C.dim, marginTop: "2px",
+              }}>{doctor.details}</div>
+            )}
+          </div>
         </div>
+
+        {/* Edit slots button */}
+        <button
+          onClick={(e) => { e.stopPropagation(); setShowSlots(true); }}
+          title="تعديل الأوقات المتاحة"
+          style={{
+            display: "flex", flexDirection: "column", alignItems: "center",
+            padding: "6px 12px",
+            background: `${C.blue}10`,
+            border: `1px solid ${C.blue}33`,
+            borderRadius: "4px", flexShrink: 0, cursor: "pointer",
+            transition: "all 0.2s",
+          }}
+          onMouseEnter={(e) => (e.currentTarget.style.background = `${C.blue}22`)}
+          onMouseLeave={(e) => (e.currentTarget.style.background = `${C.blue}10`)}
+        >
+          <span style={{ fontSize: "16px", lineHeight: 1 }}>⏱️</span>
+          <span style={{
+            fontFamily: "Orbitron, sans-serif", fontSize: "8px",
+            color: C.blue, marginTop: "3px", whiteSpace: "nowrap", letterSpacing: "0.06em",
+          }}>الأوقات</span>
+        </button>
 
         {/* Bookings counter */}
         <div style={{
           display: "flex", flexDirection: "column", alignItems: "center",
           padding: "6px 14px",
-          background: `${C.blue}10`,
-          border: `1px solid ${C.blue}33`,
+          background: `rgba(0,212,255,0.10)`,
+          border: `1px solid rgba(0,212,255,0.20)`,
           borderRadius: "4px", flexShrink: 0,
         }}>
           <span style={{
@@ -3361,7 +3561,7 @@ function DoctorCard({
             color: C.dim, marginTop: "2px", whiteSpace: "nowrap",
           }}>💰 عمولة د.ع</span>
         </div>
-      </button>
+      </div>
 
       {/* ── Appointments Sub-Table ── */}
       {open && (
