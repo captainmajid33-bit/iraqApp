@@ -386,7 +386,7 @@ export function ClinicMap({
       // ── Fly camera + auto-place A at GPS (or wait for first fix) ─────────
       const loc = userLocationRef.current;
       if (loc != null) {
-        autoPlaceFromMarker(loc.lat, loc.lng);
+        autoPlaceFromMarker(loc!.lat, loc!.lng);
       } else {
         // GPS not acquired yet — start locating; auto-place on first fix
         locateUserRef.current?.((newLoc)=> autoPlaceFromMarker(newLoc.lat, newLoc.lng));

@@ -1,7 +1,11 @@
+import { useState, useEffect } from "react";
+import { doc, onSnapshot } from "firebase/firestore";
+import { db } from "@/lib/firebase";
 import { MapItem, Category } from "@/data/types";
-import { Phone, Clock, MapPin, User, AlertTriangle, Navigation, XCircle, Star } from "lucide-react";
+import { Phone, Clock, MapPin, User, AlertTriangle, Navigation, XCircle, Star, CalendarCheck } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
 import { Button } from "@/components/ui/button";
+import { DoctorBookingModal } from "@/components/DoctorBookingModal";
 
 interface SidebarProps {
   item: MapItem | null;
@@ -38,6 +42,25 @@ const FALLBACK_COLORS: Record<string, string> = {
 };
 
 export function Sidebar({ item, categories, onClose, userLocation, onNavigate, routeTarget, onClearRoute }: SidebarProps) {
+  const [bookingOpen,  setBookingOpen]  = useState(false);
+  const [isAvailable,  setIsAvailable]  = useState<boolean | null>(null); // null = loading
+
+  // ── Firestore listener: isAvailable for clinic items ─────────────────────
+  useEffect(() => {
+    if (!item || item.kind !== 'clinic') {
+      setIsAvailable(null);
+      return;
+    }
+    setIsAvailable(null); // reset while loading
+    setBookingOpen(false);
+    const unsub = onSnapshot(
+      doc(db, 'doctors', String(item.id)),
+      snap => setIsAvailable(snap.exists() ? (snap.data()?.isAvailable ?? false) : false),
+      () => setIsAvailable(false),
+    );
+    return unsub;
+  }, [item?.id, item?.kind]);
+
   if (!item) return null;
 
   const cat         = categories.find(c => c.slug === item.kind);
@@ -51,173 +74,246 @@ export function Sidebar({ item, categories, onClose, userLocation, onNavigate, r
   const distanceKm   = userLocation ? haversineKm(userLocation.lat, userLocation.lng, item.lat, item.lng) : null;
   const details      = getDetails(item);
   const rating       = (item as any).rating as number | undefined;
+  const isClinic     = item.kind === 'clinic';
 
   return (
-    <AnimatePresence>
-      <motion.aside
-        key={item.id}
-        initial={{ y: "100%", opacity: 0 }}
-        animate={{ y: 0,      opacity: 1 }}
-        exit={{ y: "100%",    opacity: 0 }}
-        transition={{ type: "spring", damping: 28, stiffness: 220 }}
-        style={{
-          position:      'absolute',
-          bottom:        0,
-          left:          0,
-          right:         0,
-          zIndex:        1050,
-          maxHeight:     '55vh',
-          display:       'flex',
-          flexDirection: 'column',
-          background:    'rgba(5,8,15,0.97)',
-          borderTop:     `2px solid ${accentColor}`,
-          boxShadow:     `0 -8px 48px ${accentColor}22, 0 -2px 0 ${accentColor}44`,
-          backdropFilter:'blur(16px)',
-          direction:     'rtl',
-          overflow:      'hidden',
-        }}
-      >
-        {/* ── Close button — absolutely pinned to top-left of panel ── */}
-        <button
-          onClick={onClose}
-          title="إغلاق"
+    <>
+      <AnimatePresence>
+        <motion.aside
+          key={item.id}
+          initial={{ y: "100%", opacity: 0 }}
+          animate={{ y: 0,      opacity: 1 }}
+          exit={{ y: "100%",    opacity: 0 }}
+          transition={{ type: "spring", damping: 28, stiffness: 220 }}
           style={{
-            position:       'absolute',
-            top:            '10px',
-            left:           '12px',
-            zIndex:         10,
-            width:          '36px',
-            height:         '36px',
-            display:        'flex',
-            alignItems:     'center',
-            justifyContent: 'center',
-            background:     'rgba(255,45,120,0.12)',
-            border:         '1.5px solid rgba(255,45,120,0.55)',
-            borderRadius:   '4px',
-            color:          '#ff2d78',
-            fontSize:       '18px',
-            lineHeight:     1,
-            cursor:         'pointer',
-            boxShadow:      '0 0 12px rgba(255,45,120,0.25)',
-            transition:     'all 0.2s',
+            position:      'absolute',
+            bottom:        0,
+            left:          0,
+            right:         0,
+            zIndex:        1050,
+            maxHeight:     '55vh',
+            display:       'flex',
+            flexDirection: 'column',
+            background:    'rgba(5,8,15,0.97)',
+            borderTop:     `2px solid ${accentColor}`,
+            boxShadow:     `0 -8px 48px ${accentColor}22, 0 -2px 0 ${accentColor}44`,
+            backdropFilter:'blur(16px)',
+            direction:     'rtl',
+            overflow:      'hidden',
           }}
-          onMouseEnter={e => {
-            (e.currentTarget as HTMLElement).style.background   = 'rgba(255,45,120,0.25)';
-            (e.currentTarget as HTMLElement).style.boxShadow    = '0 0 20px rgba(255,45,120,0.5)';
-          }}
-          onMouseLeave={e => {
-            (e.currentTarget as HTMLElement).style.background   = 'rgba(255,45,120,0.12)';
-            (e.currentTarget as HTMLElement).style.boxShadow    = '0 0 12px rgba(255,45,120,0.25)';
-          }}
-        >✕</button>
+        >
+          {/* ── Close button ── */}
+          <button
+            onClick={onClose}
+            title="إغلاق"
+            style={{
+              position:       'absolute',
+              top:            '10px',
+              left:           '12px',
+              zIndex:         10,
+              width:          '36px',
+              height:         '36px',
+              display:        'flex',
+              alignItems:     'center',
+              justifyContent: 'center',
+              background:     'rgba(255,45,120,0.12)',
+              border:         '1.5px solid rgba(255,45,120,0.55)',
+              borderRadius:   '4px',
+              color:          '#ff2d78',
+              fontSize:       '18px',
+              lineHeight:     1,
+              cursor:         'pointer',
+              boxShadow:      '0 0 12px rgba(255,45,120,0.25)',
+              transition:     'all 0.2s',
+            }}
+            onMouseEnter={e => {
+              (e.currentTarget as HTMLElement).style.background   = 'rgba(255,45,120,0.25)';
+              (e.currentTarget as HTMLElement).style.boxShadow    = '0 0 20px rgba(255,45,120,0.5)';
+            }}
+            onMouseLeave={e => {
+              (e.currentTarget as HTMLElement).style.background   = 'rgba(255,45,120,0.12)';
+              (e.currentTarget as HTMLElement).style.boxShadow    = '0 0 12px rgba(255,45,120,0.25)';
+            }}
+          >✕</button>
 
-        {/* ── Header row ── */}
-        <div style={{
-          display:       'flex',
-          alignItems:    'center',
-          justifyContent:'center',
-          padding:       '12px 60px',
-          borderBottom:  `1px solid ${accentColor}30`,
-          background:    accentDim,
-          flexShrink:    0,
-          gap:           '8px',
-          minHeight:     '52px',
-        }}>
-          <span style={{ fontSize: '18px' }}>{catEmoji}</span>
-          <h2 style={{
-            fontFamily:    'Orbitron, sans-serif',
-            fontSize:      '10px',
-            fontWeight:    700,
-            letterSpacing: '0.18em',
-            color:         accentColor,
-            textShadow:    `0 0 12px ${accentColor}66`,
-          }}>{catLabel}</h2>
-        </div>
-
-        {/* ── Scrollable content ── */}
-        <div style={{ flex: 1, overflowY: 'auto', padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
-
-          {/* Name + ID */}
-          <div>
-            <h3 style={{ fontFamily:'Rajdhani,sans-serif', fontSize:'20px', fontWeight:700, color:accentColor, marginBottom:'4px', textShadow:`0 0 14px ${accentColor}55` }}>
-              {item.name}
-            </h3>
-            <div style={{ fontFamily:'Orbitron,sans-serif', fontSize:'8px', color:`${accentColor}66`, letterSpacing:'0.14em' }}>
-              ID: {item.id.toString().padStart(4,'0')} · {item.lat.toFixed(4)}, {item.lng.toFixed(4)}
-            </div>
+          {/* ── Header row ── */}
+          <div style={{
+            display:       'flex',
+            alignItems:    'center',
+            justifyContent:'center',
+            padding:       '12px 60px',
+            borderBottom:  `1px solid ${accentColor}30`,
+            background:    accentDim,
+            flexShrink:    0,
+            gap:           '8px',
+            minHeight:     '52px',
+          }}>
+            <span style={{ fontSize: '18px' }}>{catEmoji}</span>
+            <h2 style={{
+              fontFamily:    'Orbitron, sans-serif',
+              fontSize:      '10px',
+              fontWeight:    700,
+              letterSpacing: '0.18em',
+              color:         accentColor,
+              textShadow:    `0 0 12px ${accentColor}66`,
+            }}>{catLabel}</h2>
           </div>
 
-          {/* Status + rating row */}
-          <div style={{ display:'flex', alignItems:'center', gap:'10px', flexWrap:'wrap' }}>
-            <div style={{
-              display:'inline-flex', alignItems:'center', gap:'7px',
-              padding:'5px 12px',
-              border:`1px solid ${item.status==='مفتوح'?'#00f5d466':'#ff2d7866'}`,
-              background:item.status==='مفتوح'?'rgba(0,245,212,0.07)':'rgba(255,45,120,0.07)',
-              color:item.status==='مفتوح'?'#00f5d4':'#ff2d78',
-              fontFamily:'Rajdhani,sans-serif', fontSize:'14px', fontWeight:600,
-            }}>
-              <AlertTriangle size={13}/>
-              {item.status}
+          {/* ── Scrollable content ── */}
+          <div style={{ flex: 1, overflowY: 'auto', padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+
+            {/* Name + ID */}
+            <div>
+              <h3 style={{ fontFamily:'Rajdhani,sans-serif', fontSize:'20px', fontWeight:700, color:accentColor, marginBottom:'4px', textShadow:`0 0 14px ${accentColor}55` }}>
+                {item.name}
+              </h3>
+              <div style={{ fontFamily:'Orbitron,sans-serif', fontSize:'8px', color:`${accentColor}66`, letterSpacing:'0.14em' }}>
+                ID: {item.id.toString().padStart(4,'0')} · {item.lat.toFixed(4)}, {item.lng.toFixed(4)}
+              </div>
             </div>
-            {typeof rating === 'number' && rating > 0 && (
-              <div style={{ display:'flex', alignItems:'center', gap:'2px' }}>
-                {Array.from({length:5}).map((_,i)=>(
-                  <Star key={i} size={14} fill={i<rating?'#f5c518':'transparent'} style={{color:'#f5c518'}}/>
-                ))}
+
+            {/* Status + rating row */}
+            <div style={{ display:'flex', alignItems:'center', gap:'10px', flexWrap:'wrap' }}>
+              <div style={{
+                display:'inline-flex', alignItems:'center', gap:'7px',
+                padding:'5px 12px',
+                border:`1px solid ${item.status==='مفتوح'?'#00f5d466':'#ff2d7866'}`,
+                background:item.status==='مفتوح'?'rgba(0,245,212,0.07)':'rgba(255,45,120,0.07)',
+                color:item.status==='مفتوح'?'#00f5d4':'#ff2d78',
+                fontFamily:'Rajdhani,sans-serif', fontSize:'14px', fontWeight:600,
+              }}>
+                <AlertTriangle size={13}/>
+                {item.status}
+              </div>
+              {typeof rating === 'number' && rating > 0 && (
+                <div style={{ display:'flex', alignItems:'center', gap:'2px' }}>
+                  {Array.from({length:5}).map((_,i)=>(
+                    <Star key={i} size={14} fill={i<rating?'#f5c518':'transparent'} style={{color:'#f5c518'}}/>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Distance */}
+            {distanceKm !== null && (
+              <div style={{ display:'flex', alignItems:'center', gap:'10px', padding:'8px 12px', border:'1px solid rgba(245,197,24,0.35)', background:'rgba(245,197,24,0.06)', color:'#f5c518', fontFamily:'Rajdhani,sans-serif', fontSize:'14px' }}>
+                <Navigation size={15} style={{flexShrink:0}}/>
+                المسافة: <strong>{distanceKm<1?`${Math.round(distanceKm*1000)} م`:`${distanceKm.toFixed(1)} كم`}</strong>
               </div>
             )}
-          </div>
 
-          {/* Distance */}
-          {distanceKm !== null && (
-            <div style={{ display:'flex', alignItems:'center', gap:'10px', padding:'8px 12px', border:'1px solid rgba(245,197,24,0.35)', background:'rgba(245,197,24,0.06)', color:'#f5c518', fontFamily:'Rajdhani,sans-serif', fontSize:'14px' }}>
-              <Navigation size={15} style={{flexShrink:0}}/>
-              المسافة: <strong>{distanceKm<1?`${Math.round(distanceKm*1000)} م`:`${distanceKm.toFixed(1)} كم`}</strong>
+            {/* Info rows */}
+            <div style={{ display:'flex', flexDirection:'column', gap:'6px' }}>
+              {details   && <InfoRow icon={<User size={14}/>}      label="التفاصيل"   value={details}    color={accentColor}/>}
+              <InfoRow icon={<MapPin size={14}/>}  label="العنوان"     value={item.address} color={accentColor}/>
+              <InfoRow icon={<Phone size={14}/>}   label="الهاتف"      value={item.phone}   color={accentColor} mono/>
+              <InfoRow icon={<Clock size={14}/>}   label="ساعات العمل" value={item.hours}   color={accentColor} mono/>
             </div>
-          )}
 
-          {/* Info rows */}
-          <div style={{ display:'flex', flexDirection:'column', gap:'6px' }}>
-            {details   && <InfoRow icon={<User size={14}/>}      label="التفاصيل"   value={details}    color={accentColor}/>}
-            <InfoRow icon={<MapPin size={14}/>}  label="العنوان"     value={item.address} color={accentColor}/>
-            <InfoRow icon={<Phone size={14}/>}   label="الهاتف"      value={item.phone}   color={accentColor} mono/>
-            <InfoRow icon={<Clock size={14}/>}   label="ساعات العمل" value={item.hours}   color={accentColor} mono/>
-          </div>
+            {/* ── Doctor Availability Badge + Booking Button ── */}
+            {isClinic && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                {/* Availability badge */}
+                <div style={{
+                  display: 'flex', alignItems: 'center', gap: '8px',
+                  padding: '8px 14px',
+                  background: isAvailable === null
+                    ? 'rgba(245,197,24,0.06)'
+                    : isAvailable
+                    ? 'rgba(0,245,212,0.07)'
+                    : 'rgba(255,45,120,0.07)',
+                  border: `1px solid ${
+                    isAvailable === null ? 'rgba(245,197,24,0.3)'
+                    : isAvailable ? 'rgba(0,245,212,0.35)'
+                    : 'rgba(255,45,120,0.35)'}`,
+                  borderRadius: '4px',
+                }}>
+                  {/* Pulse dot */}
+                  <div style={{
+                    width: '8px', height: '8px', borderRadius: '50%', flexShrink: 0,
+                    background: isAvailable === null ? '#f5c518' : isAvailable ? '#00f5d4' : '#ff2d78',
+                    boxShadow: `0 0 8px ${isAvailable === null ? '#f5c518' : isAvailable ? '#00f5d4' : '#ff2d78'}`,
+                    animation: isAvailable ? 'lf-ping 2s cubic-bezier(0,0,0.2,1) infinite' : undefined,
+                  }}/>
+                  <span style={{
+                    fontFamily: 'Rajdhani, sans-serif', fontSize: '14px', fontWeight: 600,
+                    color: isAvailable === null ? '#f5c518' : isAvailable ? '#00f5d4' : '#ff2d78',
+                  }}>
+                    {isAvailable === null
+                      ? 'جاري التحقق...'
+                      : isAvailable
+                      ? 'الطبيب متوفر للحجز'
+                      : 'عذراً الطبيب غير متوفر للحجز'}
+                  </span>
+                </div>
 
-          {/* Action buttons */}
-          <div style={{ display:'flex', flexDirection:'column', gap:'8px', paddingTop:'8px', borderTop:`1px solid ${accentColor}20` }}>
-            {isNavigating ? (
-              <Button className="w-full font-mono text-sm tracking-widest uppercase"
-                style={{ background:'rgba(255,45,120,0.12)', border:'1px solid #ff2d78', color:'#ff2d78', boxShadow:'0 0 14px rgba(255,45,120,0.25)', padding:'12px' }}
-                onClick={onClearRoute}>
-                <XCircle size={15} style={{marginLeft:'6px'}}/>إلغاء المسار / CANCEL
-              </Button>
-            ) : (
-              <Button className="w-full font-mono text-sm tracking-widest uppercase"
-                style={{ background:userLocation?'rgba(245,197,24,0.1)':'rgba(40,40,40,0.2)', border:`1px solid ${userLocation?'#f5c518':'#333'}`, color:userLocation?'#f5c518':'#444', cursor:userLocation?'pointer':'not-allowed', padding:'12px' }}
-                onClick={()=>userLocation&&onNavigate(item)}
-                title={!userLocation?'اضغط على زر تحديد موقعي أولاً':undefined}>
-                <Navigation size={15} style={{marginLeft:'6px'}}/>
-                {userLocation?'الذهاب إليه / NAVIGATE':'حدد موقعك أولاً'}
-              </Button>
+                {/* Booking button */}
+                <Button
+                  className="w-full font-mono text-sm tracking-widest uppercase"
+                  disabled={!isAvailable}
+                  onClick={() => setBookingOpen(true)}
+                  style={{
+                    background: isAvailable
+                      ? 'linear-gradient(135deg,rgba(0,245,212,0.18),rgba(0,245,212,0.07))'
+                      : 'rgba(0,245,212,0.04)',
+                    border: `2px solid ${isAvailable ? '#00f5d4' : 'rgba(0,245,212,0.2)'}`,
+                    color: isAvailable ? '#00f5d4' : 'rgba(0,245,212,0.28)',
+                    padding: '12px',
+                    cursor: isAvailable ? 'pointer' : 'not-allowed',
+                    boxShadow: isAvailable ? '0 0 22px rgba(0,245,212,0.3)' : 'none',
+                    opacity: isAvailable === null ? 0.5 : 1,
+                    transition: 'all 0.2s',
+                  }}
+                >
+                  <CalendarCheck size={15} style={{ marginLeft: '7px' }}/>
+                  حجز موعد / BOOK
+                </Button>
+              </div>
             )}
-            <Button className="w-full font-mono text-sm tracking-widest uppercase"
-              style={{ background:accentDim, border:`1px solid ${accentColor}88`, color:accentColor, padding:'12px' }}
-              onClick={()=>window.open(`tel:${item.phone}`)}>
-              <Phone size={14} style={{marginLeft:'6px'}}/>تواصل / CONTACT
-            </Button>
-          </div>
-        </div>
 
-        {/* Footer */}
-        <div style={{ padding:'6px 16px', textAlign:'center', flexShrink:0, borderTop:`1px solid ${accentColor}20`, background:accentDim }}>
-          <span style={{ fontFamily:'Orbitron,sans-serif', fontSize:'8px', letterSpacing:'0.18em', color:`${accentColor}44` }}>
-            {catFooter} · AI SYSTEM
-          </span>
-        </div>
-      </motion.aside>
-    </AnimatePresence>
+            {/* Action buttons */}
+            <div style={{ display:'flex', flexDirection:'column', gap:'8px', paddingTop:'8px', borderTop:`1px solid ${accentColor}20` }}>
+              {isNavigating ? (
+                <Button className="w-full font-mono text-sm tracking-widest uppercase"
+                  style={{ background:'rgba(255,45,120,0.12)', border:'1px solid #ff2d78', color:'#ff2d78', boxShadow:'0 0 14px rgba(255,45,120,0.25)', padding:'12px' }}
+                  onClick={onClearRoute}>
+                  <XCircle size={15} style={{marginLeft:'6px'}}/>إلغاء المسار / CANCEL
+                </Button>
+              ) : (
+                <Button className="w-full font-mono text-sm tracking-widest uppercase"
+                  style={{ background:userLocation?'rgba(245,197,24,0.1)':'rgba(40,40,40,0.2)', border:`1px solid ${userLocation?'#f5c518':'#333'}`, color:userLocation?'#f5c518':'#444', cursor:userLocation?'pointer':'not-allowed', padding:'12px' }}
+                  onClick={()=>userLocation&&onNavigate(item)}
+                  title={!userLocation?'اضغط على زر تحديد موقعي أولاً':undefined}>
+                  <Navigation size={15} style={{marginLeft:'6px'}}/>
+                  {userLocation?'الذهاب إليه / NAVIGATE':'حدد موقعك أولاً'}
+                </Button>
+              )}
+              <Button className="w-full font-mono text-sm tracking-widest uppercase"
+                style={{ background:accentDim, border:`1px solid ${accentColor}88`, color:accentColor, padding:'12px' }}
+                onClick={()=>window.open(`tel:${item.phone}`)}>
+                <Phone size={14} style={{marginLeft:'6px'}}/>تواصل / CONTACT
+              </Button>
+            </div>
+          </div>
+
+          {/* Footer */}
+          <div style={{ padding:'6px 16px', textAlign:'center', flexShrink:0, borderTop:`1px solid ${accentColor}20`, background:accentDim }}>
+            <span style={{ fontFamily:'Orbitron,sans-serif', fontSize:'8px', letterSpacing:'0.18em', color:`${accentColor}44` }}>
+              {catFooter} · AI SYSTEM
+            </span>
+          </div>
+        </motion.aside>
+      </AnimatePresence>
+
+      {/* ── Doctor Booking Modal ── */}
+      {bookingOpen && isClinic && (
+        <DoctorBookingModal
+          doctorId={item.id}
+          doctorName={item.name}
+          onClose={() => setBookingOpen(false)}
+        />
+      )}
+    </>
   );
 }
 
