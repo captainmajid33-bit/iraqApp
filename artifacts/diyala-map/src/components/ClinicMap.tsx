@@ -614,6 +614,9 @@ export function ClinicMap({
   // Auto-find nearest driver states
   const [taxiAutoSearching, setTaxiAutoSearching] = useState(false);
   const [taxiNoDriverSnack, setTaxiNoDriverSnack] = useState(false);
+  // Cancel-order snackbar (shown after customer cancels pending order)
+  const [taxiCancelSnack,   setTaxiCancelSnack]   = useState(false);
+  const cancelSnackTimerRef = useRef<ReturnType<typeof setTimeout>|null>(null);
   // ── Quick-dispatch form (auto mode: no manual driver selection) ───────────
   const [showTaxiQuickForm, setShowTaxiQuickForm] = useState(false);
   const [taxiQuickDest,     setTaxiQuickDest]     = useState('');
@@ -4236,35 +4239,101 @@ export function ClinicMap({
               )}
             </div>
 
-            {/* Chat toggle button */}
-            {activeOrderId && activeOrderStatus !== 'done' && activeOrderStatus !== 'cancelled' && (
-              <button
-                onClick={()=>{ setShowChat(true); setHasUnreadChat(false); }}
-                style={{
-                  background: showChat ? 'rgba(123,47,247,0.25)' : 'rgba(123,47,247,0.1)',
-                  border:'1px solid rgba(123,47,247,0.5)',
-                  color:'#c77dff',fontFamily:'Orbitron,sans-serif',fontSize:'8px',
-                  letterSpacing:'0.1em',padding:'6px 10px',cursor:'pointer',
-                  flexShrink:0,transition:'all 0.2s',
-                  boxShadow: showChat ? '0 0 14px rgba(123,47,247,0.3)' : 'none',
-                  position:'relative',
-                }}
-                onMouseEnter={e=>{(e.currentTarget as HTMLElement).style.background='rgba(123,47,247,0.3)';}}
-                onMouseLeave={e=>{(e.currentTarget as HTMLElement).style.background=showChat?'rgba(123,47,247,0.25)':'rgba(123,47,247,0.1)';}}
-              >
-                💬 دردشة
-                {hasUnreadChat && (
-                  <span style={{
-                    position:'absolute', top:'-4px', right:'-4px',
-                    width:'10px', height:'10px', borderRadius:'50%',
-                    background:'#ff2d50',
-                    boxShadow:'0 0 8px #ff2d50, 0 0 16px rgba(255,45,80,0.6)',
-                    animation:'chat-unread-pulse 1.4s ease-in-out infinite',
-                    display:'block',
-                  }}/>
-                )}
-              </button>
-            )}
+            {/* Buttons column: chat + cancel */}
+            <div style={{display:'flex',flexDirection:'column',gap:'6px',flexShrink:0}}>
+
+              {/* Chat toggle button */}
+              {activeOrderId && activeOrderStatus !== 'done' && activeOrderStatus !== 'cancelled' && (
+                <button
+                  onClick={()=>{ setShowChat(true); setHasUnreadChat(false); }}
+                  style={{
+                    background: showChat ? 'rgba(123,47,247,0.25)' : 'rgba(123,47,247,0.1)',
+                    border:'1px solid rgba(123,47,247,0.5)',
+                    color:'#c77dff',fontFamily:'Orbitron,sans-serif',fontSize:'8px',
+                    letterSpacing:'0.1em',padding:'6px 10px',cursor:'pointer',
+                    flexShrink:0,transition:'all 0.2s',
+                    boxShadow: showChat ? '0 0 14px rgba(123,47,247,0.3)' : 'none',
+                    position:'relative',
+                  }}
+                  onMouseEnter={e=>{(e.currentTarget as HTMLElement).style.background='rgba(123,47,247,0.3)';}}
+                  onMouseLeave={e=>{(e.currentTarget as HTMLElement).style.background=showChat?'rgba(123,47,247,0.25)':'rgba(123,47,247,0.1)';}}
+                >
+                  💬 دردشة
+                  {hasUnreadChat && (
+                    <span style={{
+                      position:'absolute', top:'-4px', right:'-4px',
+                      width:'10px', height:'10px', borderRadius:'50%',
+                      background:'#ff2d50',
+                      boxShadow:'0 0 8px #ff2d50, 0 0 16px rgba(255,45,80,0.6)',
+                      animation:'chat-unread-pulse 1.4s ease-in-out infinite',
+                      display:'block',
+                    }}/>
+                  )}
+                </button>
+              )}
+
+              {/* ── Cancel order button (only while searching / pending, before driver accepts) ── */}
+              {activeOrderId && (activeOrderStatus === 'pending') && (
+                <button
+                  onClick={async ()=>{
+                    const oid = activeOrderIdRef.current;
+                    // 1. Stop search loop immediately
+                    setLoopActive(false);
+                    setLoopCountdown(null);
+                    setLoopCurrentDriver('');
+                    setLoopCurrentDriverDist(null);
+                    loopIgnoredRef.current.clear();
+                    // 2. Mark order as cancelled in Firestore / backend
+                    if (oid) {
+                      try { await fetch(`/api/orders/${oid}/customer-cancel`, { method:'PATCH' }); } catch { /* non-fatal */ }
+                    }
+                    // 3. Full state reset — closes the banner
+                    taxiRouteLineRef.current?.remove();  taxiRouteLineRef.current  = null;
+                    taxiQuickPolyRef.current?.remove();  taxiQuickPolyRef.current  = null;
+                    taxiFromMarkerRef.current?.remove(); taxiFromMarkerRef.current = null;
+                    taxiToMarkerRef.current?.remove();   taxiToMarkerRef.current   = null;
+                    setActiveOrderId(null);    setActiveOrderStatus('pending');
+                    setDriverLat(null);        setDriverLng(null);
+                    setDriverDistKm(null);     setDriverEtaMin(null);
+                    setShowChat(false);        prevDriverPosRef.current = null;
+                    activeOrderIdRef.current     = null;
+                    activeOrderStatusRef.current = 'pending';
+                    loopFromPtRef.current = null; loopToPtRef.current = null;
+                    localStorage.removeItem('diyala_active_order');
+                    // 4. Show success snackbar
+                    if (cancelSnackTimerRef.current) clearTimeout(cancelSnackTimerRef.current);
+                    setTaxiCancelSnack(true);
+                    cancelSnackTimerRef.current = setTimeout(()=> setTaxiCancelSnack(false), 4000);
+                  }}
+                  style={{
+                    background:'rgba(255,45,120,0.12)',
+                    border:'1px solid rgba(255,45,120,0.55)',
+                    color:'#ff6b9d',
+                    fontFamily:'Orbitron,sans-serif',fontSize:'7.5px',
+                    letterSpacing:'0.1em',padding:'6px 10px',
+                    cursor:'pointer',flexShrink:0,
+                    transition:'all 0.2s',
+                    display:'flex',alignItems:'center',justifyContent:'center',gap:'5px',
+                    whiteSpace:'nowrap',
+                  }}
+                  onMouseEnter={e=>{
+                    (e.currentTarget as HTMLElement).style.background='rgba(255,45,120,0.25)';
+                    (e.currentTarget as HTMLElement).style.boxShadow='0 0 14px rgba(255,45,120,0.4)';
+                  }}
+                  onMouseLeave={e=>{
+                    (e.currentTarget as HTMLElement).style.background='rgba(255,45,120,0.12)';
+                    (e.currentTarget as HTMLElement).style.boxShadow='none';
+                  }}
+                >
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none">
+                    <circle cx="12" cy="12" r="9" stroke="#ff2d78" strokeWidth="2"/>
+                    <path d="M15 9l-6 6M9 9l6 6" stroke="#ff2d78" strokeWidth="2" strokeLinecap="round"/>
+                  </svg>
+                  إلغاء الطلب
+                </button>
+              )}
+
+            </div>
 
             {/* ✕ button intentionally removed — status bar closes only via delete/finish/cancel */}
           </div>
@@ -4387,6 +4456,44 @@ export function ClinicMap({
             </div>
           </div>
           <button onClick={()=> setTaxiNoDriverSnack(false)}
+            style={{flexShrink:0,background:'none',border:'none',color:'rgba(255,45,120,0.5)',fontSize:'15px',cursor:'pointer',padding:'2px 4px',lineHeight:1}}>
+            ✕
+          </button>
+        </div>
+      )}
+
+      {/* ── Cancel-order Snackbar ── */}
+      {taxiCancelSnack && (
+        <div style={{
+          position:'absolute', bottom:'100px', left:'50%', transform:'translateX(-50%)',
+          zIndex:5003, direction:'rtl',
+          display:'flex', alignItems:'center', gap:'12px',
+          padding:'11px 20px',
+          background:'linear-gradient(135deg,rgba(255,45,120,0.16),rgba(5,8,15,0.97))',
+          border:'1px solid rgba(255,45,120,0.65)',
+          borderBottom:'3px solid #ff2d78',
+          boxShadow:'0 -4px 32px rgba(255,45,120,0.25), 0 4px 40px rgba(0,0,0,0.6)',
+          backdropFilter:'blur(16px)',
+          maxWidth:'min(400px,92vw)',
+          borderRadius:'4px 4px 2px 2px',
+          animation:'sys-snack-in 0.35s cubic-bezier(0.34,1.56,0.64,1)',
+        }}>
+          <div style={{
+            flexShrink:0, width:'34px', height:'34px',
+            border:'1px solid rgba(255,45,120,0.5)', borderRadius:'50%',
+            display:'flex', alignItems:'center', justifyContent:'center',
+            background:'rgba(255,45,120,0.14)', boxShadow:'0 0 12px rgba(255,45,120,0.35)',
+            fontSize:'17px', lineHeight:1,
+          }}>🔴</div>
+          <div style={{flex:1, minWidth:0}}>
+            <div style={{fontFamily:'Orbitron,sans-serif',fontSize:'7.5px',color:'rgba(255,100,150,0.85)',letterSpacing:'0.18em',marginBottom:'3px'}}>
+              ORDER CANCELLED
+            </div>
+            <div style={{fontFamily:'Rajdhani,sans-serif',fontSize:'14px',fontWeight:600,color:'#ffb3c6',lineHeight:1.35}}>
+              تم إلغاء طلب التكسي بنجاح 🔴
+            </div>
+          </div>
+          <button onClick={()=>{ setTaxiCancelSnack(false); if(cancelSnackTimerRef.current) clearTimeout(cancelSnackTimerRef.current); }}
             style={{flexShrink:0,background:'none',border:'none',color:'rgba(255,45,120,0.5)',fontSize:'15px',cursor:'pointer',padding:'2px 4px',lineHeight:1}}>
             ✕
           </button>
