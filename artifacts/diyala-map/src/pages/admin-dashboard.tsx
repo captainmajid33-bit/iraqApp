@@ -1835,17 +1835,20 @@ function BountyMissionsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
   const [pickMode,   setPickMode]   = useState<PickMode>('real');
 
   // ── Map picker refs ──────────────────────────────────────────────────────
-  const mapContainerRef  = useRef<HTMLDivElement | null>(null);
-  const mapRef           = useRef<L.Map | null>(null);
-  const realMarkerRef    = useRef<L.Marker | null>(null);
-  const fakeMarkerRef    = useRef<L.Marker | null>(null);
-  const pickModeRef      = useRef<PickMode>('real');
+  const mapContainerRef    = useRef<HTMLDivElement | null>(null);
+  const mapRef             = useRef<L.Map | null>(null);
+  const realMarkerRef      = useRef<L.Marker | null>(null);
+  const fakeMarkerRef      = useRef<L.Marker | null>(null);
+  const pickModeRef        = useRef<PickMode>('real');
+  const merchantMarkersRef = useRef<L.Marker[]>([]);
 
   // ── Map picker: init / destroy ────────────────────────────────────────────
   useEffect(() => {
     if (!showForm) {
       mapRef.current?.remove(); mapRef.current = null;
       realMarkerRef.current = null; fakeMarkerRef.current = null;
+      merchantMarkersRef.current.forEach(m => m.remove());
+      merchantMarkersRef.current = [];
       return;
     }
     const tid = setTimeout(() => {
@@ -1884,6 +1887,84 @@ function BountyMissionsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
         const { lat, lng } = fakeM.getLatLng();
         setForm(p => ({ ...p, fakeLat: lat.toFixed(6), fakeLng: lng.toFixed(6) }));
       });
+
+      // ── Fetch & draw existing merchant markers ──────────────────────────────
+      fetch('/api/locations')
+        .then(r => r.ok ? r.json() : [])
+        .then((locs: Array<{
+          id: number | string; name: string; lat: number; lng: number;
+          category?: string; kind?: string;
+          doctor?: string; specialty?: string; cuisine?: string;
+        }>) => {
+          if (!mapRef.current) return; // map destroyed before fetch returned
+
+          const catStyle = (cat: string): { emoji: string; bg: string; border: string } => {
+            switch (cat) {
+              case 'clinic':
+                return { emoji: '🏥', bg: 'rgba(0,245,212,0.18)', border: '#00f5d4' };
+              case 'restaurant': case 'food':
+                return { emoji: '🍽️', bg: 'rgba(255,149,0,0.18)', border: '#ff9500' };
+              case 'pharmacy':
+                return { emoji: '💊', bg: 'rgba(199,125,255,0.18)', border: '#c77dff' };
+              case 'gas_station': case 'fuel':
+                return { emoji: '⛽', bg: 'rgba(245,197,24,0.18)', border: '#f5c518' };
+              case 'mosque':
+                return { emoji: '🕌', bg: 'rgba(0,212,255,0.15)', border: '#00d4ff' };
+              case 'school': case 'university':
+                return { emoji: '🏫', bg: 'rgba(100,200,255,0.15)', border: '#64c8ff' };
+              default:
+                return { emoji: '📍', bg: 'rgba(255,255,255,0.10)', border: 'rgba(255,255,255,0.4)' };
+            }
+          };
+
+          const newMarkers: L.Marker[] = [];
+
+          locs.forEach(loc => {
+            if (!loc.lat || !loc.lng) return;
+            const cat = loc.category ?? loc.kind ?? '';
+            const { emoji, bg, border } = catStyle(cat);
+
+            const icon = L.divIcon({
+              className: '',
+              iconSize:  [30, 30],
+              iconAnchor:[15, 15],
+              html: `<div style="width:30px;height:30px;display:flex;align-items:center;justify-content:center;
+                background:${bg};border:2px solid ${border};border-radius:50%;
+                box-shadow:0 0 8px ${border}88;font-size:15px;cursor:pointer;
+                transition:transform 0.15s;" title="${loc.name}">${emoji}</div>`,
+            });
+
+            const m = L.marker([loc.lat, loc.lng], { icon, zIndexOffset: -200 });
+            m.addTo(mapRef.current!);
+
+            // Sub-label for doctors
+            const sub = cat === 'clinic'
+              ? [loc.doctor, loc.specialty].filter(Boolean).join(' · ')
+              : cat === 'restaurant' ? (loc.cuisine ?? '') : '';
+
+            // InfoWindow (popup) on click — stop propagation so pin-drop is NOT triggered
+            m.on('click', (e: L.LeafletMouseEvent) => {
+              L.DomEvent.stopPropagation(e);
+              m.openPopup();
+            });
+
+            m.bindPopup(
+              `<div style="direction:rtl;font-family:Rajdhani,sans-serif;min-width:150px;padding:2px 0;">
+                <div style="font-size:16px;font-weight:700;color:#1a1a1a;line-height:1.3;margin-bottom:3px;">
+                  ${emoji} ${loc.name}
+                </div>
+                ${sub ? `<div style="font-size:12px;color:#555;margin-bottom:2px;">${sub}</div>` : ''}
+                <div style="font-size:10px;color:#999;letter-spacing:0.05em;text-transform:uppercase;">${cat}</div>
+              </div>`,
+              { closeButton: false, maxWidth: 220, offset: [0, -8] },
+            );
+
+            newMarkers.push(m);
+          });
+
+          merchantMarkersRef.current = newMarkers;
+        })
+        .catch(() => {}); // silent — markers are optional guidance only
 
       map.on('click', (e: L.LeafletMouseEvent) => {
         const { lat, lng } = e.latlng;
