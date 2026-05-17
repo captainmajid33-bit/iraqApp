@@ -11,7 +11,7 @@ import L from 'leaflet';
 import {
   collection, onSnapshot, query, where,
   runTransaction, doc, serverTimestamp,
-  arrayUnion, updateDoc, Timestamp,
+  arrayUnion, updateDoc, Timestamp, getDoc,
 } from 'firebase/firestore';
 import { db, auth } from '@/lib/firebase';
 
@@ -131,6 +131,11 @@ export function BountyMissionSystem({
 
   const [navLoading,  setNavLoading]  = useState(false);
 
+  // ── Pre-ad selection dialog state ─────────────────────────────────────────
+  const [preAdSelected, setPreAdSelected] = useState<BountyDoc | null>(null);
+  const [skipToast,     setSkipToast]     = useState('');
+  const [skipBusy,      setSkipBusy]      = useState(false);
+
   const markersRef  = useRef<Map<string, L.Marker>>(new Map());
   const gpsWatchRef = useRef<number | null>(null);
   const bountiesRef = useRef<BountyDoc[]>([]); // stable ref to avoid stale closure in transaction
@@ -198,7 +203,7 @@ export function BountyMissionSystem({
     bounties.forEach(b => {
       if (markersRef.current.has(b.id)) return;
       const marker = L.marker([b.latitude, b.longitude], { icon: makeMissionIcon(), zIndexOffset: 2000 }).addTo(map);
-      marker.on('click', () => { setSelected(b); setPhase('idle'); });
+      marker.on('click', () => { setPreAdSelected(b); });
       markersRef.current.set(b.id, marker);
     });
   }, [bounties, mapReady, mapRef, filterActive, markersVisible]);
@@ -420,6 +425,67 @@ export function BountyMissionSystem({
     setAnswerError('');
   };
 
+  // ── Pre-ad: watch ad (free) → go straight to mission sheet ───────────────
+  const handleWatchAd = useCallback(() => {
+    if (!preAdSelected) return;
+    const bounty = preAdSelected;
+    setPreAdSelected(null);
+    setSelected(bounty);
+    setPhase('idle');
+  }, [preAdSelected]);
+
+  // ── Pre-ad: skip ad by paying 1000 IQD ───────────────────────────────────
+  const handleSkipWithPayment = useCallback(async () => {
+    if (!preAdSelected || skipBusy) return;
+    const bounty = preAdSelected;
+
+    const userObj  = getUser();
+    const uid      = auth.currentUser?.uid ?? userObj?.phone ?? userObj?.name ?? '';
+    if (!uid) {
+      setSkipToast('لم يتم التعرف على حسابك. سجّل الدخول أولاً.');
+      setTimeout(() => setSkipToast(''), 3500);
+      return;
+    }
+
+    setSkipBusy(true);
+    try {
+      // ── Check current balance ────────────────────────────────────────────
+      const userRef  = doc(db, 'users', uid);
+      const snap     = await getDoc(userRef);
+      const balance  = snap.exists() ? (Number(snap.data()?.balance) || 0) : 0;
+
+      if (balance < 1000) {
+        setSkipToast(`رصيدك الحالي (${balance.toLocaleString()} د.ع) غير كافٍ لتخطي الإعلان! يرجى اختيار المشاهدة المجانية 💸`);
+        setTimeout(() => setSkipToast(''), 4000);
+        setSkipBusy(false);
+        return;
+      }
+
+      // ── Deduct 1000 via transaction ──────────────────────────────────────
+      await runTransaction(db, async txn => {
+        const fresh = await txn.get(userRef);
+        const bal   = fresh.exists() ? (Number(fresh.data()?.balance) || 0) : 0;
+        if (bal < 1000) throw new Error('insufficient');
+        txn.update(userRef, { balance: bal - 1000 });
+      });
+
+      // ── Open mission sheet directly (ad skipped) ─────────────────────────
+      setPreAdSelected(null);
+      setSelected(bounty);
+      setPhase('idle');
+    } catch (e: any) {
+      if (e?.message === 'insufficient') {
+        setSkipToast('رصيدك أقل من 1000 د.ع. اختر المشاهدة المجانية 💸');
+        setTimeout(() => setSkipToast(''), 4000);
+      } else {
+        setSkipToast('حدث خطأ، حاول مرة أخرى.');
+        setTimeout(() => setSkipToast(''), 3000);
+      }
+    } finally {
+      setSkipBusy(false);
+    }
+  }, [preAdSelected, skipBusy]);
+
   if (!mapReady) return null;
 
   const isClose  = distM !== null && distM <= CLAIM_RADIUS_M;
@@ -437,6 +503,36 @@ export function BountyMissionSystem({
         @keyframes bms-silver{0%,100%{box-shadow:0 0 30px #C0C0C099}50%{box-shadow:0 0 50px #C0C0C0cc}}
         @keyframes bms-bronze{0%,100%{box-shadow:0 0 30px #CD7F3299}50%{box-shadow:0 0 50px #CD7F32cc}}
       `}</style>
+
+      {/* ── Pre-Ad Selection Dialog ── */}
+      {preAdSelected && (
+        <PreAdDialog
+          bounty={preAdSelected}
+          skipBusy={skipBusy}
+          toast={skipToast}
+          onSkip={handleSkipWithPayment}
+          onWatchAd={handleWatchAd}
+          onDismiss={() => setPreAdSelected(null)}
+        />
+      )}
+
+      {/* ── Skip-toast snackbar (shown inside dialog) ── */}
+      {!preAdSelected && skipToast && (
+        <div style={{
+          position: 'fixed', bottom: '100px', left: '50%', transform: 'translateX(-50%)',
+          zIndex: 4500, padding: '11px 20px',
+          background: 'rgba(255,45,120,0.14)',
+          border: '1px solid rgba(255,45,120,0.55)',
+          color: '#ff2d78',
+          fontFamily: 'Rajdhani, sans-serif', fontSize: '14px', fontWeight: 600,
+          borderRadius: '6px', direction: 'rtl', textAlign: 'center',
+          boxShadow: '0 0 24px rgba(255,45,120,0.25)',
+          maxWidth: '340px', whiteSpace: 'pre-wrap',
+          animation: 'bms-pop 0.3s ease',
+        }}>
+          ⚠ {skipToast}
+        </div>
+      )}
 
       {/* ── Countdown overlays ── */}
       {!filterActive && overlays.map(o => (
@@ -736,6 +832,151 @@ function FullScreen({ onClose }: { onClose: () => void }) {
       <button onClick={onClose} style={{ padding:'11px 28px',background:'rgba(255,255,255,0.06)',border:'1px solid rgba(255,255,255,0.18)',color:'rgba(255,255,255,0.55)',fontFamily:'Orbitron, sans-serif',fontSize:'10px',letterSpacing:'0.12em',cursor:'pointer',borderRadius:'4px' }}>
         إغلاق
       </button>
+    </div>
+  );
+}
+
+// ── PreAdDialog — اختيار التخطي أو المشاهدة المجانية ──────────────────────
+function PreAdDialog({
+  bounty, skipBusy, toast, onSkip, onWatchAd, onDismiss,
+}: {
+  bounty:    BountyDoc;
+  skipBusy:  boolean;
+  toast:     string;
+  onSkip:    () => void;
+  onWatchAd: () => void;
+  onDismiss: () => void;
+}) {
+  return (
+    <div style={{
+      position: 'fixed', inset: 0, zIndex: 4200,
+      background: 'rgba(2,5,12,0.92)', backdropFilter: 'blur(16px)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      direction: 'rtl', padding: '20px',
+    }}>
+      <div style={{
+        width: '100%', maxWidth: '380px',
+        background: 'rgba(5,8,15,0.99)',
+        border: '2px solid #f5c518',
+        borderRadius: '12px',
+        boxShadow: '0 0 60px rgba(245,197,24,0.22), 0 0 120px rgba(245,197,24,0.07)',
+        overflow: 'hidden',
+        animation: 'bms-pop 0.38s cubic-bezier(0.34,1.56,0.64,1)',
+      }}>
+
+        {/* Header */}
+        <div style={{
+          padding: '16px 18px 12px',
+          borderBottom: '1px solid rgba(245,197,24,0.18)',
+          background: 'rgba(245,197,24,0.05)',
+          display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between',
+        }}>
+          <div>
+            <div style={{
+              fontFamily: 'Orbitron, sans-serif', fontSize: '8px',
+              color: 'rgba(245,197,24,0.55)', letterSpacing: '0.18em', marginBottom: '4px',
+            }}>
+              ⭐ BOUNTY HUNT · مطاردة الكنز
+            </div>
+            <div style={{
+              fontFamily: 'Rajdhani, sans-serif', fontSize: '15px', fontWeight: 700,
+              color: '#f5c518', maxWidth: '240px', lineHeight: 1.3,
+            }}>
+              {bounty.title}
+            </div>
+          </div>
+          <button onClick={onDismiss} style={{
+            width: '30px', height: '30px', flexShrink: 0,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.12)',
+            borderRadius: '4px', color: 'rgba(255,255,255,0.35)', fontSize: '16px', cursor: 'pointer',
+          }}>×</button>
+        </div>
+
+        {/* Question */}
+        <div style={{ padding: '22px 20px 6px' }}>
+          <div style={{
+            fontFamily: 'Rajdhani, sans-serif', fontSize: '17px', fontWeight: 600,
+            color: 'rgba(255,255,255,0.88)', lineHeight: 1.75,
+            textAlign: 'center', marginBottom: '22px',
+          }}>
+            هل تريد تخطي الإعلان والانطلاق فوراً
+            مقابل <span style={{ color: '#f5c518', fontWeight: 800 }}>1,000 دينار</span>،
+            أم مشاهدة الإعلان مجاناً؟
+          </div>
+
+          {/* Toast inside dialog */}
+          {toast && (
+            <div style={{
+              padding: '10px 14px', marginBottom: '16px',
+              background: 'rgba(255,45,120,0.10)',
+              border: '1px solid rgba(255,45,120,0.45)',
+              borderRadius: '6px',
+              color: '#ff2d78',
+              fontFamily: 'Rajdhani, sans-serif', fontSize: '14px', fontWeight: 600,
+              textAlign: 'center', direction: 'rtl',
+              animation: 'bms-pop 0.3s ease',
+            }}>
+              ⚠ {toast}
+            </div>
+          )}
+
+          {/* Skip button — paid */}
+          <button
+            onClick={onSkip}
+            disabled={skipBusy}
+            style={{
+              width: '100%', padding: '14px 16px', marginBottom: '10px',
+              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px',
+              background: skipBusy
+                ? 'rgba(245,197,24,0.05)'
+                : 'linear-gradient(135deg,rgba(245,197,24,0.20),rgba(245,197,24,0.08))',
+              border: `2px solid ${skipBusy ? 'rgba(245,197,24,0.3)' : '#f5c518'}`,
+              color: skipBusy ? 'rgba(245,197,24,0.4)' : '#f5c518',
+              fontFamily: 'Orbitron, sans-serif', fontSize: '11px', letterSpacing: '0.13em',
+              borderRadius: '7px',
+              cursor: skipBusy ? 'wait' : 'pointer',
+              boxShadow: skipBusy ? 'none' : '0 0 22px rgba(245,197,24,0.28)',
+              transition: 'all 0.2s',
+            }}
+            onMouseEnter={e => { if (!skipBusy) e.currentTarget.style.background = 'rgba(245,197,24,0.26)'; }}
+            onMouseLeave={e => { if (!skipBusy) e.currentTarget.style.background = 'linear-gradient(135deg,rgba(245,197,24,0.20),rgba(245,197,24,0.08))'; }}
+          >
+            {skipBusy ? (
+              <>
+                <svg width="14" height="14" viewBox="0 0 28 28" fill="none"
+                  style={{ animation: 'lf-spin 0.9s linear infinite', flexShrink: 0 }}>
+                  <circle cx="14" cy="14" r="10" stroke="#f5c518" strokeWidth="2.5"
+                    strokeDasharray="22 14" strokeLinecap="round"/>
+                </svg>
+                جاري الخصم...
+              </>
+            ) : (
+              <>⚡ تخطي بـ 1000 د.ع</>
+            )}
+          </button>
+
+          {/* Watch ad button — free */}
+          <button
+            onClick={onWatchAd}
+            style={{
+              width: '100%', padding: '13px 16px', marginBottom: '20px',
+              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px',
+              background: 'rgba(0,212,255,0.07)',
+              border: '1.5px solid rgba(0,212,255,0.45)',
+              color: '#00d4ff',
+              fontFamily: 'Orbitron, sans-serif', fontSize: '11px', letterSpacing: '0.12em',
+              borderRadius: '7px', cursor: 'pointer',
+              boxShadow: '0 0 16px rgba(0,212,255,0.15)',
+              transition: 'background 0.2s',
+            }}
+            onMouseEnter={e => (e.currentTarget.style.background = 'rgba(0,212,255,0.14)')}
+            onMouseLeave={e => (e.currentTarget.style.background = 'rgba(0,212,255,0.07)')}
+          >
+            🎬 مشاهدة الإعلان مجاناً
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
