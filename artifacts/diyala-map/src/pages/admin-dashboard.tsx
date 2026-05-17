@@ -4,7 +4,7 @@ import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import {
   collection, onSnapshot, addDoc, updateDoc, deleteDoc,
-  doc, serverTimestamp, writeBatch, Timestamp, query, orderBy,
+  doc, serverTimestamp, writeBatch, Timestamp, query, orderBy, setDoc,
 } from "firebase/firestore";
 import { db, storage } from "@/lib/firebase";
 import { ref as storageRef, uploadBytes, getDownloadURL } from "firebase/storage";
@@ -3553,10 +3553,249 @@ function DoctorsBookingsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
   );
 }
 
+// ── Services Settings Tab ─────────────────────────────────────────────────────
+function ServicesSettingsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
+  const [isTaxiActive, setIsTaxiActive] = useState<boolean | null>(null);
+  const [isGasActive,  setIsGasActive]  = useState<boolean | null>(null);
+  const [saving, setSaving] = useState<"taxi" | "gas" | null>(null);
+
+  // Live listener on settings/services
+  useEffect(() => {
+    const unsub = onSnapshot(
+      doc(db, "settings", "services"),
+      (snap) => {
+        const d = snap.exists() ? snap.data() : {};
+        setIsTaxiActive(d?.isTaxiActive ?? true);
+        setIsGasActive(d?.isGasActive  ?? true);
+      },
+      () => {
+        setIsTaxiActive(true);
+        setIsGasActive(true);
+      }
+    );
+    return unsub;
+  }, []);
+
+  const toggle = async (field: "isTaxiActive" | "isGasActive", current: boolean) => {
+    const key = field === "isTaxiActive" ? "taxi" : "gas";
+    setSaving(key);
+    try {
+      await setDoc(doc(db, "settings", "services"), { [field]: !current }, { merge: true });
+      toast.show(
+        field === "isTaxiActive"
+          ? (!current ? "✓ خدمة التكسي مفتوحة الآن" : "⏸ خدمة التكسي مقفلة")
+          : (!current ? "✓ خدمة الغاز مفتوحة الآن"  : "⏸ خدمة الغاز مقفلة"),
+        !current
+      );
+    } catch {
+      toast.show("فشل التحديث، حاول مجدداً", false);
+    } finally {
+      setSaving(null);
+    }
+  };
+
+  const loading = isTaxiActive === null || isGasActive === null;
+
+  const services = [
+    {
+      key:     "taxi" as const,
+      field:   "isTaxiActive" as const,
+      active:  isTaxiActive ?? true,
+      icon:    "🚕",
+      labelAr: "خدمة طلب التكسي",
+      labelEn: "TAXI SERVICE",
+      color:   C.yellow,
+      desc:    "يتحكم بزر «اطلب تكسي» في تطبيق الزبائن — عند الإغلاق يُعرض الزر بشكل غير فعّال.",
+    },
+    {
+      key:     "gas" as const,
+      field:   "isGasActive" as const,
+      active:  isGasActive ?? true,
+      icon:    "⛽",
+      labelAr: "خدمة حجز الغاز",
+      labelEn: "GAS SERVICE",
+      color:   C.blue,
+      desc:    "يتحكم بزر «اطلب غاز» في تطبيق الزبائن — عند الإغلاق يُعرض الزر بشكل غير فعّال.",
+    },
+  ];
+
+  return (
+    <div style={{ maxWidth: "680px" }}>
+
+      {/* ── Section header ── */}
+      <div style={{ marginBottom: "24px" }}>
+        <div style={{
+          fontFamily: "Orbitron, sans-serif", fontSize: "12px",
+          color: C.purple, letterSpacing: "0.14em",
+          textShadow: neon(C.purple, 8), marginBottom: "6px",
+        }}>⚙️ SERVICES SETTINGS</div>
+        <div style={{
+          fontFamily: "Rajdhani, sans-serif", fontSize: "13px", color: C.dim,
+        }}>
+          التحكم الفوري بفتح وقفل خدمات التطبيق الرئيسية — التغييرات تنعكس على الزبائن فورياً.
+        </div>
+      </div>
+
+      {/* ── Firestore path info ── */}
+      <div style={{
+        display: "inline-flex", alignItems: "center", gap: "8px",
+        padding: "7px 14px", marginBottom: "22px",
+        background: `${C.purple}08`,
+        border: `1px solid ${C.purple}28`,
+        borderRadius: "4px",
+        fontFamily: "monospace", fontSize: "12px", color: `${C.purple}cc`,
+      }}>
+        <span style={{ opacity: 0.5 }}>Firestore:</span>
+        <span>settings / services</span>
+      </div>
+
+      {loading ? (
+        <div style={{
+          textAlign: "center", padding: "60px",
+          fontFamily: "Orbitron, sans-serif", fontSize: "11px",
+          color: C.dim, letterSpacing: "0.1em",
+        }}>LOADING...</div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
+          {services.map((svc) => {
+            const isBusy = saving === svc.key;
+            return (
+              <div key={svc.key} style={{
+                background: C.surface,
+                border: `1px solid ${svc.active ? svc.color + "55" : C.border}`,
+                borderRadius: "6px",
+                padding: "20px 22px",
+                display: "flex", alignItems: "center", gap: "18px",
+                transition: "border-color 0.25s, box-shadow 0.25s",
+                boxShadow: svc.active ? `0 0 18px ${svc.color}18` : "none",
+              }}>
+
+                {/* Icon */}
+                <div style={{
+                  width: "52px", height: "52px", flexShrink: 0,
+                  borderRadius: "10px",
+                  background: svc.active ? `${svc.color}12` : "rgba(255,255,255,0.03)",
+                  border: `1px solid ${svc.active ? svc.color + "44" : C.border}`,
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  fontSize: "26px",
+                  transition: "all 0.25s",
+                }}>
+                  {svc.icon}
+                </div>
+
+                {/* Info */}
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "4px" }}>
+                    <span style={{
+                      fontFamily: "Rajdhani, sans-serif", fontSize: "16px", fontWeight: 700,
+                      color: svc.active ? C.text : C.dim,
+                      transition: "color 0.2s",
+                    }}>{svc.labelAr}</span>
+                    <span style={{
+                      fontFamily: "Orbitron, sans-serif", fontSize: "8px",
+                      color: svc.active ? svc.color : C.dim,
+                      letterSpacing: "0.1em", opacity: 0.7,
+                    }}>{svc.labelEn}</span>
+                  </div>
+                  <div style={{
+                    fontFamily: "Rajdhani, sans-serif", fontSize: "12px",
+                    color: C.dim, lineHeight: 1.5,
+                  }}>{svc.desc}</div>
+
+                  {/* Field badge */}
+                  <div style={{
+                    display: "inline-block", marginTop: "8px",
+                    padding: "2px 9px",
+                    background: "rgba(255,255,255,0.04)",
+                    border: "1px solid rgba(255,255,255,0.08)",
+                    borderRadius: "3px",
+                    fontFamily: "monospace", fontSize: "11px",
+                    color: "rgba(255,255,255,0.3)",
+                  }}>
+                    {svc.field}: <span style={{ color: svc.active ? C.green : C.red, fontWeight: 700 }}>
+                      {String(svc.active)}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Status + Toggle */}
+                <div style={{
+                  display: "flex", flexDirection: "column",
+                  alignItems: "center", gap: "8px", flexShrink: 0,
+                }}>
+                  {/* Status pill */}
+                  <span style={{
+                    padding: "4px 12px",
+                    background: svc.active ? `${C.green}12` : `${C.red}12`,
+                    border: `1px solid ${svc.active ? C.green + "55" : C.red + "55"}`,
+                    borderRadius: "20px",
+                    fontFamily: "Orbitron, sans-serif", fontSize: "9px",
+                    letterSpacing: "0.1em",
+                    color: svc.active ? C.green : C.red,
+                    whiteSpace: "nowrap",
+                    transition: "all 0.2s",
+                  }}>
+                    {svc.active ? "● مفتوحة" : "○ مقفلة"}
+                  </span>
+
+                  {/* Toggle button */}
+                  <button
+                    onClick={() => toggle(svc.field, svc.active)}
+                    disabled={isBusy}
+                    style={{
+                      width: "72px", height: "36px",
+                      borderRadius: "18px",
+                      background: svc.active
+                        ? `linear-gradient(90deg, ${svc.color}40, ${svc.color}20)`
+                        : "rgba(255,255,255,0.05)",
+                      border: `2px solid ${svc.active ? svc.color : "rgba(255,255,255,0.12)"}`,
+                      cursor: isBusy ? "wait" : "pointer",
+                      position: "relative",
+                      transition: "all 0.25s",
+                      boxShadow: svc.active ? `0 0 14px ${svc.color}44` : "none",
+                      padding: 0,
+                    }}
+                    title={svc.active ? "اضغط للإغلاق" : "اضغط للفتح"}
+                  >
+                    {isBusy ? (
+                      <svg width="16" height="16" viewBox="0 0 28 28" fill="none"
+                        style={{
+                          animation: "spin 0.8s linear infinite",
+                          display: "block", margin: "0 auto",
+                        }}>
+                        <circle cx="14" cy="14" r="10"
+                          stroke={svc.active ? svc.color : C.dim}
+                          strokeWidth="2.5" strokeDasharray="22 14" strokeLinecap="round"/>
+                      </svg>
+                    ) : (
+                      <span style={{
+                        display: "block",
+                        width: "26px", height: "26px",
+                        borderRadius: "50%",
+                        background: svc.active ? svc.color : "rgba(255,255,255,0.2)",
+                        position: "absolute",
+                        top: "3px",
+                        left: svc.active ? "calc(100% - 29px)" : "3px",
+                        transition: "left 0.25s, background 0.25s",
+                        boxShadow: svc.active ? `0 0 8px ${svc.color}88` : "none",
+                      }} />
+                    )}
+                  </button>
+                </div>
+
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Admin Dashboard ───────────────────────────────────────────────────────────
 export function AdminDashboard() {
   const [, navigate] = useLocation();
-  const [tab, setTab] = useState<"merchants" | "map" | "categories" | "settings" | "taxi" | "drivers" | "fuel" | "bounty" | "users" | "doctors_bookings">("merchants");
+  const [tab, setTab] = useState<"merchants" | "map" | "categories" | "settings" | "taxi" | "drivers" | "fuel" | "bounty" | "users" | "doctors_bookings" | "services_settings">("merchants");
   const [cats, setCats] = useState<Cat[]>([]);
   const [authChecked, setAuthChecked] = useState(false);
   const toast = useToast();
@@ -3600,8 +3839,9 @@ export function AdminDashboard() {
     { key: "fuel"       as const, en: "FUEL",        ar: "⛽ محطات الوقود" },
     { key: "bounty"     as const, en: "BOUNTY",      ar: "⭐ المهمات والجوائز" },
     { key: "users"            as const, en: "USERS",           ar: "👥 المستخدمون" },
-    { key: "doctors_bookings" as const, en: "DOCTORS BOOKINGS", ar: "🏥 حجوزات الأطباء" },
-    { key: "settings"         as const, en: "SETTINGS",         ar: "الإعدادات" },
+    { key: "doctors_bookings"   as const, en: "DOCTORS BOOKINGS",  ar: "🏥 حجوزات الأطباء" },
+    { key: "services_settings" as const, en: "SERVICES SETTINGS", ar: "⚙️ إعدادات الخدمات" },
+    { key: "settings"          as const, en: "SETTINGS",          ar: "الإعدادات" },
   ];
 
   return (
@@ -3653,8 +3893,9 @@ export function AdminDashboard() {
         {tab === "fuel"       && <FuelStationsTab toast={toast} />}
         {tab === "bounty"     && <BountyMissionsTab toast={toast} />}
         {tab === "users"            && <UsersTab toast={toast} />}
-        {tab === "doctors_bookings" && <DoctorsBookingsTab toast={toast} />}
-        {tab === "settings"         && <SettingsTab toast={toast} />}
+        {tab === "doctors_bookings"   && <DoctorsBookingsTab toast={toast} />}
+        {tab === "services_settings"  && <ServicesSettingsTab toast={toast} />}
+        {tab === "settings"           && <SettingsTab toast={toast} />}
       </main>
 
       <Toast toast={toast.toast} />
