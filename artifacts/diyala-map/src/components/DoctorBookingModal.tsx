@@ -40,9 +40,23 @@ function normalizeSlots(raw: unknown): SlotEntry[] {
     .filter((x): x is SlotEntry => x !== null);
 }
 
-function todayStr() {
-  const d = new Date();
+function dateToStr(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+/**
+ * Returns the "target booking date":
+ * - Before 21:00 → today
+ * - 21:00 or later → tomorrow (slots roll over to next day)
+ */
+function targetDateStr(): string {
+  const now = new Date();
+  if (now.getHours() >= 21) {
+    const tomorrow = new Date(now);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    return dateToStr(tomorrow);
+  }
+  return dateToStr(now);
 }
 
 interface Props {
@@ -62,7 +76,7 @@ export function DoctorBookingModal({ doctorId, doctorName, doctorLat, doctorLng,
   const [errMsg,         setErrMsg]         = useState('');
   const [userBalance,    setUserBalance]    = useState<number>(0);
 
-  const today    = todayStr();
+  const today    = targetDateStr();
   const user     = getUserFromStorage();
   const userId   = user?.uid  ?? 'anonymous';
   const userName = user?.name ?? 'زبون';
