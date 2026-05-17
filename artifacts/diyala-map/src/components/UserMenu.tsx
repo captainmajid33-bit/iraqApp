@@ -3,6 +3,7 @@ import { signOut, onAuthStateChanged, type User as FbUser } from 'firebase/auth'
 import {
   doc, getDoc, updateDoc,
   collection, query, where, onSnapshot,
+  runTransaction, increment, serverTimestamp,
 } from 'firebase/firestore';
 import { auth, db } from '@/lib/firebase';
 import { getUserFromStorage, type DiyalaUser } from './UserLoginOverlay';
@@ -38,10 +39,59 @@ interface WalletDialogProps {
   onClose:  () => void;
 }
 function WalletDialog({ user, fbUser, onClose }: WalletDialogProps) {
-  const [balance,  setBalance]  = useState<number | null>(null);
-  const [loading,  setLoading]  = useState(true);
+  const [balance,    setBalance]    = useState<number | null>(null);
+  const [loading,    setLoading]    = useState(true);
+  const [cardCode,   setCardCode]   = useState('');
+  const [redeeming,  setRedeeming]  = useState(false);
+  const [redeemMsg,  setRedeemMsg]  = useState<{ text: string; ok: boolean } | null>(null);
 
   const userId = user?.uid ?? user?.phone ?? user?.name ?? 'anonymous';
+
+  // ── Redeem gift card via Firestore Transaction (anti double-spend) ──────────
+  async function redeemCard() {
+    const uid     = fbUser?.uid;
+    const codeRaw = cardCode.trim();
+    if (!codeRaw || !uid) return;
+    setRedeeming(true);
+    setRedeemMsg(null);
+    try {
+      const amount = await runTransaction(db, async txn => {
+        const cardRef  = doc(db, 'gift_cards', codeRaw);
+        const cardSnap = await txn.get(cardRef);
+
+        if (!cardSnap.exists() || cardSnap.data()?.isUsed === true) {
+          throw new Error('invalid');
+        }
+
+        const amt     = Number(cardSnap.data()?.amount ?? 0);
+        const userRef = doc(db, 'users', uid);
+
+        txn.update(cardRef, {
+          isUsed: true,
+          usedBy: uid,
+          usedAt: serverTimestamp(),
+        });
+        txn.update(userRef, { balance: increment(amt) });
+
+        return amt;
+      });
+
+      setRedeemMsg({
+        text: `تم شحن محفظتك بمبلغ ${(amount as number).toLocaleString('ar-IQ')} دينار بنجاح! 🥳🎉`,
+        ok: true,
+      });
+      setCardCode('');
+    } catch (e: any) {
+      setRedeemMsg({
+        text: e?.message === 'invalid'
+          ? 'هذا الكود غير صالح أو تم استخدامه مسبقاً! ❌'
+          : `حدث خطأ: ${e?.message ?? e}`,
+        ok: false,
+      });
+    } finally {
+      setRedeeming(false);
+    }
+  }
 
   // Live balance from Firestore users/{uid}
   useEffect(() => {
@@ -178,6 +228,81 @@ function WalletDialog({ user, fbUser, onClose }: WalletDialogProps) {
             </svg>
             ⚡ شحن رصيد الحساب
           </a>
+
+          {/* ── Gift Card Redeem section ─────────────────────────────────── */}
+          <div style={{
+            marginBottom: '10px',
+            padding: '14px 14px 12px',
+            background: 'rgba(0,212,255,0.04)',
+            border: '1px solid rgba(0,212,255,0.22)',
+            borderRadius: '3px',
+          }}>
+            <div style={{
+              fontFamily: 'Orbitron, sans-serif', fontSize: '8px',
+              color: 'rgba(0,212,255,0.65)', letterSpacing: '0.16em', marginBottom: '10px',
+            }}>
+              💳 REDEEM CARD · تعبئة برمز الشحن
+            </div>
+
+            {/* Code input */}
+            <input
+              type="text"
+              value={cardCode}
+              onChange={e => { setCardCode(e.target.value); setRedeemMsg(null); }}
+              onKeyDown={e => { if (e.key === 'Enter' && !redeeming) redeemCard(); }}
+              placeholder="أدخل كود شحن المحفظة 💳"
+              disabled={redeeming}
+              style={{
+                width: '100%', padding: '10px 12px',
+                background: 'rgba(0,212,255,0.06)',
+                border: '1px solid rgba(0,212,255,0.28)',
+                borderRadius: '3px', color: '#e8f8ff',
+                fontFamily: 'Courier New, monospace', fontSize: '14px',
+                letterSpacing: '1.5px', outline: 'none',
+                marginBottom: '8px', boxSizing: 'border-box',
+                direction: 'ltr', textAlign: 'center',
+              }}
+            />
+
+            {/* Feedback message */}
+            {redeemMsg && (
+              <div style={{
+                padding: '8px 10px', borderRadius: '3px', marginBottom: '8px',
+                fontFamily: 'Rajdhani, sans-serif', fontSize: '13px', fontWeight: 600,
+                textAlign: 'center', lineHeight: 1.4,
+                background: redeemMsg.ok
+                  ? 'rgba(0,245,212,0.1)' : 'rgba(255,45,120,0.1)',
+                border: `1px solid ${redeemMsg.ok ? 'rgba(0,245,212,0.35)' : 'rgba(255,45,120,0.35)'}`,
+                color: redeemMsg.ok ? '#00f5d4' : '#ff2d78',
+              }}>
+                {redeemMsg.text}
+              </div>
+            )}
+
+            {/* Redeem button */}
+            <button
+              onClick={redeemCard}
+              disabled={redeeming || !cardCode.trim()}
+              style={{
+                width: '100%', padding: '11px',
+                background: (redeeming || !cardCode.trim())
+                  ? 'rgba(0,212,255,0.04)' : 'rgba(0,212,255,0.14)',
+                border: `2px solid ${(redeeming || !cardCode.trim())
+                  ? 'rgba(0,212,255,0.15)' : 'rgba(0,212,255,0.55)'}`,
+                color: (redeeming || !cardCode.trim())
+                  ? 'rgba(0,212,255,0.3)' : '#00d4ff',
+                fontFamily: 'Orbitron, sans-serif', fontSize: '10px',
+                letterSpacing: '0.1em', cursor: (redeeming || !cardCode.trim())
+                  ? 'not-allowed' : 'pointer',
+                borderRadius: '3px',
+                boxShadow: (!redeeming && cardCode.trim())
+                  ? '0 0 16px rgba(0,212,255,0.2)' : 'none',
+                transition: 'all 0.18s',
+              }}
+            >
+              {redeeming ? '⏳ جاري التحقق...' : 'تعبئة الرصيد الآن 🚀'}
+            </button>
+          </div>
 
           {/* Withdraw button */}
           <a
