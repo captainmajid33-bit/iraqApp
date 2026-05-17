@@ -580,6 +580,22 @@ export function ClinicMap({
   const showChatRef = useRef(false);
   const [showGasCancelConfirm, setShowGasCancelConfirm] = useState(false);
 
+  // ── Remote service-toggle flags (Firestore settings/services) ─────────────
+  const [isTaxiActive, setIsTaxiActive] = useState<boolean>(true);
+  const [isGasActive,  setIsGasActive]  = useState<boolean>(true);
+  useEffect(() => {
+    const unsub = onSnapshot(
+      doc(db, 'settings', 'services'),
+      (snap) => {
+        const d = snap.exists() ? snap.data() : {};
+        setIsTaxiActive(d?.isTaxiActive ?? true);
+        setIsGasActive(d?.isGasActive  ?? true);
+      },
+      () => { /* on error — leave defaults (true) */ }
+    );
+    return unsub;
+  }, []);
+
   // ── Rating dialog (auto-opens when ride finishes) ─────────────────────────
   const [showRating,        setShowRating]        = useState(false);
   const [ratingOrderId,     setRatingOrderId]     = useState<number>(0);
@@ -5098,8 +5114,8 @@ export function ClinicMap({
         boxShadow:'0 -4px 32px rgba(0,0,0,0.7)',
       }}>
 
-        {/* ── TAXI button ── */}
-        {(() => {
+        {/* ── TAXI button — hidden when isTaxiActive===false ── */}
+        {isTaxiActive && (() => {
           const ACTIVE_STATUSES = ['pending','accepted','driving'];
           const hasTripActive = !!(activeOrderId && ACTIVE_STATUSES.includes(activeOrderStatus));
           return (
@@ -5165,8 +5181,8 @@ export function ClinicMap({
           );
         })()}
 
-        {/* ── GAS button ── */}
-        <button
+        {/* ── GAS button — hidden when isGasActive===false ── */}
+        {isGasActive && <button
           onClick={()=>{
             if (!gasCategory) return;
             if (activeGasOrderId) return;
@@ -5206,7 +5222,7 @@ export function ClinicMap({
             fontFamily:'Orbitron,sans-serif', fontSize:'11px',
             fontWeight:700, letterSpacing:'0.12em',
           }}>غاز</span>
-        </button>
+        </button>}
 
       </div>
 
