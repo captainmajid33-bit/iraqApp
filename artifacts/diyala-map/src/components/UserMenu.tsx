@@ -468,15 +468,17 @@ export function UserMenu() {
   return (
     <>
       <style>{`
-        @keyframes um-fade-in    { from{opacity:0;transform:scale(0.92) translateY(-6px)} to{opacity:1;transform:scale(1) translateY(0)} }
+        @keyframes um-fade-in    { from{opacity:0;transform:scale(0.88) translateY(-10px)} to{opacity:1;transform:scale(1) translateY(0)} }
         @keyframes um-dialog-in  { from{opacity:0;transform:translateY(14px)} to{opacity:1;transform:translateY(0)} }
         @keyframes um-toast-in   { from{opacity:0;transform:translateY(24px)} to{opacity:1;transform:translateY(0)} }
         @keyframes um-spin       { to{transform:rotate(360deg)} }
-        .um-item:hover  { background: rgba(123,47,247,0.12) !important; }
+        @keyframes um-neon-pulse { 0%,100%{box-shadow:0 0 18px rgba(123,47,247,0.35),0 8px 40px rgba(0,0,0,0.8)} 50%{box-shadow:0 0 28px rgba(123,47,247,0.55),0 8px 40px rgba(0,0,0,0.8)} }
+        .um-item:hover   { background: rgba(123,47,247,0.14) !important; }
         .um-item-y:hover { background: rgba(245,197,24,0.1) !important; }
-        .um-btn:hover   { background: rgba(123,47,247,0.18) !important; box-shadow: 0 0 20px rgba(123,47,247,0.3) !important; }
-        .um-save:hover  { background: rgba(0,245,212,0.22) !important; }
-        .um-close:hover { background: rgba(123,47,247,0.28) !important; }
+        .um-item-r:hover { background: rgba(255,45,120,0.1) !important; }
+        .um-btn:hover    { background: rgba(123,47,247,0.2) !important; box-shadow: 0 0 22px rgba(123,47,247,0.4) !important; }
+        .um-save:hover   { background: rgba(0,245,212,0.22) !important; }
+        .um-close:hover  { background: rgba(123,47,247,0.28) !important; }
         .um-name-input:focus { border-color: #7b2ff7 !important; box-shadow: 0 0 0 2px rgba(123,47,247,0.15); }
       `}</style>
 
@@ -516,60 +518,163 @@ export function UserMenu() {
         {/* ── Dropdown ──────────────────────────────────────────────────────── */}
         {menuOpen && (
           <div style={{
-            position:'absolute', top:48, right:0, minWidth:200,
-            background:'rgba(5,8,15,0.97)',
-            border:'1px solid rgba(123,47,247,0.45)',
-            boxShadow:'0 8px 40px rgba(0,0,0,0.7), 0 0 24px rgba(123,47,247,0.12)',
-            animation:'um-fade-in 0.15s ease-out', overflow:'hidden',
+            position:'absolute', top:50, right:0, minWidth:230,
+            background:'rgba(6,9,18,0.82)',
+            backdropFilter:'blur(22px)',
+            WebkitBackdropFilter:'blur(22px)',
+            border:'1px solid rgba(123,47,247,0.55)',
+            borderRadius:'20px',
+            boxShadow:'0 0 0 1px rgba(123,47,247,0.15), 0 8px 48px rgba(0,0,0,0.82), 0 0 32px rgba(123,47,247,0.22)',
+            animation:'um-fade-in 0.2s cubic-bezier(0.34,1.56,0.64,1)',
+            overflow:'hidden',
+            direction:'rtl',
           }}>
 
-            {/* تفاصيل الحساب */}
-            <button className="um-item"
-              onClick={() => { setMenuOpen(false); setDialogOpen(true); }}
-              style={MI}>
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="rgba(123,47,247,0.85)" strokeWidth="1.8" strokeLinecap="round">
-                <circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/>
-              </svg>
-              <span style={{ fontFamily:'Rajdhani, sans-serif', fontSize:'15px', color:'#d4c8ff', letterSpacing:'0.02em' }}>تفاصيل الحساب</span>
-            </button>
-
-            <div style={{ height:1, background:'rgba(123,47,247,0.12)', margin:'0 12px' }}/>
-
-            {/* 🏆 المهمات */}
-            <button className="um-item-y"
-              onClick={() => { setMenuOpen(false); setShowMissions(true); }}
-              style={MI}>
-              <span style={{ fontSize:'16px', lineHeight:1 }}>🏆</span>
-              <div style={{ flex:1 }}>
-                <div style={{ fontFamily:'Rajdhani, sans-serif', fontSize:'15px', color:'#f5c518', letterSpacing:'0.02em', lineHeight:1.2 }}>المهمات</div>
-                <div style={{ fontFamily:'Orbitron, sans-serif', fontSize:'7px', color:'rgba(245,197,24,0.45)', letterSpacing:'0.1em', marginTop:'1px' }}>BOUNTY HISTORY</div>
+            {/* ── Header: user identity ─────────────────────────────────────── */}
+            <div style={{
+              padding:'16px 18px 14px',
+              background:'linear-gradient(135deg,rgba(123,47,247,0.14),rgba(0,245,212,0.04))',
+              borderBottom:'1px solid rgba(123,47,247,0.2)',
+              display:'flex', alignItems:'center', gap:'12px',
+            }}>
+              {/* Avatar glow ring */}
+              <div style={{
+                flexShrink:0, width:'40px', height:'40px', borderRadius:'50%',
+                background:'rgba(123,47,247,0.18)',
+                border:'1.5px solid rgba(123,47,247,0.7)',
+                boxShadow:'0 0 14px rgba(123,47,247,0.45), inset 0 0 8px rgba(123,47,247,0.1)',
+                display:'flex', alignItems:'center', justifyContent:'center',
+              }}>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
+                  stroke="rgba(180,140,255,0.95)" strokeWidth="1.7" strokeLinecap="round">
+                  <circle cx="12" cy="8" r="4"/>
+                  <path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/>
+                </svg>
               </div>
-            </button>
-
-            {/* 👛 المحفظة */}
-            <button className="um-item-y"
-              onClick={() => { setMenuOpen(false); setShowWallet(true); }}
-              style={MI}>
-              <span style={{ fontSize:'16px', lineHeight:1 }}>👛</span>
-              <div style={{ flex:1 }}>
-                <div style={{ fontFamily:'Rajdhani, sans-serif', fontSize:'15px', color:'#f5c518', letterSpacing:'0.02em', lineHeight:1.2 }}>المحفظة</div>
-                <div style={{ fontFamily:'Orbitron, sans-serif', fontSize:'7px', color:'rgba(245,197,24,0.45)', letterSpacing:'0.1em', marginTop:'1px' }}>WALLET · سحب الأرباح</div>
+              {/* Name + tag */}
+              <div style={{ flex:1, minWidth:0 }}>
+                <div style={{
+                  fontFamily:'Rajdhani, sans-serif', fontSize:'16px', fontWeight:700,
+                  color:'#e4d8ff', lineHeight:1.15,
+                  overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap',
+                }}>
+                  {user?.name || 'مجهول'}
+                </div>
+                <div style={{
+                  fontFamily:'Orbitron, sans-serif', fontSize:'7px',
+                  color:'rgba(123,47,247,0.7)', letterSpacing:'0.18em', marginTop:'2px',
+                }}>
+                  PLAYER PROFILE
+                </div>
               </div>
-            </button>
+              {/* Online dot */}
+              <div style={{
+                width:'8px', height:'8px', borderRadius:'50%', flexShrink:0,
+                background:'#00f5d4', boxShadow:'0 0 8px #00f5d4',
+                animation:'lf-ping 2s cubic-bezier(0,0,0.2,1) infinite',
+              }}/>
+            </div>
 
-            <div style={{ height:1, background:'rgba(255,77,109,0.12)', margin:'0 12px' }}/>
+            {/* ── Section: account + missions + wallet ─────────────────────── */}
+            <div style={{ padding:'8px 0 4px' }}>
 
-            {/* تسجيل الخروج */}
-            <button className="um-item"
-              onClick={handleSignOut}
-              style={MI}>
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ff4d6d" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/>
-                <polyline points="16 17 21 12 16 7"/>
-                <line x1="21" y1="12" x2="9" y2="12"/>
-              </svg>
-              <span style={{ fontFamily:'Rajdhani, sans-serif', fontSize:'15px', color:'#ff4d6d', letterSpacing:'0.02em' }}>تسجيل الخروج</span>
-            </button>
+              {/* تفاصيل الحساب */}
+              <button className="um-item"
+                onClick={() => { setMenuOpen(false); setDialogOpen(true); }}
+                style={{ ...MI, padding:'10px 18px', borderRadius:'0', gap:'12px' }}>
+                <div style={{
+                  width:'32px', height:'32px', borderRadius:'8px', flexShrink:0,
+                  background:'rgba(123,47,247,0.14)', border:'1px solid rgba(123,47,247,0.3)',
+                  display:'flex', alignItems:'center', justifyContent:'center',
+                }}>
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none"
+                    stroke="rgba(180,140,255,0.9)" strokeWidth="1.8" strokeLinecap="round">
+                    <circle cx="12" cy="8" r="4"/>
+                    <path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/>
+                  </svg>
+                </div>
+                <div style={{ flex:1 }}>
+                  <div style={{ fontFamily:'Rajdhani, sans-serif', fontSize:'14px', fontWeight:600, color:'#d4c8ff', lineHeight:1.2 }}>تفاصيل الحساب</div>
+                  <div style={{ fontFamily:'Orbitron, sans-serif', fontSize:'6.5px', color:'rgba(123,47,247,0.5)', letterSpacing:'0.14em', marginTop:'1px' }}>MY PROFILE</div>
+                </div>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="rgba(123,47,247,0.4)" strokeWidth="2" strokeLinecap="round"><path d="M15 18l-6-6 6-6"/></svg>
+              </button>
+
+              {/* ── neon divider ── */}
+              <div style={{ height:'1px', margin:'4px 14px', background:'linear-gradient(90deg,transparent,rgba(123,47,247,0.25),transparent)' }}/>
+
+              {/* 🏆 المهمات */}
+              <button className="um-item-y"
+                onClick={() => { setMenuOpen(false); setShowMissions(true); }}
+                style={{ ...MI, padding:'10px 18px', borderRadius:'0', gap:'12px' }}>
+                <div style={{
+                  width:'32px', height:'32px', borderRadius:'8px', flexShrink:0,
+                  background:'rgba(245,197,24,0.1)', border:'1px solid rgba(245,197,24,0.28)',
+                  display:'flex', alignItems:'center', justifyContent:'center',
+                }}>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+                    stroke="rgba(245,197,24,0.9)" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M6 9H4a2 2 0 000 4h2M18 9h2a2 2 0 010 4h-2"/>
+                    <path d="M6 9V5h12v4M6 13v3a6 6 0 0012 0v-3"/>
+                    <path d="M12 19v3M9 22h6"/>
+                  </svg>
+                </div>
+                <div style={{ flex:1 }}>
+                  <div style={{ fontFamily:'Rajdhani, sans-serif', fontSize:'14px', fontWeight:600, color:'#f5c518', lineHeight:1.2 }}>المهمات</div>
+                  <div style={{ fontFamily:'Orbitron, sans-serif', fontSize:'6.5px', color:'rgba(245,197,24,0.45)', letterSpacing:'0.14em', marginTop:'1px' }}>BOUNTY HISTORY</div>
+                </div>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="rgba(245,197,24,0.35)" strokeWidth="2" strokeLinecap="round"><path d="M15 18l-6-6 6-6"/></svg>
+              </button>
+
+              {/* 💎 المحفظة */}
+              <button className="um-item-y"
+                onClick={() => { setMenuOpen(false); setShowWallet(true); }}
+                style={{ ...MI, padding:'10px 18px', borderRadius:'0', gap:'12px' }}>
+                <div style={{
+                  width:'32px', height:'32px', borderRadius:'8px', flexShrink:0,
+                  background:'rgba(0,245,212,0.08)', border:'1px solid rgba(0,245,212,0.25)',
+                  display:'flex', alignItems:'center', justifyContent:'center',
+                }}>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+                    stroke="rgba(0,245,212,0.9)" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+                    <rect x="2" y="7" width="20" height="14" rx="2"/>
+                    <path d="M16 14a1 1 0 100-2 1 1 0 000 2z" fill="rgba(0,245,212,0.8)" stroke="none"/>
+                    <path d="M22 11V7a2 2 0 00-2-2H6a2 2 0 00-2 2v4"/>
+                  </svg>
+                </div>
+                <div style={{ flex:1 }}>
+                  <div style={{ fontFamily:'Rajdhani, sans-serif', fontSize:'14px', fontWeight:600, color:'#00f5d4', lineHeight:1.2 }}>المحفظة</div>
+                  <div style={{ fontFamily:'Orbitron, sans-serif', fontSize:'6.5px', color:'rgba(0,245,212,0.45)', letterSpacing:'0.14em', marginTop:'1px' }}>WALLET · سحب الأرباح</div>
+                </div>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="rgba(0,245,212,0.35)" strokeWidth="2" strokeLinecap="round"><path d="M15 18l-6-6 6-6"/></svg>
+              </button>
+            </div>
+
+            {/* ── Bottom separator + logout ─────────────────────────────────── */}
+            <div style={{ height:'1px', margin:'0 14px', background:'linear-gradient(90deg,transparent,rgba(255,45,120,0.3),transparent)' }}/>
+            <div style={{ padding:'4px 0 8px' }}>
+              <button className="um-item-r"
+                onClick={handleSignOut}
+                style={{ ...MI, padding:'11px 18px', borderRadius:'0', gap:'12px' }}>
+                <div style={{
+                  width:'32px', height:'32px', borderRadius:'8px', flexShrink:0,
+                  background:'rgba(255,45,120,0.1)', border:'1px solid rgba(255,45,120,0.28)',
+                  display:'flex', alignItems:'center', justifyContent:'center',
+                }}>
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none"
+                    stroke="#ff4d6d" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/>
+                    <polyline points="16 17 21 12 16 7"/>
+                    <line x1="21" y1="12" x2="9" y2="12"/>
+                  </svg>
+                </div>
+                <div style={{ flex:1 }}>
+                  <div style={{ fontFamily:'Rajdhani, sans-serif', fontSize:'14px', fontWeight:600, color:'#ff6b8a', lineHeight:1.2 }}>تسجيل الخروج</div>
+                  <div style={{ fontFamily:'Orbitron, sans-serif', fontSize:'6.5px', color:'rgba(255,45,120,0.45)', letterSpacing:'0.14em', marginTop:'1px' }}>SIGN OUT</div>
+                </div>
+              </button>
+            </div>
+
           </div>
         )}
       </div>
