@@ -2619,6 +2619,9 @@ interface FuelStation {
   latitude:     number;
   longitude:    number;
   queue_status: QueueStatus;
+  icon_url?:    string | null;
+  isPremium?:   boolean;
+  isAvailable?: boolean;
 }
 
 const QUEUE_LABELS: Record<QueueStatus, { label: string; color: string; emoji: string }> = {
@@ -2627,16 +2630,39 @@ const QUEUE_LABELS: Record<QueueStatus, { label: string; color: string; emoji: s
   red:    { label: 'مزدحمة · قافلة',       color: '#ff2d50', emoji: '🔴' },
 };
 
+const VALID_QUEUE: QueueStatus[] = ['green', 'yellow', 'red'];
+
+/** Safely parse a Firestore fuel_stations doc — all fields null-guarded */
+function parseFuelDoc(id: string, raw: Record<string, any>): FuelStation {
+  return {
+    id,
+    name:        String(raw.name        ?? ''),
+    address:     String(raw.address     ?? ''),
+    latitude:    typeof raw.latitude  === 'number' ? raw.latitude  : parseFloat(String(raw.latitude  ?? '0')) || 0,
+    longitude:   typeof raw.longitude === 'number' ? raw.longitude : parseFloat(String(raw.longitude ?? '0')) || 0,
+    queue_status: VALID_QUEUE.includes(raw.queue_status) ? raw.queue_status as QueueStatus : 'green',
+    icon_url:    raw.icon_url   ?? null,
+    isPremium:   Boolean(raw.isPremium  ?? false),
+    isAvailable: raw.isAvailable !== undefined ? Boolean(raw.isAvailable) : true,
+  };
+}
+
 const EMPTY_FORM = { name: '', address: '', latitude: '', longitude: '', queue_status: 'green' as QueueStatus };
 
 function FuelStationsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
   const [stations,     setStations]     = useState<FuelStation[]>([]);
   const [loading,      setLoading]      = useState(true);
+  const [fsError,      setFsError]      = useState('');
   const [showForm,     setShowForm]     = useState(false);
   const [editing,      setEditing]      = useState<FuelStation | null>(null);
   const [form,         setForm]         = useState({ ...EMPTY_FORM });
   const [saving,       setSaving]       = useState(false);
   const [confirmDel,   setConfirmDel]   = useState<string | null>(null);
+  // Icon upload state
+  const [iconFile,        setIconFile]        = useState<File | null>(null);
+  const [iconPreview,     setIconPreview]     = useState('');
+  const [iconUploading,   setIconUploading]   = useState(false);
+  const iconInputRef = useRef<HTMLInputElement>(null);
 
   // ── Map picker refs ──────────────────────────────────────────────────────
   const mapPickerContainerRef = useRef<HTMLDivElement | null>(null);
@@ -2730,17 +2756,26 @@ function FuelStationsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
     }
   }, [form.latitude, form.longitude]);
 
-  // ── Live Firestore listener ──────────────────────────────────────────────
+  // ── Live Firestore listener (null-safe parsing) ──────────────────────────
   useEffect(() => {
     const unsub = onSnapshot(
       collection(db, 'fuel_stations'),
       snap => {
-        setStations(
-          snap.docs.map(d => ({ id: d.id, ...(d.data() as Omit<FuelStation, 'id'>) }))
-        );
+        try {
+          const parsed = snap.docs.map(d => parseFuelDoc(d.id, d.data() as Record<string, any>));
+          setStations(parsed);
+          setFsError('');
+        } catch (e: any) {
+          console.error('[FuelStationsTab] parse error:', e);
+          setFsError('حدث خطأ أثناء معالجة البيانات، يرجى تحديث الصفحة.');
+        }
         setLoading(false);
       },
-      err => { console.error('[FuelStationsTab] Firestore error:', err); setLoading(false); }
+      err => {
+        console.error('[FuelStationsTab] Firestore error:', err);
+        setFsError('حدث خطأ أثناء جلب المحطات، يرجى تحديث الصفحة.');
+        setLoading(false);
+      }
     );
     return () => unsub();
   }, []);
@@ -2749,14 +2784,28 @@ function FuelStationsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
   function openAdd() {
     setEditing(null);
     setForm({ ...EMPTY_FORM });
+    setIconFile(null);
+    setIconPreview('');
     setShowForm(true);
   }
 
   // ── Open edit form ───────────────────────────────────────────────────────
   function openEdit(s: FuelStation) {
     setEditing(s);
-    setForm({ name: s.name, address: s.address ?? '', latitude: String(s.latitude), longitude: String(s.longitude), queue_status: s.queue_status });
+    setForm({ name: s.name, address: s.address ?? '', latitude: String(s.latitude ?? ''), longitude: String(s.longitude ?? ''), queue_status: s.queue_status });
+    setIconFile(null);
+    setIconPreview(s.icon_url ?? '');
     setShowForm(true);
+  }
+
+  // ── Icon file picker ─────────────────────────────────────────────────────
+  function handleIconFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setIconFile(file);
+    const reader = new FileReader();
+    reader.onload = ev => setIconPreview(ev.target?.result as string);
+    reader.readAsDataURL(file);
   }
 
   // ── Save (add or update) ─────────────────────────────────────────────────
@@ -2770,12 +2819,25 @@ function FuelStationsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
 
     setSaving(true);
     try {
-      const payload = {
+      // Upload icon if a new file was selected
+      let iconUrl: string | null = editing?.icon_url ?? null;
+      if (iconFile) {
+        setIconUploading(true);
+        const { ref: sRef, uploadBytes: uBytes, getDownloadURL: gUrl } = await import('firebase/storage');
+        const path = `fuel_icons/${Date.now()}_${iconFile.name.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+        const fileRef = sRef(storage, path);
+        await uBytes(fileRef, iconFile);
+        iconUrl = await gUrl(fileRef);
+        setIconUploading(false);
+      }
+
+      const payload: Record<string, any> = {
         name:         form.name.trim(),
         address:      form.address.trim(),
         latitude:     lat,
         longitude:    lng,
         queue_status: form.queue_status,
+        icon_url:     iconUrl,
         last_updated: serverTimestamp(),
         updater_name: 'admin',
       };
@@ -2788,6 +2850,7 @@ function FuelStationsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
       }
       setShowForm(false);
     } catch (e: any) {
+      setIconUploading(false);
       toast.show(`فشل الحفظ: ${e?.message ?? e}`, false);
     } finally { setSaving(false); }
   }
@@ -2922,6 +2985,80 @@ function FuelStationsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
                 </select>
               </div>
 
+              {/* ── Icon Upload ──────────────────────────────────────────── */}
+              <div>
+                <label style={LBL}>
+                  🖼️ أيقونة المحطة (PNG مخصصة)
+                  <span style={{ fontFamily: 'Rajdhani, sans-serif', fontSize: '11px', color: C.dim, fontWeight: 400, marginRight: '6px' }}>
+                    — اختياري · يستبدل الأيقونة الافتراضية ⛽
+                  </span>
+                </label>
+                <input
+                  ref={iconInputRef}
+                  type="file" accept="image/png,image/webp,image/jpeg"
+                  onChange={handleIconFile}
+                  style={{ display: 'none' }}
+                />
+                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                  {/* Preview box */}
+                  <div
+                    onClick={() => iconInputRef.current?.click()}
+                    style={{
+                      width: '64px', height: '64px', flexShrink: 0,
+                      border: `2px dashed ${iconPreview ? C.yellow : C.border}`,
+                      borderRadius: '6px', cursor: 'pointer', overflow: 'hidden',
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      background: iconPreview ? 'transparent' : `${C.yellow}06`,
+                      boxShadow: iconPreview ? `0 0 12px ${C.yellow}33` : 'none',
+                      transition: 'all 0.2s',
+                    }}
+                    title="اختر صورة PNG"
+                  >
+                    {iconPreview
+                      ? <img src={iconPreview} alt="preview" style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
+                      : <span style={{ fontSize: '24px', opacity: 0.5 }}>⛽</span>
+                    }
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <button
+                      type="button"
+                      onClick={() => iconInputRef.current?.click()}
+                      style={{
+                        width: '100%', padding: '9px 14px',
+                        background: `${C.yellow}10`, border: `1px solid ${C.yellow}55`,
+                        color: C.yellow, fontFamily: 'Orbitron, sans-serif', fontSize: '9px',
+                        letterSpacing: '0.1em', cursor: 'pointer', borderRadius: '3px',
+                        display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px',
+                      }}
+                    >
+                      📂 {iconFile ? iconFile.name.slice(0, 24) + (iconFile.name.length > 24 ? '…' : '') : 'اختر صورة PNG'}
+                    </button>
+                    {iconPreview && (
+                      <button
+                        type="button"
+                        onClick={() => { setIconFile(null); setIconPreview(''); if (iconInputRef.current) iconInputRef.current.value = ''; }}
+                        style={{
+                          marginTop: '6px', width: '100%', padding: '5px',
+                          background: 'none', border: `1px solid ${C.red}44`,
+                          color: C.red, fontFamily: 'Orbitron, sans-serif', fontSize: '8px',
+                          cursor: 'pointer', borderRadius: '3px',
+                        }}
+                      >
+                        🗑️ إزالة الأيقونة
+                      </button>
+                    )}
+                  </div>
+                </div>
+                {iconUploading && (
+                  <div style={{ marginTop: '8px', display: 'flex', alignItems: 'center', gap: '8px', color: C.yellow, fontFamily: 'Orbitron, sans-serif', fontSize: '9px' }}>
+                    <svg width="12" height="12" viewBox="0 0 28 28" fill="none" style={{ animation: 'spin 0.9s linear infinite' }}>
+                      <circle cx="14" cy="14" r="10" stroke={C.yellow} strokeWidth="2.5" strokeDasharray="22 14" strokeLinecap="round"/>
+                    </svg>
+                    جاري رفع الأيقونة إلى Firebase...
+                  </div>
+                )}
+              </div>
+
               {/* Firestore path hint */}
               <div style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '8px', color: `${C.yellow}55`, letterSpacing: '0.1em', padding: '8px 10px', background: `${C.yellow}06`, border: `1px solid ${C.yellow}15`, borderRadius: '2px' }}>
                 📂 Firestore: fuel_stations/{editing ? editing.id : '<auto-id>'}
@@ -2948,6 +3085,23 @@ function FuelStationsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '12px', padding: '60px', color: C.dim }}>
           <svg width="22" height="22" viewBox="0 0 28 28" fill="none" style={{ animation: 'spin 0.9s linear infinite' }}><circle cx="14" cy="14" r="10" stroke={C.yellow} strokeWidth="2.5" strokeDasharray="22 14" strokeLinecap="round"/></svg>
           <span style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '11px', color: C.yellow }}>جاري تحميل البيانات من Firestore...</span>
+        </div>
+      ) : fsError ? (
+        <div style={{
+          display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+          gap: '14px', padding: '60px 20px',
+          background: `${C.red}08`, border: `1px solid ${C.red}44`, borderRadius: '4px',
+        }}>
+          <div style={{ fontSize: '36px' }}>⚠️</div>
+          <div style={{ fontFamily: 'Rajdhani, sans-serif', fontSize: '16px', color: C.red, fontWeight: 700, textAlign: 'center', direction: 'rtl' }}>
+            {fsError}
+          </div>
+          <button
+            onClick={() => { setFsError(''); setLoading(true); }}
+            style={{ padding: '8px 20px', background: `${C.red}18`, border: `1px solid ${C.red}88`, color: C.red, fontFamily: 'Orbitron, sans-serif', fontSize: '9px', letterSpacing: '0.1em', cursor: 'pointer', borderRadius: '3px' }}
+          >
+            🔄 إعادة المحاولة
+          </button>
         </div>
       ) : stations.length === 0 ? (
         <div style={{ textAlign: 'center', padding: '60px', color: C.dim }}>
@@ -2980,9 +3134,13 @@ function FuelStationsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
                     {/* Address */}
                     <td style={{ padding: '10px 12px', color: C.dim, fontSize: '13px', minWidth: '130px' }}>{s.address || '—'}</td>
                     {/* Lat */}
-                    <td style={{ padding: '10px 12px', fontFamily: 'Orbitron, sans-serif', fontSize: '9px', color: C.blue, whiteSpace: 'nowrap' }}>{s.latitude.toFixed(4)}</td>
+                    <td style={{ padding: '10px 12px', fontFamily: 'Orbitron, sans-serif', fontSize: '9px', color: C.blue, whiteSpace: 'nowrap' }}>
+                      {typeof s.latitude === 'number' && !isNaN(s.latitude) ? s.latitude.toFixed(4) : '—'}
+                    </td>
                     {/* Lng */}
-                    <td style={{ padding: '10px 12px', fontFamily: 'Orbitron, sans-serif', fontSize: '9px', color: C.blue, whiteSpace: 'nowrap' }}>{s.longitude.toFixed(4)}</td>
+                    <td style={{ padding: '10px 12px', fontFamily: 'Orbitron, sans-serif', fontSize: '9px', color: C.blue, whiteSpace: 'nowrap' }}>
+                      {typeof s.longitude === 'number' && !isNaN(s.longitude) ? s.longitude.toFixed(4) : '—'}
+                    </td>
                     {/* Queue status */}
                     <td style={{ padding: '10px 12px', whiteSpace: 'nowrap' }}>
                       <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', padding: '4px 10px', background: `${qs.color}15`, border: `1px solid ${qs.color}55`, color: qs.color, borderRadius: '3px', fontSize: '12px', fontWeight: 600 }}>
