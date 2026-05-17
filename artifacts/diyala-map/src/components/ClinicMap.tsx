@@ -829,6 +829,20 @@ export function ClinicMap({
     }
   },[]);
 
+  // ── Last Firestore-synced location (for 100 m debounce) ─────────────────
+  const lastFsSyncRef = useRef<{lat:number;lng:number}|null>(null);
+
+  // Haversine distance in metres (inline, no import needed)
+  const haversineM = (a:{lat:number;lng:number}, b:{lat:number;lng:number}): number => {
+    const R = 6371000;
+    const toR = (d:number) => d * Math.PI / 180;
+    const dLat = toR(b.lat - a.lat);
+    const dLng = toR(b.lng - a.lng);
+    const x = Math.sin(dLat/2)**2 +
+              Math.cos(toR(a.lat)) * Math.cos(toR(b.lat)) * Math.sin(dLng/2)**2;
+    return R * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1-x));
+  };
+
   const locateUser = useCallback((afterLocate?:(loc:{lat:number;lng:number})=>void)=>{
     if (!navigator.geolocation){setLocateError('الجهاز لا يدعم تحديد الموقع');return;}
     // Stop any existing watch
@@ -845,6 +859,21 @@ export function ClinicMap({
         setIsTracking(true);
         const loc = {lat,lng};
         onUserLocationChange(loc); userLocationRef.current = loc;
+
+        // ── Firestore location sync (debounced: first fix + every 100 m) ────
+        const uid = auth.currentUser?.uid;
+        if (uid) {
+          const last = lastFsSyncRef.current;
+          const shouldSync = !last || haversineM(last, loc) >= 100;
+          if (shouldSync) {
+            lastFsSyncRef.current = loc;
+            setDoc(
+              doc(db, 'users', uid),
+              { latitude: lat, longitude: lng, last_seen: serverTimestamp() },
+              { merge: true },
+            ).catch(() => {/* silent */});
+          }
+        }
 
         // Prefer GPS heading when available (only non-null when moving)
         const h = (geoHeading !== null && !isNaN(geoHeading)) ? geoHeading : headingRef.current;
