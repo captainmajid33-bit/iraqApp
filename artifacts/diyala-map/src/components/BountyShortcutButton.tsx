@@ -596,63 +596,69 @@ export function BountyShortcutButton({ mapRef, isDay = false, onUnlock }: Props)
       `}</style>
 
       {/* ══════════════════════════════════════════════════════════════════════
-          ── Floating Action Button ─────────────────────────────────────────
+          ── Floating Action Button — centered above bottom bar ─────────────
+          Wrapper handles position so animation transform doesn't conflict
       ══════════════════════════════════════════════════════════════════════ */}
-      <button
-        onClick={handleFabClick}
-        aria-label="مهمة الكنز"
-        style={{
-          position:       'absolute',
-          bottom:         '100px',
-          left:           '16px',
-          zIndex:         1100,
-          width:          '56px',
-          height:         '56px',
-          borderRadius:   '50%',
-          background:     C.surface,
-          border:         `2px solid ${C.yellow}`,
-          color:          C.yellow,
-          cursor:         isLoading ? 'wait' : 'pointer',
-          display:        'flex',
-          flexDirection:  'column',
-          alignItems:     'center',
-          justifyContent: 'center',
-          gap:            '1px',
-          backdropFilter: 'blur(12px)',
-          animation:      pressed
-            ? 'bsb-press 0.2s ease'
-            : 'bsb-glow 2.5s ease-in-out infinite',
-          userSelect:     'none',
-          WebkitTapHighlightColor: 'transparent',
-        }}
-      >
-        {isLoading ? (
-          <svg width="22" height="22" viewBox="0 0 28 28" fill="none"
-            style={{ animation: 'bsb-spin 0.9s linear infinite' }}>
-            <circle cx="14" cy="14" r="10" stroke={C.yellow} strokeWidth="2.5"
-              strokeDasharray="22 14" strokeLinecap="round"/>
-          </svg>
-        ) : (
-          /* Compass + star SVG */
-          <svg width="26" height="26" viewBox="0 0 40 40" fill="none">
-            <circle cx="20" cy="20" r="17" stroke={C.yellow} strokeWidth="2"
-              fill={`${C.yellow}10`}/>
-            <polygon points="20,5 23,18 20,21 17,18" fill={C.yellow} opacity="0.9"/>
-            <polygon points="20,35 23,22 20,21 17,22" fill={`${C.yellow}50`}/>
-            <polygon points="5,20 18,17 21,20 18,23" fill={`${C.yellow}50`}/>
-            <polygon points="35,20 22,17 21,20 22,23" fill={C.yellow} opacity="0.9"/>
-            <circle cx="20" cy="20" r="3" fill={C.yellow}/>
-          </svg>
-        )}
-        <span style={{
-          fontFamily:    'Orbitron, sans-serif',
-          fontSize:      '7px',
-          letterSpacing: '0.05em',
-          lineHeight:    1,
-          color:         C.yellow,
-          opacity:       0.9,
-        }}>مهمة</span>
-      </button>
+      <div style={{
+        position:  'absolute',
+        bottom:    '90px',
+        left:      '50%',
+        transform: 'translateX(-50%)',
+        zIndex:    1100,
+        pointerEvents: 'none',
+      }}>
+        <button
+          onClick={handleFabClick}
+          aria-label="مهمة الكنز"
+          style={{
+            pointerEvents:  'auto',
+            width:          '56px',
+            height:         '56px',
+            borderRadius:   '50%',
+            background:     C.surface,
+            border:         `2px solid ${C.yellow}`,
+            color:          C.yellow,
+            cursor:         isLoading ? 'wait' : 'pointer',
+            display:        'flex',
+            flexDirection:  'column',
+            alignItems:     'center',
+            justifyContent: 'center',
+            gap:            '1px',
+            backdropFilter: 'blur(12px)',
+            animation:      pressed
+              ? 'bsb-press 0.2s ease'
+              : 'bsb-glow 2.5s ease-in-out infinite',
+            userSelect:     'none',
+            WebkitTapHighlightColor: 'transparent',
+          }}
+        >
+          {isLoading ? (
+            <svg width="22" height="22" viewBox="0 0 28 28" fill="none"
+              style={{ animation: 'bsb-spin 0.9s linear infinite' }}>
+              <circle cx="14" cy="14" r="10" stroke={C.yellow} strokeWidth="2.5"
+                strokeDasharray="22 14" strokeLinecap="round"/>
+            </svg>
+          ) : (
+            <svg width="26" height="26" viewBox="0 0 40 40" fill="none">
+              <circle cx="20" cy="20" r="17" stroke={C.yellow} strokeWidth="2"
+                fill={`${C.yellow}10`}/>
+              <polygon points="20,5 23,18 20,21 17,18" fill={C.yellow} opacity="0.9"/>
+              <polygon points="20,35 23,22 20,21 17,22" fill={`${C.yellow}50`}/>
+              <polygon points="5,20 18,17 21,20 18,23" fill={`${C.yellow}50`}/>
+              <polygon points="35,20 22,17 21,20 22,23" fill={C.yellow} opacity="0.9"/>
+              <circle cx="20" cy="20" r="3" fill={C.yellow}/>
+            </svg>
+          )}
+          <span style={{
+            fontFamily:    'Orbitron, sans-serif',
+            fontSize:      '7px',
+            letterSpacing: '0.05em',
+            lineHeight:    1,
+            color:         C.yellow,
+            opacity:       0.9,
+          }}>مهمة</span>
+        </button>
+      </div>
 
       {/* ══════════════════════════════════════════════════════════════════════
           ── No-Mission Snackbar ────────────────────────────────────────────
