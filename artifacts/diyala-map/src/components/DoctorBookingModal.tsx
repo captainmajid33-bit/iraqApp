@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import {
   collection, query, where, onSnapshot,
   addDoc, serverTimestamp, getDoc, doc,
+  getDocs, limit,
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { getUserFromStorage } from '@/components/UserLoginOverlay';
@@ -55,7 +56,7 @@ export function DoctorBookingModal({ doctorId, doctorName, onClose }: Props) {
   const [availableSlots, setAvailableSlots] = useState<SlotEntry[]>([]);
   const [slotsLoading,   setSlotsLoading]   = useState(true);
   const [selected,       setSelected]       = useState<string | null>(null);
-  const [phase,          setPhase]          = useState<'checking' | 'insufficient' | 'slots' | 'confirming' | 'success'>('checking');
+  const [phase,          setPhase]          = useState<'checking' | 'insufficient' | 'already_booked' | 'slots' | 'confirming' | 'success'>('checking');
   const [errMsg,         setErrMsg]         = useState('');
   const [userBalance,    setUserBalance]    = useState<number>(0);
 
@@ -64,27 +65,41 @@ export function DoctorBookingModal({ doctorId, doctorName, onClose }: Props) {
   const userId   = user?.uid  ?? 'anonymous';
   const userName = user?.name ?? 'زبون';
 
-  // ── Step 1: Check balance ─────────────────────────────────────────────────
+  // ── Step 1: Check balance → then check duplicate booking ────────────────
   useEffect(() => {
     let cancelled = false;
-    async function checkBalance() {
+    async function checkBalanceThenDuplicate() {
       if (!userId || userId === 'anonymous') {
         if (!cancelled) setPhase('insufficient');
         return;
       }
       try {
-        const snap = await getDoc(doc(db, 'users', userId));
-        const bal  = snap.exists() ? (Number(snap.data()?.balance) || 0) : 0;
+        // 1a. Balance check
+        const userSnap = await getDoc(doc(db, 'users', userId));
+        const bal = userSnap.exists() ? (Number(userSnap.data()?.balance) || 0) : 0;
         if (cancelled) return;
         setUserBalance(bal);
-        setPhase(bal >= MIN_BALANCE ? 'slots' : 'insufficient');
+        if (bal < MIN_BALANCE) { setPhase('insufficient'); return; }
+
+        // 1b. Duplicate booking check — same doctor, same day, same user
+        const dupQ = query(
+          collection(db, 'doctors', String(doctorId), 'appointments'),
+          where('date',   '==', today),
+          where('userId', '==', userId),
+          limit(1),
+        );
+        const dupSnap = await getDocs(dupQ);
+        if (cancelled) return;
+        if (!dupSnap.empty) { setPhase('already_booked'); return; }
+
+        setPhase('slots');
       } catch {
-        if (!cancelled) setPhase('slots');
+        if (!cancelled) setPhase('slots'); // fail-open
       }
     }
-    checkBalance();
+    checkBalanceThenDuplicate();
     return () => { cancelled = true; };
-  }, [userId]);
+  }, [userId, doctorId, today]);
 
   // ── Step 2: Fetch available_slots from merchants/{doctorId} ───────────────
   useEffect(() => {
@@ -149,9 +164,9 @@ export function DoctorBookingModal({ doctorId, doctorName, onClose }: Props) {
       <div style={{
         width: '100%', maxWidth: '400px',
         background: 'rgba(5,8,15,0.99)',
-        border: `2px solid ${phase === 'insufficient' ? '#ff2d78' : '#00f5d4'}`,
+        border: `2px solid ${phase === 'insufficient' || phase === 'already_booked' ? '#ff2d78' : '#00f5d4'}`,
         borderRadius: '8px',
-        boxShadow: phase === 'insufficient'
+        boxShadow: phase === 'insufficient' || phase === 'already_booked'
           ? '0 0 60px rgba(255,45,120,0.25), 0 0 120px rgba(255,45,120,0.08)'
           : '0 0 60px rgba(0,245,212,0.25), 0 0 120px rgba(0,245,212,0.08)',
         overflow: 'hidden',
@@ -162,20 +177,20 @@ export function DoctorBookingModal({ doctorId, doctorName, onClose }: Props) {
         <div style={{
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
           padding: '14px 18px',
-          borderBottom: `1px solid ${phase === 'insufficient' ? 'rgba(255,45,120,0.18)' : 'rgba(0,245,212,0.18)'}`,
-          background: phase === 'insufficient' ? 'rgba(255,45,120,0.05)' : 'rgba(0,245,212,0.05)',
+          borderBottom: `1px solid ${phase === 'insufficient' || phase === 'already_booked' ? 'rgba(255,45,120,0.18)' : 'rgba(0,245,212,0.18)'}`,
+          background: phase === 'insufficient' || phase === 'already_booked' ? 'rgba(255,45,120,0.05)' : 'rgba(0,245,212,0.05)',
         }}>
           <div>
             <div style={{
               fontFamily: 'Orbitron, sans-serif', fontSize: '9px',
-              color: phase === 'insufficient' ? 'rgba(255,45,120,0.55)' : 'rgba(0,245,212,0.55)',
+              color: phase === 'insufficient' || phase === 'already_booked' ? 'rgba(255,45,120,0.55)' : 'rgba(0,245,212,0.55)',
               letterSpacing: '0.16em', marginBottom: '3px',
             }}>
               🏥 APPOINTMENT BOOKING
             </div>
             <div style={{
               fontFamily: 'Rajdhani, sans-serif', fontSize: '16px', fontWeight: 700,
-              color: phase === 'insufficient' ? '#ff2d78' : '#00f5d4',
+              color: phase === 'insufficient' || phase === 'already_booked' ? '#ff2d78' : '#00f5d4',
             }}>
               {doctorName}
             </div>
@@ -189,9 +204,10 @@ export function DoctorBookingModal({ doctorId, doctorName, onClose }: Props) {
         </div>
 
         {/* ── Content ── */}
-        {phase === 'checking'     && <CheckingView />}
-        {phase === 'insufficient' && <InsufficientView balance={userBalance} onClose={onClose} />}
-        {phase === 'success'      && <SuccessView label={selectedLabel} onClose={onClose} />}
+        {phase === 'checking'      && <CheckingView />}
+        {phase === 'insufficient'  && <InsufficientView balance={userBalance} onClose={onClose} />}
+        {phase === 'already_booked'&& <AlreadyBookedView onClose={onClose} />}
+        {phase === 'success'       && <SuccessView label={selectedLabel} onClose={onClose} />}
 
         {(phase === 'slots' || phase === 'confirming') && (
           <div style={{ padding: '18px' }}>
@@ -404,6 +420,64 @@ function InsufficientView({ balance, onClose }: { balance: number; onClose: () =
         </span>
         <span style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '13px', fontWeight: 700, color: '#ff2d78' }}>
           {balance.toLocaleString()} د.ع
+        </span>
+      </div>
+
+      <div style={{ height: '1px', background: 'rgba(255,45,120,0.15)', marginBottom: '22px' }} />
+
+      <button onClick={onClose} style={{
+        width: '100%', padding: '13px',
+        fontFamily: 'Orbitron, sans-serif', fontSize: '10px', letterSpacing: '0.15em',
+        background: 'rgba(255,45,120,0.12)', border: '2px solid rgba(255,45,120,0.55)',
+        color: '#ff2d78', borderRadius: '5px', cursor: 'pointer',
+        boxShadow: '0 0 18px rgba(255,45,120,0.2)',
+        transition: 'background 0.2s',
+      }}
+        onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,45,120,0.2)')}
+        onMouseLeave={e => (e.currentTarget.style.background = 'rgba(255,45,120,0.12)')}
+      >
+        حسناً — إغلاق
+      </button>
+
+    </div>
+  );
+}
+
+// ── Already booked dialog ───────────────────────────────────────────────────
+function AlreadyBookedView({ onClose }: { onClose: () => void }) {
+  return (
+    <div style={{ padding: '32px 24px', textAlign: 'center', direction: 'rtl' }}>
+
+      <div style={{
+        width: '72px', height: '72px', borderRadius: '50%',
+        background: 'rgba(255,45,120,0.1)',
+        border: '2px solid rgba(255,45,120,0.5)',
+        boxShadow: '0 0 30px rgba(255,45,120,0.25)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        margin: '0 auto 20px',
+        fontSize: '32px',
+      }}>⚠️</div>
+
+      <div style={{
+        fontFamily: 'Orbitron, sans-serif', fontSize: '11px',
+        color: '#ff2d78', letterSpacing: '0.14em',
+        marginBottom: '14px',
+        textShadow: '0 0 12px rgba(255,45,120,0.5)',
+      }}>
+        حجز مسبق موجود
+      </div>
+
+      <div style={{
+        fontFamily: 'Rajdhani, sans-serif', fontSize: '16px', fontWeight: 600,
+        color: 'rgba(255,255,255,0.88)', lineHeight: 1.75,
+        marginBottom: '28px',
+      }}>
+        عذراً، لديك حجز مؤكد ومسبق لدى هذا الطبيب لليوم الحالي! ⚠️
+        <br/>
+        <span style={{ color: 'rgba(255,255,255,0.55)', fontSize: '14px', fontWeight: 400 }}>
+          لا يمكنك حجز أكثر من موعد في نفس اليوم
+          <br/>
+          لإتاحة الفرصة لباقي المراجعين.
         </span>
       </div>
 
