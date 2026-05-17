@@ -2587,12 +2587,16 @@ export function ClinicMap({
     }
   },[taxiManualStep, items]);
 
-  // Draw route
+  // Draw route — only when routeTarget changes (NOT on every userLocation update)
+  // Using userLocationRef avoids re-triggering flyToBounds on every GPS tick
   useEffect(()=>{
     clearRouteVisuals();
-    if (!routeTarget||!userLocation||!mapRef.current) return;
-    drawRoute(mapRef.current,userLocation,routeTarget,setRouteInfo,setRouteLoading,routeGlowRef,routeLineRef);
-  },[routeTarget,userLocation,clearRouteVisuals]);
+    if (!routeTarget||!mapRef.current) return;
+    const loc = userLocationRef.current;
+    if (!loc) return;
+    drawRoute(mapRef.current,loc,routeTarget,setRouteInfo,setRouteLoading,routeGlowRef,routeLineRef);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[routeTarget,clearRouteVisuals]);
 
   const handleCancelRoute = useCallback(() => {
     // 1. Clear clinic/doctor route
@@ -3096,16 +3100,15 @@ export function ClinicMap({
             width:'56px', height:'56px',
             borderRadius:'50%',
             background: isTracking
-              ? 'radial-gradient(circle at 38% 38%, rgba(0,245,212,0.22), rgba(0,245,212,0.06))'
-              : 'radial-gradient(circle at 38% 38%, rgba(0,212,255,0.14), rgba(13,17,23,0.98))',
+              ? 'rgba(0,28,22,0.97)'
+              : 'rgba(6,10,18,0.97)',
             border: isTracking ? '2px solid #00f5d4' : '2px solid #00d4ff',
             boxShadow: isTracking
-              ? '0 0 20px rgba(0,245,212,0.55), 0 0 40px rgba(0,245,212,0.2), inset 0 0 12px rgba(0,245,212,0.08)'
-              : '0 0 12px rgba(0,212,255,0.35), 0 0 24px rgba(0,212,255,0.1)',
+              ? '0 4px 18px rgba(0,0,0,0.7), 0 0 20px rgba(0,245,212,0.55), 0 0 40px rgba(0,245,212,0.2)'
+              : '0 4px 18px rgba(0,0,0,0.7), 0 0 14px rgba(0,212,255,0.45), 0 0 28px rgba(0,212,255,0.15)',
             cursor: locating ? 'wait' : 'pointer',
             display:'flex', alignItems:'center', justifyContent:'center',
             padding:0, transition:'all 0.35s cubic-bezier(0.4,0,0.2,1)',
-            backdropFilter:'blur(14px)',
             position:'relative',
             overflow:'hidden',
           }}
@@ -3161,10 +3164,13 @@ export function ClinicMap({
         )}
       </div>
 
-      {/* ── Traffic Toggle Button ── */}
+      {/* ── Traffic Toggle Button — hidden when destination sheet is open ── */}
       <div style={{
         position:'absolute',bottom:'90px',right:'16px',
         zIndex:1000,display:'flex',flexDirection:'column-reverse',alignItems:'center',gap:'4px',
+        opacity: selectedPlace ? 0 : 1,
+        pointerEvents: selectedPlace ? 'none' : 'auto',
+        transition: 'opacity 0.25s ease',
       }}>
         <button
           onClick={()=>setShowTraffic(v=>!v)}
@@ -4905,16 +4911,15 @@ export function ClinicMap({
 
       </div>
 
-      {/* ── Fazaa Rescue System ── */}
-      {/* buttonBottom shifts Fazaa up above the Traffic stack:
-          no legend → 172px (90 + 52btn + 4gap + 14label + 12margin)
-          legend active → 250px (+ 74px legend + 4gap) */}
-      <FazaaSystem
-        mapRef={mapRef}
-        userLocation={userLocation}
-        clearMapForRescue={clearMapForRescue}
-        buttonBottom={showTraffic ? 250 : 172}
-      />
+      {/* ── Fazaa Rescue System — hidden when destination sheet is open ── */}
+      {!selectedPlace && (
+        <FazaaSystem
+          mapRef={mapRef}
+          userLocation={userLocation}
+          clearMapForRescue={clearMapForRescue}
+          buttonBottom={showTraffic ? 250 : 172}
+        />
+      )}
 
       {/* ── Fuel Station Radar ── */}
       <FuelStationRadar
@@ -4945,12 +4950,14 @@ export function ClinicMap({
         markersVisible={isBountyUnlocked}
       />
 
-      {/* ── Bounty Shortcut FAB — زر المهمة العائم ── */}
-      <BountyShortcutButton
-        mapRef={mapRef}
-        isDay={theme.isDay}
-        onUnlock={() => setIsBountyUnlocked(true)}
-      />
+      {/* ── Bounty Shortcut FAB — hidden when destination sheet is open ── */}
+      {!selectedPlace && (
+        <BountyShortcutButton
+          mapRef={mapRef}
+          isDay={theme.isDay}
+          onUnlock={() => setIsBountyUnlocked(true)}
+        />
+      )}
 
       {/* ── Live Market Ticker ── */}
       <MarketTicker />
