@@ -918,7 +918,7 @@ export function ClinicMap({
       .leaflet-control-zoom a:hover{background:#00f5d422!important;}
       .leaflet-control-attribution{background:rgba(0,0,0,0.7)!important;color:#00f5d488!important;font-size:10px;}
       .leaflet-control-attribution a{color:#00f5d4!important;}
-      .map-popup .leaflet-popup-content-wrapper{background:rgba(5,8,15,0.97)!important;border-radius:2px!important;padding:0!important;min-width:220px;max-height:52vh!important;overflow-y:auto!important;}
+      .map-popup .leaflet-popup-content-wrapper{background:rgba(5,8,15,0.97)!important;border-radius:2px!important;padding:0!important;min-width:220px;max-height:75vh!important;overflow-y:auto!important;-webkit-overflow-scrolling:touch!important;}
       .map-popup .leaflet-popup-content{margin:0!important;width:auto!important;}
       .map-popup .leaflet-popup-tip-container{display:none;}
       .map-popup .leaflet-popup-close-button{color:rgba(255,255,255,0.7)!important;font-size:22px!important;top:4px!important;right:6px!important;width:28px!important;height:28px!important;display:flex!important;align-items:center!important;justify-content:center!important;background:rgba(255,45,120,0.12)!important;border-radius:3px!important;transition:all 0.15s!important;}
@@ -1173,8 +1173,23 @@ export function ClinicMap({
     const statusLabel = isOpen ? 'مفتوح الآن' : 'مغلق حالياً';
     const statusIcon  = isOpen ? '✓' : '✕';
 
+    // ── Multi-signal doctor/clinic detection ─────────────────────────────────
+    // Matches any slug variant: clinic, doctor, doctors, physician, طبيب, عيادة…
+    const kindLower   = item.kind.toLowerCase();
+    const labelEnLow  = (cat?.labelEn ?? '').toLowerCase();
+    const labelArLow  = (cat?.labelAr ?? '').toLowerCase();
+    const isDoctor =
+      kindLower === 'clinic'    || kindLower === 'doctor'   ||
+      kindLower === 'doctors'   || kindLower === 'physician'||
+      kindLower === 'طبيب'      || kindLower === 'عيادة'    ||
+      labelEnLow.includes('doctor')  || labelEnLow.includes('clinic') ||
+      labelEnLow.includes('health')  || labelEnLow.includes('physician') ||
+      labelArLow.includes('طبيب')    || labelArLow.includes('عيادة')    ||
+      labelArLow.includes('صحة')     ||
+      !!(item as any).doctor         || !!(item as any).specialty;
+
     const sub = (item as any).details
-      || (item.kind==='clinic'
+      || (isDoctor
           ? [(item as any).doctor,(item as any).specialty].filter(Boolean).join(' — ')
           : item.kind==='restaurant'
           ? [(item as any).cuisine,(item as any).type].filter(Boolean).join(' · ')
@@ -1210,7 +1225,7 @@ export function ClinicMap({
     // Order: الذهاب إليه → حجز موعد → عرض التفاصيل
     el.appendChild(navBtn);
 
-    if (item.kind === 'clinic') {
+    if (isDoctor) {
       const bookSep = document.createElement('div');
       bookSep.style.cssText = 'height:1px;background:rgba(0,245,212,0.15);margin:8px 0 6px;';
       el.appendChild(bookSep);
