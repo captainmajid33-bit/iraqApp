@@ -343,9 +343,10 @@ export function ClinicMap({
     blockTaxiTimerRef.current = setTimeout(()=> setBlockTaxiMsg(false), 4000);
   },[]);
 
-  // Bridge: Leaflet popup button → open doctor booking modal
+  // Bridge: Leaflet popup button → open doctor booking modal / closed alert
   useEffect(()=>{
-    setBookingTargetRef.current = (item: MapItem) => setBookingTargetItem(item);
+    setBookingTargetRef.current  = (item: MapItem) => setBookingTargetItem(item);
+    showDoctorClosedRef.current  = () => setDoctorClosedAlert(true);
   },[]);
 
   // Bridge: Leaflet popup button → open taxi routing flow
@@ -687,6 +688,9 @@ export function ClinicMap({
   // ── Doctor booking bridge ────────────────────────────────────────────────
   const [bookingTargetItem,  setBookingTargetItem]  = useState<MapItem|null>(null);
   const setBookingTargetRef = useRef<((item:MapItem)=>void)|null>(null);
+  // ── Doctor-closed alert dialog ───────────────────────────────────────────
+  const [doctorClosedAlert,  setDoctorClosedAlert]  = useState(false);
+  const showDoctorClosedRef = useRef<(()=>void)|null>(null);
 
   // Bridge refs — stable handles for Leaflet DOM callbacks & map click
   const setTaxiItemRef    = useRef<((item:MapItem)=>void)|null>(null);
@@ -1219,13 +1223,15 @@ export function ClinicMap({
     const stars = typeof (item as any).rating === 'number' && (item as any).rating > 0
       ? `<div style="color:#f5c518;font-size:13px;margin-bottom:4px;letter-spacing:1px">${'★'.repeat((item as any).rating)}${'☆'.repeat(5-(item as any).rating)}</div>` : '';
 
+    const statusBadgeId = `doc-status-${item.id}`;
+
     const el=document.createElement('div');
     el.style.cssText='padding:14px 16px 12px;direction:rtl;min-width:215px;';
     el.innerHTML=`
       <div style="font-family:Orbitron,sans-serif;font-size:9px;color:${color}88;letter-spacing:0.12em;margin-bottom:5px;">${emoji} ${labelEn} · ID:${item.id.toString().padStart(4,'0')}</div>
       <div style="font-family:Rajdhani,sans-serif;font-size:17px;font-weight:700;color:#e8f8f5;line-height:1.2;margin-bottom:7px;">${item.name}</div>
       ${stars}
-      <div style="display:inline-flex;align-items:center;gap:7px;padding:5px 11px;border-radius:3px;border:1px solid ${color}55;background:${color}12;margin-bottom:6px;">
+      <div id="${statusBadgeId}" style="display:inline-flex;align-items:center;gap:7px;padding:5px 11px;border-radius:3px;border:1px solid ${color}55;background:${color}12;margin-bottom:6px;">
         <div style="width:8px;height:8px;border-radius:50%;background:${color};box-shadow:0 0 8px ${color};flex-shrink:0;${isOpen?'animation:lf-ping 2s cubic-bezier(0,0,0.2,1) infinite':''}"></div>
         <span style="font-family:Rajdhani,sans-serif;font-size:14px;font-weight:700;color:${color};letter-spacing:0.04em;">${statusIcon} ${statusLabel}</span>
       </div>
@@ -1262,10 +1268,24 @@ export function ClinicMap({
       </svg>جاري التحقق...`;
       el.appendChild(bookBtn);
 
-      // Async availability + balance guard
-      getDoc(doc(db, 'doctors', String(item.id)))
+      // Async availability check — reads from merchants/{id}
+      getDoc(doc(db, 'merchants', String(item.id)))
         .then(snap => {
           const available = snap.exists() ? (snap.data()?.isAvailable !== false) : true;
+
+          // ── Update status badge in popup DOM ──────────────────────────────
+          if (!available) {
+            const badge = document.getElementById(statusBadgeId);
+            if (badge) {
+              badge.style.border     = '1px solid rgba(255,45,120,0.5)';
+              badge.style.background = 'rgba(255,45,120,0.10)';
+              badge.innerHTML = `
+                <div style="width:8px;height:8px;border-radius:50%;background:#ff2d78;box-shadow:0 0 8px #ff2d78;flex-shrink:0;"></div>
+                <span style="font-family:Rajdhani,sans-serif;font-size:14px;font-weight:700;color:#ff2d78;letter-spacing:0.04em;">العيادة مغلقة حالياً 🔴</span>
+              `;
+            }
+          }
+
           if (available) {
             bookBtn.disabled = false;
             bookBtn.innerHTML = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" style="flex-shrink:0">
@@ -1282,15 +1302,19 @@ export function ClinicMap({
               mapRef.current?.closePopup();
             });
           } else {
-            bookBtn.disabled = true;
-            bookBtn.setAttribute('data-unavailable', '1');
+            // Clinic closed — button clickable but triggers alert dialog
+            bookBtn.disabled = false;
             bookBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" style="flex-shrink:0">
               <circle cx="12" cy="12" r="9" stroke="#ff2d78" stroke-width="1.8"/>
               <path d="M15 9l-6 6M9 9l6 6" stroke="#ff2d78" stroke-width="1.8" stroke-linecap="round"/>
-            </svg>الطبيب غير متوفر للحجز`;
+            </svg>العيادة مغلقة — حجز موعد`;
             bookBtn.style.background = 'rgba(255,45,120,0.07)';
-            bookBtn.style.border     = '1px solid rgba(255,45,120,0.3)';
-            bookBtn.style.color      = 'rgba(255,45,120,0.65)';
+            bookBtn.style.border     = '1px solid rgba(255,45,120,0.45)';
+            bookBtn.style.color      = '#ff2d78';
+            bookBtn.style.cursor     = 'pointer';
+            bookBtn.addEventListener('click', () => {
+              showDoctorClosedRef.current?.();
+            });
           }
         })
         .catch(() => {
@@ -5292,6 +5316,74 @@ export function ClinicMap({
           doctorLng={bookingTargetItem.lng}
           onClose={() => setBookingTargetItem(null)}
         />
+      )}
+
+      {/* ── Doctor-Closed Alert Dialog ── */}
+      {doctorClosedAlert && (
+        <div
+          onClick={() => setDoctorClosedAlert(false)}
+          style={{
+            position: 'fixed', inset: 0, zIndex: 9500,
+            background: 'rgba(5,8,15,0.88)', backdropFilter: 'blur(8px)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            padding: '20px',
+          }}
+        >
+          <div
+            onClick={e => e.stopPropagation()}
+            style={{
+              background: '#0d1117',
+              border: '2px solid #ff2d78',
+              borderRadius: '10px',
+              padding: '32px 28px 24px',
+              maxWidth: '360px', width: '100%',
+              boxShadow: '0 0 60px rgba(255,45,120,0.25)',
+              direction: 'rtl', textAlign: 'center',
+            }}
+          >
+            {/* Icon */}
+            <div style={{ fontSize: '48px', lineHeight: 1, marginBottom: '16px' }}>⚠️</div>
+
+            {/* Title */}
+            <div style={{
+              fontFamily: 'Orbitron, sans-serif', fontSize: '11px',
+              color: '#ff2d78', letterSpacing: '0.14em', marginBottom: '10px',
+            }}>CLINIC UNAVAILABLE</div>
+
+            {/* Message */}
+            <div style={{
+              fontFamily: 'Rajdhani, sans-serif', fontSize: '16px',
+              fontWeight: 600, color: 'rgba(255,255,255,0.88)',
+              lineHeight: 1.6, marginBottom: '24px',
+            }}>
+              الطبيب غير متوفر، العيادة مغلقة حالياً!
+              <br/>
+              <span style={{ fontSize: '13px', color: 'rgba(255,255,255,0.5)', fontWeight: 400 }}>
+                يرجى المحاولة لاحقاً عندما يقوم الطبيب بفتح العيادة.
+              </span>
+            </div>
+
+            {/* Close button */}
+            <button
+              onClick={() => setDoctorClosedAlert(false)}
+              style={{
+                width: '100%', padding: '12px',
+                background: 'rgba(255,45,120,0.12)',
+                border: '1.5px solid rgba(255,45,120,0.5)',
+                color: '#ff2d78',
+                fontFamily: 'Orbitron, sans-serif', fontSize: '10px',
+                letterSpacing: '0.1em', cursor: 'pointer',
+                borderRadius: '5px',
+                boxShadow: '0 0 12px rgba(255,45,120,0.18)',
+                transition: 'all 0.2s',
+              }}
+              onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,45,120,0.24)')}
+              onMouseLeave={e => (e.currentTarget.style.background = 'rgba(255,45,120,0.12)')}
+            >
+              حسناً، فهمت ✓
+            </button>
+          </div>
+        </div>
       )}
 
     </div>
