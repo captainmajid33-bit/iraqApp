@@ -5,6 +5,7 @@ import "leaflet/dist/leaflet.css";
 import {
   collection, onSnapshot, addDoc, updateDoc, deleteDoc,
   doc, serverTimestamp, writeBatch, Timestamp, query, orderBy, setDoc,
+  where, getDocs,
 } from "firebase/firestore";
 import { db, storage } from "@/lib/firebase";
 import { ref as storageRef, uploadBytes, getDownloadURL } from "firebase/storage";
@@ -3539,19 +3540,27 @@ function DoctorsBookingsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
   const [search, setSearch] = useState("");
 
   useEffect(() => {
-    api.get("/api/locations").then((d: unknown) => {
-      const locs: Loc[] = Array.isArray(d) ? d : [];
-      const doctorLocs = locs.filter((l) => {
-        const cat = (l.category ?? "").toLowerCase();
-        const name = (l.name ?? "").toLowerCase();
-        const details = (l.details ?? "").toLowerCase();
-        return (
-          cat === "clinic" || cat === "doctor" || cat === "doctors" ||
-          cat === "طبيب" || cat === "عيادة" ||
-          name.includes("د.") || name.includes("دكتور") || name.includes("طبيب") ||
-          details.includes("طبيب") || details.includes("دكتور") ||
-          details.includes("doctor") || details.includes("specialist")
-        );
+    // ── Query Firestore merchants collection for category == 'doctor' ────────
+    getDocs(
+      query(
+        collection(db, "merchants"),
+        where("category", "==", "doctor"),
+      )
+    ).then((snap) => {
+      const doctorLocs: Loc[] = snap.docs.map((d) => {
+        const data = d.data();
+        return {
+          id:       parseInt(d.id, 10) || 0,
+          name:     String(data.name     ?? "—"),
+          category: String(data.category ?? "doctor"),
+          details:  String(data.details  ?? ""),
+          address:  String(data.address  ?? ""),
+          phone:    String(data.phone    ?? ""),
+          hours:    String(data.hours    ?? ""),
+          status:   String(data.status   ?? "مفتوح"),
+          lat:      Number(data.lat      ?? 0),
+          lng:      Number(data.lng      ?? 0),
+        };
       });
       setDoctors(doctorLocs);
       setLoading(false);
