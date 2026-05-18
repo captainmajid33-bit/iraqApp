@@ -175,8 +175,15 @@ export function DoctorBookingModal({ doctorId, doctorName, doctorLat, doctorLng,
       // Top-level ref (merchant app reads from here via merchantId filter)
       const topLevelRef = doc(db, 'appointments', newApptRef.id);
 
-      // Resolved merchantId: Firebase UID from merchant doc, fallback to numeric id string
-      const resolvedMerchantId = merchantUid || String(doctorId);
+      // Resolved merchantId: use cached state if available, otherwise fetch fresh from Firestore
+      // (fresh fetch guards against stale closure or race-condition where state wasn't set yet)
+      let resolvedMerchantId = merchantUid;
+      if (!resolvedMerchantId) {
+        const mSnap = await getDoc(doc(db, 'merchants', String(doctorId)));
+        if (mSnap.exists()) resolvedMerchantId = String(mSnap.data()?.uid ?? '');
+      }
+      // absolute last resort — should never reach this if merchant doc has uid field
+      if (!resolvedMerchantId) resolvedMerchantId = String(doctorId);
 
       // Canonical booking payload — fields exactly matching merchant app expectations
       const bookingPayload = {
@@ -229,7 +236,7 @@ export function DoctorBookingModal({ doctorId, doctorName, doctorLat, doctorLng,
       }
       setPhase('slots');
     }
-  }, [selected, doctorId, userId, userName, today, doctorLat, doctorLng]);
+  }, [selected, doctorId, userId, userName, today, doctorLat, doctorLng, merchantUid]);
 
   const selectedLabel = availableSlots.find(s => s.key === selected)?.label ?? selected ?? '';
 
