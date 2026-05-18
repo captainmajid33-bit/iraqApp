@@ -92,7 +92,7 @@ function Btn({ label, color, onClick, full }: { label: string; color: string; on
 }
 
 // ── Location Form ─────────────────────────────────────────────────────────────
-const BLANK = { name: "", category: "clinic", details: "", address: "بعقوبة - ", phone: "077", password: "", hours: "9:00 ص - 5:00 م", status: "مفتوح", lat: "33.7451", lng: "44.6488", rating: "" };
+const BLANK = { name: "", category: "clinic", details: "", address: "بعقوبة - ", phone: "077", password: "", firebaseUid: "", hours: "9:00 ص - 5:00 م", status: "مفتوح", lat: "33.7451", lng: "44.6488", rating: "" };
 type FormState = typeof BLANK;
 
 function LocForm({ init, cats, onSave, onCancel }: { init?: Partial<FormState & { id: number; icon_url?: string | null }>; cats: Cat[]; onSave: (d: any) => Promise<void>; onCancel: () => void }) {
@@ -177,6 +177,28 @@ function LocForm({ init, cats, onSave, onCancel }: { init?: Partial<FormState & 
           onBlur={fb}
           autoComplete="off"
         />
+      </div>
+      <div style={{ marginBottom: "10px" }}>
+        <label style={LBL}>
+          Firebase UID الخاص بالطبيب/التاجر 🔥
+          <span style={{ color: C.yellow, marginRight: "6px", fontSize: "10px" }}>
+            — مطلوب لربط حجوزات الزبائن بتطبيق التاجر
+          </span>
+        </label>
+        <input
+          style={{ ...FLD, fontFamily: "monospace", fontSize: "12px", letterSpacing: "0.04em" }}
+          type="text"
+          value={f.firebaseUid}
+          onChange={s("firebaseUid")}
+          placeholder="مثال: aBcDeFgH1234567890XYZ"
+          onFocus={ff}
+          onBlur={fb}
+          autoComplete="off"
+          dir="ltr"
+        />
+        <div style={{ fontFamily: "Rajdhani, sans-serif", fontSize: "10px", color: C.dim, marginTop: "4px" }}>
+          الـ UID يظهر في Firebase Console → Authentication → Users، أو يرسله لك التاجر من تطبيقه.
+        </div>
       </div>
       <div style={{ ...g2, marginBottom: "10px" }}>{row("ساعات العمل", "hours")}
         <div><label style={LBL}>الحالة</label>
@@ -285,7 +307,7 @@ function MerchantsTab({ cats, toast }: { cats: Cat[]; toast: ReturnType<typeof u
   // ── Write merchant login doc to Firestore after PostgreSQL save ─────────
   const syncMerchantDoc = async (
     id: number,
-    d: { phone?: string; password?: string; category?: string; name?: string },
+    d: { phone?: string; password?: string; category?: string; name?: string; firebaseUid?: string },
     overwritePassword: boolean,
   ) => {
     const payload: Record<string, string> = {
@@ -296,6 +318,9 @@ function MerchantsTab({ cats, toast }: { cats: Cat[]; toast: ReturnType<typeof u
     if (overwritePassword || (d.password ?? '').trim()) {
       payload.password = String(d.password ?? '').trim();
     }
+    // Save doctor/merchant Firebase UID — used as merchantId in appointment docs
+    const fbUid = String(d.firebaseUid ?? '').trim();
+    if (fbUid) payload.uid = fbUid;
     await setDoc(doc(db, 'merchants', String(id)), payload, { merge: true });
   };
 
