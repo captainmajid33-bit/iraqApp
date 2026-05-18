@@ -8,7 +8,8 @@ import {
   where, getDocs, getDoc,
 } from "firebase/firestore";
 import {
-  signInWithEmailAndPassword, onAuthStateChanged, signOut,
+  RecaptchaVerifier, signInWithPhoneNumber, onAuthStateChanged, signOut,
+  type ConfirmationResult,
 } from "firebase/auth";
 import { auth, db, storage } from "@/lib/firebase";
 import { ref as storageRef, uploadBytes, getDownloadURL } from "firebase/storage";
@@ -5347,167 +5348,285 @@ export function AdminDashboard() {
   );
 }
 
-// ── Admin Login — Firebase Email/Password + Firestore role:admin guard ─────────
+// ── helpers ────────────────────────────────────────────────────────────────────
+function toAdminE164(raw: string): string {
+  const digits = raw.replace(/\D/g, "");
+  if (digits.startsWith("964"))  return "+" + digits;
+  if (digits.startsWith("0"))    return "+964" + digits.slice(1);
+  if (digits.startsWith("7"))    return "+964" + digits;
+  return "+" + digits;
+}
+
+// ── Admin Login — Phone Auth + Firestore role:admin guard ──────────────────────
 export function AdminLogin() {
   const [, navigate] = useLocation();
-  const [email,  setEmail]  = useState("");
-  const [pw,     setPw]     = useState("");
-  const [err,    setErr]    = useState("");
-  const [busy,   setBusy]   = useState(false);
-  const [shake,  setShake]  = useState(false);
 
-  // If already signed-in with admin role, skip to dashboard
+  // step: "phone" → send OTP  |  "otp" → verify  |  "role" → checking role
+  const [step,      setStep]      = useState<"phone" | "otp" | "role">("phone");
+  const [phone,     setPhone]     = useState("");
+  const [otp,       setOtp]       = useState("");
+  const [err,       setErr]       = useState("");
+  const [busy,      setBusy]      = useState(false);
+  const [shake,     setShake]     = useState(false);
+  const [sentTo,    setSentTo]    = useState("");
+  const [countdown, setCountdown] = useState(0);
+
+  const confirmRef  = useRef<ConfirmationResult | null>(null);
+  const captchaRef  = useRef<RecaptchaVerifier | null>(null);
+
+  // ── reCAPTCHA helpers ────────────────────────────────────────────────────
+  const clearCaptcha = () => {
+    try { captchaRef.current?.clear(); } catch {}
+    captchaRef.current = null;
+    const el = document.getElementById("adm-rcv");
+    if (el) el.innerHTML = "";
+  };
+
+  const initCaptcha = async () => {
+    if (captchaRef.current) return;
+    try {
+      const v = new RecaptchaVerifier(auth, "adm-rcv", {
+        size: "invisible",
+        callback: () => {},
+        "expired-callback": () => clearCaptcha(),
+      });
+      await v.render();
+      captchaRef.current = v;
+    } catch { /* will retry on send */ }
+  };
+
+  // ── If already authenticated with admin role, skip to dashboard ──────────
   useEffect(() => {
+    initCaptcha();
     const unsub = onAuthStateChanged(auth, async (fbUser) => {
       if (!fbUser) return;
       try {
         const snap = await getDoc(doc(db, "users", fbUser.uid));
-        if (snap.exists() && snap.data()?.role === "admin") {
-          navigate("/admin/dashboard");
-        }
-      } catch { /* not admin — stay on login */ }
+        if (snap.exists() && snap.data()?.role === "admin") navigate("/admin/dashboard");
+      } catch { /* stay on login */ }
     });
-    return () => unsub();
+    return () => { unsub(); clearCaptcha(); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // ── Countdown ─────────────────────────────────────────────────────────────
+  useEffect(() => {
+    if (countdown <= 0) return;
+    const t = setTimeout(() => setCountdown(c => c - 1), 1000);
+    return () => clearTimeout(t);
+  }, [countdown]);
 
   const triggerShake = () => { setShake(true); setTimeout(() => setShake(false), 600); };
 
-  const handleLogin = async () => {
-    const emailTrim = email.trim();
-    if (!emailTrim || !pw || busy) return;
-    setBusy(true);
-    setErr("");
+  // ── Step 1 — Send OTP ─────────────────────────────────────────────────────
+  const sendOtp = async () => {
+    const e164 = toAdminE164(phone.trim());
+    if (!/^\+964\d{10}$/.test(e164)) {
+      setErr("رقم غير صحيح — مثال: 07742533658"); triggerShake(); return;
+    }
+    setBusy(true); setErr("");
     try {
-      // Step 1 — Firebase Auth
-      const cred = await signInWithEmailAndPassword(auth, emailTrim, pw);
+      if (!captchaRef.current) await initCaptcha();
+      const result = await signInWithPhoneNumber(auth, e164, captchaRef.current!);
+      confirmRef.current = result;
+      setSentTo(e164);
+      setStep("otp");
+      setCountdown(60);
+    } catch (e: unknown) {
+      clearCaptcha(); setTimeout(() => initCaptcha(), 300);
+      const code = (e as { code?: string })?.code ?? "";
+      if (code === "auth/too-many-requests")    setErr("طلبات كثيرة جداً، انتظر قليلاً");
+      else if (code === "auth/invalid-phone-number") setErr("رقم الهاتف غير صالح");
+      else if (code === "auth/captcha-check-failed") setErr("فشل التحقق — أعد تحميل الصفحة");
+      else setErr(`خطأ: ${code || "unknown"}`);
+      triggerShake();
+    } finally { setBusy(false); }
+  };
+
+  // ── Step 2 — Verify OTP + role check ──────────────────────────────────────
+  const verifyOtp = async () => {
+    if (otp.length < 6)       { setErr("الرمز يجب أن يكون 6 أرقام"); triggerShake(); return; }
+    if (!confirmRef.current)  { setErr("انتهت الجلسة، أعد إرسال الرمز"); return; }
+    setBusy(true); setErr(""); setStep("role");
+    try {
+      const cred = await confirmRef.current.confirm(otp);
       const uid  = cred.user.uid;
 
-      // Step 2 — Firestore role check
+      // Firestore role check
       const snap = await getDoc(doc(db, "users", uid));
       const role = snap.exists() ? snap.data()?.role : undefined;
 
       if (role !== "admin") {
-        // Not admin → sign out immediately and block access
         await signOut(auth);
+        setStep("otp");
         setErr("عذراً، هذا الحساب لا يملك صلاحيات الأدمن!");
         triggerShake();
         return;
       }
-
-      // Step 3 — Approved ✅
       navigate("/admin/dashboard");
-
     } catch (e: unknown) {
       const code = (e as { code?: string })?.code ?? "";
-      if (code === "auth/user-not-found" || code === "auth/wrong-password" ||
-          code === "auth/invalid-credential" || code === "auth/invalid-email") {
-        setErr("البريد الإلكتروني أو كلمة المرور غير صحيحة");
-      } else if (code === "auth/too-many-requests") {
-        setErr("تم تجاوز عدد المحاولات. يرجى المحاولة لاحقاً");
-      } else {
-        setErr("تعذر الاتصال، يرجى المحاولة مجدداً");
-      }
+      setStep("otp");
+      if (code === "auth/invalid-verification-code") setErr("الرمز غير صحيح، تحقق من الأرقام");
+      else if (code === "auth/code-expired")         setErr("انتهت صلاحية الرمز، أعد الإرسال");
+      else setErr(`خطأ: ${code || "unknown"}`);
       triggerShake();
-    } finally {
-      setBusy(false);
-    }
+    } finally { setBusy(false); }
   };
 
+  // ── Resend ────────────────────────────────────────────────────────────────
+  const resend = async () => {
+    if (countdown > 0) return;
+    clearCaptcha(); setOtp(""); setErr("");
+    await initCaptcha();
+    await sendOtp();
+  };
+
+  // ── Styles ────────────────────────────────────────────────────────────────
   const hasErr = !!err;
   const INP: React.CSSProperties = {
-    width: "100%", padding: "10px 13px",
-    background: "rgba(255,255,255,0.04)",
-    border: `1px solid ${hasErr ? "rgba(255,80,80,0.45)" : "rgba(255,255,255,0.09)"}`,
-    color: "#e2e8f0", fontSize: "15px", outline: "none",
-    borderRadius: "5px", fontFamily: "Rajdhani, sans-serif",
-    transition: "border-color 0.2s", direction: "ltr",
+    width: "100%", padding: "11px 14px",
+    background: "rgba(123,47,247,0.06)",
+    border: `1px solid ${hasErr ? "rgba(255,45,120,0.5)" : "rgba(123,47,247,0.35)"}`,
+    color: "#e2e8f0", fontSize: "16px", outline: "none",
+    borderRadius: "4px", fontFamily: "Rajdhani, sans-serif",
+    transition: "border-color 0.2s", direction: "ltr", letterSpacing: "0.04em",
+  };
+  const BTN: React.CSSProperties = {
+    width: "100%", padding: "13px",
+    background: "rgba(123,47,247,0.18)", border: "1px solid rgba(123,47,247,0.6)",
+    color: "#c4a8ff", fontFamily: "Orbitron, sans-serif", fontSize: "10px",
+    letterSpacing: "0.12em", cursor: "pointer", borderRadius: "4px",
+    boxShadow: "0 0 20px rgba(123,47,247,0.2)", transition: "all 0.18s",
+    textShadow: "0 0 8px rgba(123,47,247,0.5)",
+  };
+  const BTN_DIS: React.CSSProperties = {
+    ...BTN, background: "rgba(123,47,247,0.05)",
+    border: "1px solid rgba(123,47,247,0.2)",
+    color: "rgba(123,47,247,0.35)", cursor: "wait", boxShadow: "none", textShadow: "none",
   };
 
+  const isRole = step === "role";
+
   return (
-    <div style={{ minHeight: "100vh", background: "#080a0f", display: "flex", alignItems: "center", justifyContent: "center" }}>
+    <div style={{ minHeight: "100vh", background: "#05080f", display: "flex", alignItems: "center", justifyContent: "center" }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Rajdhani:wght@400;600;700&display=swap');
-        @keyframes adm-shake{0%,100%{transform:translateX(0)}20%,60%{transform:translateX(-7px)}40%,80%{transform:translateX(7px)}}
+        @keyframes adm-shake{0%,100%{transform:translateX(0)}20%,60%{transform:translateX(-8px)}40%,80%{transform:translateX(8px)}}
+        @keyframes adm-spin{to{transform:rotate(360deg)}}
         *{box-sizing:border-box}
       `}</style>
 
-      <div style={{ width: "100%", maxWidth: "360px", padding: "20px", animation: shake ? "adm-shake 0.5s" : "none" }}>
-        <div style={{ background: "#0d1117", border: `1px solid ${hasErr ? "rgba(255,45,120,0.35)" : "rgba(255,255,255,0.07)"}`, borderRadius: "8px", padding: "36px 28px", transition: "border-color 0.3s" }}>
+      {/* invisible reCAPTCHA anchor — always in DOM */}
+      <div id="adm-rcv" style={{ position: "fixed", bottom: "-9999px", left: "-9999px", width: 0, height: 0, overflow: "hidden", pointerEvents: "none" }} />
 
-          {/* Logo / Title */}
-          <div style={{ textAlign: "center", marginBottom: "30px" }}>
-            <div style={{ fontSize: "10px", fontFamily: "Orbitron, sans-serif", color: "#7b2ff788", letterSpacing: "0.22em", marginBottom: "10px" }}>
+      <div style={{ width: "100%", maxWidth: "370px", padding: "20px", animation: shake ? "adm-shake 0.5s" : "none" }}>
+        <div style={{
+          background: "#0d1117",
+          border: `1px solid ${hasErr ? "rgba(255,45,120,0.4)" : "rgba(123,47,247,0.45)"}`,
+          borderRadius: "6px", padding: "36px 28px",
+          boxShadow: `0 0 60px rgba(123,47,247,0.15)`,
+          transition: "border-color 0.3s",
+        }}>
+
+          {/* Header */}
+          <div style={{ textAlign: "center", marginBottom: "32px" }}>
+            <div style={{ fontSize: "9px", fontFamily: "Orbitron, sans-serif", color: "rgba(123,47,247,0.6)", letterSpacing: "0.25em", marginBottom: "12px" }}>
               DIYALA · ADMIN PANEL
             </div>
-            <span style={{ fontSize: "28px", display: "block", marginBottom: "10px" }}>🗺️</span>
-            <div style={{ color: "rgba(226,232,240,0.5)", fontFamily: "Rajdhani, sans-serif", fontSize: "14px" }}>
-              تسجيل الدخول
+            <div style={{ fontSize: "26px", marginBottom: "10px" }}>🗺️</div>
+            <div style={{ color: "rgba(226,232,240,0.45)", fontFamily: "Rajdhani, sans-serif", fontSize: "14px" }}>
+              {step === "phone" ? "تسجيل الدخول برقم الهاتف" : step === "role" ? "جارٍ التحقق من الصلاحيات..." : `تم إرسال رمز SMS إلى ${sentTo}`}
             </div>
           </div>
 
-          {/* Email */}
-          <div style={{ marginBottom: "12px" }}>
-            <label style={{ display: "block", fontFamily: "Rajdhani, sans-serif", fontSize: "11px", color: "rgba(226,232,240,0.3)", marginBottom: "6px", letterSpacing: "0.06em" }}>
-              البريد الإلكتروني
-            </label>
-            <input
-              type="email" value={email} autoFocus
-              onChange={e => { setEmail(e.target.value); setErr(""); }}
-              onKeyDown={e => e.key === "Enter" && handleLogin()}
-              placeholder="admin@example.com"
-              style={INP}
-              onFocus={e => { if (!hasErr) e.target.style.borderColor = "rgba(123,47,247,0.5)"; }}
-              onBlur={e => { if (!hasErr) e.target.style.borderColor = "rgba(255,255,255,0.09)"; }}
-            />
-          </div>
+          {/* ── STEP: PHONE ── */}
+          {step === "phone" && (
+            <>
+              <div style={{ marginBottom: "18px" }}>
+                <label style={{ display: "block", fontFamily: "Orbitron, sans-serif", fontSize: "8px", color: "rgba(123,47,247,0.7)", letterSpacing: "0.18em", marginBottom: "8px" }}>
+                  رقم الهاتف
+                </label>
+                <input
+                  type="tel" value={phone} autoFocus
+                  onChange={e => { setPhone(e.target.value); setErr(""); }}
+                  onKeyDown={e => e.key === "Enter" && sendOtp()}
+                  placeholder="+9647XXXXXXXXX"
+                  style={INP}
+                  onFocus={e => { if (!hasErr) e.target.style.borderColor = "rgba(123,47,247,0.7)"; }}
+                  onBlur={e => { if (!hasErr) e.target.style.borderColor = "rgba(123,47,247,0.35)"; }}
+                />
+                <div style={{ marginTop: "6px", fontFamily: "Rajdhani, sans-serif", fontSize: "11px", color: "rgba(226,232,240,0.25)" }}>
+                  مثال: 07742533658 أو +96407742533658
+                </div>
+              </div>
 
-          {/* Password */}
-          <div style={{ marginBottom: "16px" }}>
-            <label style={{ display: "block", fontFamily: "Rajdhani, sans-serif", fontSize: "11px", color: "rgba(226,232,240,0.3)", marginBottom: "6px", letterSpacing: "0.06em" }}>
-              كلمة المرور
-            </label>
-            <input
-              type="password" value={pw}
-              onChange={e => { setPw(e.target.value); setErr(""); }}
-              onKeyDown={e => e.key === "Enter" && handleLogin()}
-              placeholder="••••••••"
-              style={INP}
-              onFocus={e => { if (!hasErr) e.target.style.borderColor = "rgba(123,47,247,0.5)"; }}
-              onBlur={e => { if (!hasErr) e.target.style.borderColor = "rgba(255,255,255,0.09)"; }}
-            />
-          </div>
+              {err && (
+                <div style={{ padding: "9px 13px", borderRadius: "4px", marginBottom: "14px", background: "rgba(255,45,120,0.08)", border: "1px solid rgba(255,45,120,0.35)", color: "#ff7aaa", fontFamily: "Rajdhani, sans-serif", fontSize: "13px", fontWeight: 600, textAlign: "center" }}>
+                  ⛔ {err}
+                </div>
+              )}
 
-          {/* Error message */}
-          {err && (
-            <div style={{
-              padding: "9px 12px", borderRadius: "5px", marginBottom: "14px",
-              background: "rgba(255,45,120,0.08)", border: "1px solid rgba(255,45,120,0.35)",
-              color: "#ff6b9d", fontFamily: "Rajdhani, sans-serif",
-              fontSize: "13px", fontWeight: 600, textAlign: "center",
-            }}>
-              ⛔ {err}
-            </div>
+              <button onClick={sendOtp} disabled={busy || !phone.trim()} style={busy || !phone.trim() ? BTN_DIS : BTN}
+                onMouseEnter={e => { if (!busy) e.currentTarget.style.background = "rgba(123,47,247,0.28)"; }}
+                onMouseLeave={e => { e.currentTarget.style.background = "rgba(123,47,247,0.18)"; }}>
+                {busy ? "⏳ جاري الإرسال..." : "إرسال رمز التحقق SMS ›"}
+              </button>
+            </>
           )}
 
-          {/* Submit */}
-          <button
-            onClick={handleLogin} disabled={busy || !email.trim() || !pw}
-            style={{
-              width: "100%", padding: "12px",
-              background: busy ? "rgba(123,47,247,0.06)" : "rgba(123,47,247,0.14)",
-              border: `1px solid ${busy ? "rgba(123,47,247,0.18)" : "rgba(123,47,247,0.55)"}`,
-              color: busy ? "rgba(226,232,240,0.3)" : "#c4a8ff",
-              fontFamily: "Orbitron, sans-serif", fontSize: "11px",
-              fontWeight: 600, cursor: busy ? "wait" : "pointer",
-              borderRadius: "5px", letterSpacing: "0.1em",
-              transition: "all 0.18s",
-              textShadow: busy ? "none" : "0 0 10px rgba(123,47,247,0.5)",
-            }}
-            onMouseEnter={e => { if (!busy) e.currentTarget.style.background = "rgba(123,47,247,0.24)"; }}
-            onMouseLeave={e => { e.currentTarget.style.background = busy ? "rgba(123,47,247,0.06)" : "rgba(123,47,247,0.14)"; }}
-          >
-            {busy ? "⏳ جاري التحقق..." : "دخول الأدمن ›"}
-          </button>
+          {/* ── STEP: OTP ── */}
+          {(step === "otp" || step === "role") && (
+            <>
+              <div style={{ marginBottom: "18px" }}>
+                <label style={{ display: "block", fontFamily: "Orbitron, sans-serif", fontSize: "8px", color: "rgba(123,47,247,0.7)", letterSpacing: "0.18em", marginBottom: "8px" }}>
+                  رمز التحقق OTP
+                </label>
+                <input
+                  type="number" value={otp} autoFocus disabled={isRole}
+                  onChange={e => { setOtp(e.target.value.slice(0, 6)); setErr(""); }}
+                  onKeyDown={e => e.key === "Enter" && verifyOtp()}
+                  placeholder="_ _ _ _ _ _"
+                  style={{ ...INP, fontSize: "22px", letterSpacing: "0.35em", textAlign: "center", opacity: isRole ? 0.4 : 1 }}
+                  onFocus={e => { if (!hasErr) e.target.style.borderColor = "rgba(0,212,255,0.6)"; }}
+                  onBlur={e => { if (!hasErr) e.target.style.borderColor = "rgba(123,47,247,0.35)"; }}
+                />
+              </div>
+
+              {err && (
+                <div style={{ padding: "9px 13px", borderRadius: "4px", marginBottom: "14px", background: "rgba(255,45,120,0.08)", border: "1px solid rgba(255,45,120,0.35)", color: "#ff7aaa", fontFamily: "Rajdhani, sans-serif", fontSize: "13px", fontWeight: 600, textAlign: "center" }}>
+                  ⛔ {err}
+                </div>
+              )}
+
+              {/* Role-checking spinner */}
+              {isRole && (
+                <div style={{ display: "flex", alignItems: "center", gap: "10px", justifyContent: "center", marginBottom: "16px" }}>
+                  <div style={{ width: "16px", height: "16px", border: "2px solid rgba(0,212,255,0.2)", borderTop: "2px solid #00d4ff", borderRadius: "50%", animation: "adm-spin 0.8s linear infinite" }} />
+                  <span style={{ fontFamily: "Orbitron, sans-serif", fontSize: "8px", color: "rgba(0,212,255,0.7)", letterSpacing: "0.15em" }}>VERIFYING ROLE...</span>
+                </div>
+              )}
+
+              <button onClick={verifyOtp} disabled={busy || otp.length < 6 || isRole}
+                style={busy || otp.length < 6 || isRole ? BTN_DIS : { ...BTN, border: "1px solid rgba(0,212,255,0.55)", color: "#a8eeff", textShadow: "0 0 8px rgba(0,212,255,0.5)", boxShadow: "0 0 20px rgba(0,212,255,0.15)" }}
+                onMouseEnter={e => { if (!busy && !isRole) e.currentTarget.style.background = "rgba(0,212,255,0.18)"; }}
+                onMouseLeave={e => { e.currentTarget.style.background = "rgba(123,47,247,0.18)"; }}>
+                {isRole ? "⏳ جاري التحقق..." : "تأكيد الرمز والدخول ›"}
+              </button>
+
+              {/* Resend + back */}
+              <div style={{ display: "flex", justifyContent: "space-between", marginTop: "14px" }}>
+                <button onClick={resend} disabled={countdown > 0 || busy}
+                  style={{ background: "none", border: "none", cursor: countdown > 0 ? "default" : "pointer", fontFamily: "Rajdhani, sans-serif", fontSize: "12px", color: countdown > 0 ? "rgba(226,232,240,0.2)" : "rgba(123,47,247,0.7)", padding: 0 }}>
+                  {countdown > 0 ? `إعادة الإرسال (${countdown}s)` : "↻ إعادة الإرسال"}
+                </button>
+                <button onClick={() => { setStep("phone"); setOtp(""); setErr(""); confirmRef.current = null; }}
+                  style={{ background: "none", border: "none", cursor: "pointer", fontFamily: "Rajdhani, sans-serif", fontSize: "12px", color: "rgba(226,232,240,0.3)", padding: 0 }}>
+                  ‹ تغيير الرقم
+                </button>
+              </div>
+            </>
+          )}
 
         </div>
       </div>
