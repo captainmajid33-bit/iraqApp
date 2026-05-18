@@ -77,8 +77,6 @@ export function DoctorBookingModal({ doctorId, doctorName, doctorLat, doctorLng,
   const [userBalance,    setUserBalance]    = useState<number>(0);
   // Firebase UID of the doctor (stored in merchants/{id}.uid) — used as merchantId in appointment doc
   const [merchantUid,    setMerchantUid]    = useState<string>('');
-  // Phone number of the doctor (from merchants/{id}.phone) — fallback to lookup UID via users collection
-  const [merchantPhone,  setMerchantPhone]  = useState<string>('');
 
   const today    = targetDateStr();
   const user     = getUserFromStorage();
@@ -132,9 +130,8 @@ export function DoctorBookingModal({ doctorId, doctorName, doctorLat, doctorLng,
         if (cancelled) return;
         const data = snap.exists() ? snap.data() : undefined;
         setAvailableSlots(normalizeSlots(data?.available_slots));
-        // Grab the doctor's Firebase UID and phone — both used for merchantId resolution
-        if (data?.uid)   setMerchantUid(String(data.uid));
-        if (data?.phone) setMerchantPhone(String(data.phone));
+        // Grab the doctor's Firebase UID — used as merchantId in appointment docs
+        if (data?.uid) setMerchantUid(String(data.uid));
       } catch {
         if (!cancelled) setAvailableSlots([]);
       } finally {
@@ -178,40 +175,20 @@ export function DoctorBookingModal({ doctorId, doctorName, doctorLat, doctorLng,
       // Top-level ref (merchant app reads from here via merchantId filter)
       const topLevelRef = doc(db, 'appointments', newApptRef.id);
 
-      // ── Resolve merchantId automatically (3-tier priority) ────────────────
-      // Tier 1: cached Firebase UID from merchants/{id}.uid (set by admin)
+      // ── Resolve merchantId from merchants/{id}.uid directly ───────────────
+      // Priority 1: cached uid already fetched when slots loaded
       let resolvedMerchantId = merchantUid;
 
-      // Tier 2: fetch fresh from merchants/{id} — captures uid AND phone
-      let freshPhone = merchantPhone;
+      // Priority 2: fresh fetch from merchants/{id} (guards against stale closure)
       if (!resolvedMerchantId) {
         const mSnap = await getDoc(doc(db, 'merchants', String(doctorId)));
         if (mSnap.exists()) {
-          const mData = mSnap.data();
-          if (mData?.uid)   resolvedMerchantId = String(mData.uid);
-          if (mData?.phone) freshPhone = String(mData.phone);
+          const uid = mSnap.data()?.uid;
+          if (uid) resolvedMerchantId = String(uid);
         }
       }
 
-      // Tier 3: look up Firebase UID via phone in `users` Firestore collection
-      // Normalise digits only so "077..." matches "+96477..." etc.
-      if (!resolvedMerchantId && freshPhone) {
-        const phoneDigits = freshPhone.replace(/\D/g, '');
-        // Try exact match first, then suffix match (last 10 digits)
-        const phoneSuffix = phoneDigits.slice(-10);
-        const tryPhones = Array.from(new Set([freshPhone.trim(), phoneDigits, `+964${phoneSuffix}`, `0${phoneSuffix}`]));
-        for (const ph of tryPhones) {
-          try {
-            const uSnap = await getDocs(query(collection(db, 'users'), where('phone', '==', ph), limit(1)));
-            if (!uSnap.empty) {
-              resolvedMerchantId = uSnap.docs[0].id; // Firestore doc ID = Firebase Auth UID
-              break;
-            }
-          } catch { /* permission denied on this format — try next */ }
-        }
-      }
-
-      // Absolute fallback (keeps old behaviour if none of the above resolves)
+      // Fallback — should not reach here once uid is set in the merchant doc
       if (!resolvedMerchantId) resolvedMerchantId = String(doctorId);
 
       // Canonical booking payload — fields exactly matching merchant app expectations
@@ -265,7 +242,7 @@ export function DoctorBookingModal({ doctorId, doctorName, doctorLat, doctorLng,
       }
       setPhase('slots');
     }
-  }, [selected, doctorId, userId, userName, today, doctorLat, doctorLng, merchantUid, merchantPhone]);
+  }, [selected, doctorId, userId, userName, today, doctorLat, doctorLng, merchantUid]);
 
   const selectedLabel = availableSlots.find(s => s.key === selected)?.label ?? selected ?? '';
 
