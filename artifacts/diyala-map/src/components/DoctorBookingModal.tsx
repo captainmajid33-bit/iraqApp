@@ -169,31 +169,39 @@ export function DoctorBookingModal({ doctorId, doctorName, doctorLat, doctorLng,
     setErrMsg('');
     try {
       const userRef    = doc(db, 'users', userId);
+      // Sub-collection ref (admin dashboard reads from here)
       const apptCol    = collection(db, 'doctors', String(doctorId), 'appointments');
-      // Pre-create ref so we can read its ID after the transaction
-      const newApptRef = doc(apptCol);
+      const newApptRef = doc(apptCol);  // pre-create ref for shared ID
+      // Top-level ref (merchant app reads from here via merchantId filter)
+      const topLevelRef = doc(db, 'appointments', newApptRef.id);
+
+      // Resolved merchantId: Firebase UID from merchant doc, fallback to numeric id string
+      const resolvedMerchantId = merchantUid || String(doctorId);
+
+      // Canonical booking payload — fields exactly matching merchant app expectations
+      const bookingPayload = {
+        merchantId: resolvedMerchantId,   // "merchantId" — doctor Firebase UID or numeric id
+        time:       selected,              // "17:00"      — 24h format
+        slot_time:  selected,              // kept for admin backward-compat
+        date:       today,                 // "18-05-2026" — DD-MM-YYYY
+        userId,
+        userName,
+        createdAt:  serverTimestamp(),
+      };
 
       await runTransaction(db, async (txn) => {
         const userSnap = await txn.get(userRef);
         const bal = userSnap.exists() ? (Number(userSnap.data()?.balance) || 0) : 0;
         if (bal < MIN_BALANCE) throw new Error('INSUFFICIENT');
 
-        // Deduct 2000 from balance
+        // 1. Deduct 2000 IQD from user balance
         txn.update(userRef, { balance: bal - MIN_BALANCE });
 
-        // Create appointment document
-        // merchantId = doctor's Firebase UID (from merchants/{id}.uid) — falls back to numeric id
-        // time       = 24h slot string (e.g. "15:00") — required by merchant app
-        // slot_time  = same value kept for admin backward-compatibility
-        txn.set(newApptRef, {
-          merchantId: merchantUid || String(doctorId),
-          slot_time:  selected,
-          time:       selected,
-          userId,
-          userName,
-          date:       today,
-          createdAt:  serverTimestamp(),
-        });
+        // 2. Write to sub-collection → admin dashboard
+        txn.set(newApptRef, bookingPayload);
+
+        // 3. Write identical doc to top-level appointments → merchant app
+        txn.set(topLevelRef, bookingPayload);
       });
 
       // ── Write geo-mirror doc for client-side geofencing ──────────────────
