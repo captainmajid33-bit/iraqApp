@@ -20,8 +20,6 @@ export function MapView() {
   const [routeTarget, setRouteTarget] = useState<MapItem | null>(null);
   const [adminCoords, setAdminCoords] = useState<{ lat: number; lng: number } | null>(null);
 
-  const firstCatRef = useRef("");
-
   // ── Full fetch (initial + fallback polling) ───────────────────────────────
   const fetchAll = useCallback(async () => {
     try {
@@ -38,10 +36,6 @@ export function MapView() {
         if (Array.isArray(cats) && cats.length > 0) {
           const sorted = [...cats].sort((a, b) => a.labelEn.localeCompare(b.labelEn));
           setCategories(sorted);
-          if (!firstCatRef.current) {
-            firstCatRef.current = sorted[0].slug;
-            setActiveFilter(sorted[0].slug);
-          }
         }
       }
     } catch {
