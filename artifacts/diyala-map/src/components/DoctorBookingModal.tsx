@@ -75,6 +75,8 @@ export function DoctorBookingModal({ doctorId, doctorName, doctorLat, doctorLng,
   const [phase,          setPhase]          = useState<'checking' | 'insufficient' | 'already_booked' | 'slots' | 'cost_confirm' | 'confirming' | 'success'>('checking');
   const [errMsg,         setErrMsg]         = useState('');
   const [userBalance,    setUserBalance]    = useState<number>(0);
+  // Firebase UID of the doctor (stored in merchants/{id}.uid) — used as merchantId in appointment doc
+  const [merchantUid,    setMerchantUid]    = useState<string>('');
 
   const today    = targetDateStr();
   const user     = getUserFromStorage();
@@ -126,8 +128,10 @@ export function DoctorBookingModal({ doctorId, doctorName, doctorLat, doctorLng,
       try {
         const snap = await getDoc(doc(db, 'merchants', String(doctorId)));
         if (cancelled) return;
-        const raw = snap.exists() ? snap.data()?.available_slots : undefined;
-        setAvailableSlots(normalizeSlots(raw));
+        const data = snap.exists() ? snap.data() : undefined;
+        setAvailableSlots(normalizeSlots(data?.available_slots));
+        // Grab the doctor's Firebase UID stored in the merchant doc
+        if (data?.uid) setMerchantUid(String(data.uid));
       } catch {
         if (!cancelled) setAvailableSlots([]);
       } finally {
@@ -178,8 +182,13 @@ export function DoctorBookingModal({ doctorId, doctorName, doctorLat, doctorLng,
         txn.update(userRef, { balance: bal - MIN_BALANCE });
 
         // Create appointment document
+        // merchantId = doctor's Firebase UID (from merchants/{id}.uid) — falls back to numeric id
+        // time       = 24h slot string (e.g. "15:00") — required by merchant app
+        // slot_time  = same value kept for admin backward-compatibility
         txn.set(newApptRef, {
+          merchantId: merchantUid || String(doctorId),
           slot_time:  selected,
+          time:       selected,
           userId,
           userName,
           date:       today,
