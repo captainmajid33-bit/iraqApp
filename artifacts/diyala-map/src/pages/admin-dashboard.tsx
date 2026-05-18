@@ -5,9 +5,12 @@ import "leaflet/dist/leaflet.css";
 import {
   collection, onSnapshot, addDoc, updateDoc, deleteDoc,
   doc, serverTimestamp, writeBatch, Timestamp, query, orderBy, setDoc,
-  where, getDocs,
+  where, getDocs, getDoc,
 } from "firebase/firestore";
-import { db, storage } from "@/lib/firebase";
+import {
+  signInWithEmailAndPassword, onAuthStateChanged, signOut,
+} from "firebase/auth";
+import { auth, db, storage } from "@/lib/firebase";
 import { ref as storageRef, uploadBytes, getDownloadURL } from "firebase/storage";
 
 // ── Design tokens ─────────────────────────────────────────────────────────────
@@ -5229,15 +5232,24 @@ export function AdminDashboard() {
   const [authChecked, setAuthChecked] = useState(false);
   const toast = useToast();
 
-  // Verify token with backend on every mount
+  // ── Firebase Auth + Firestore role guard ────────────────────────────────────
   useEffect(() => {
-    fetch("/api/admin/verify", { headers: { "x-admin-token": getToken() } })
-      .then(r => r.json())
-      .then(d => {
-        if (!d.ok) { clearToken(); navigate("/"); }
-        else setAuthChecked(true);
-      })
-      .catch(() => { clearToken(); navigate("/"); });
+    const unsub = onAuthStateChanged(auth, async (fbUser) => {
+      if (!fbUser) { navigate("/admin"); return; }
+      try {
+        const snap = await getDoc(doc(db, "users", fbUser.uid));
+        if (snap.exists() && snap.data()?.role === "admin") {
+          setAuthChecked(true);
+        } else {
+          await signOut(auth);
+          navigate("/admin");
+        }
+      } catch {
+        await signOut(auth);
+        navigate("/admin");
+      }
+    });
+    return () => unsub();
   }, []);
 
   const loadCats = useCallback(async () => {
@@ -5247,9 +5259,8 @@ export function AdminDashboard() {
   useEffect(() => { if (authChecked) loadCats(); }, [authChecked, loadCats]);
 
   const logout = async () => {
-    await api.post("/api/admin/logout", {});
-    clearToken();
-    navigate("/");
+    await signOut(auth);
+    navigate("/admin");
   };
 
   if (!authChecked) return (
@@ -5336,85 +5347,168 @@ export function AdminDashboard() {
   );
 }
 
-// ── Admin Login (generic-looking, no admin hints) ─────────────────────────────
+// ── Admin Login — Firebase Email/Password + Firestore role:admin guard ─────────
 export function AdminLogin() {
   const [, navigate] = useLocation();
-  const [pw, setPw] = useState("");
-  const [err, setErr] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [shake, setShake] = useState(false);
+  const [email,  setEmail]  = useState("");
+  const [pw,     setPw]     = useState("");
+  const [err,    setErr]    = useState("");
+  const [busy,   setBusy]   = useState(false);
+  const [shake,  setShake]  = useState(false);
 
-  // If already authenticated, redirect directly to dashboard
+  // If already signed-in with admin role, skip to dashboard
   useEffect(() => {
-    const token = getToken();
-    if (!token) return;
-    fetch("/api/admin/verify", { headers: { "x-admin-token": token } })
-      .then(r => r.json())
-      .then(d => { if (d.ok) navigate("/admin/dashboard"); });
+    const unsub = onAuthStateChanged(auth, async (fbUser) => {
+      if (!fbUser) return;
+      try {
+        const snap = await getDoc(doc(db, "users", fbUser.uid));
+        if (snap.exists() && snap.data()?.role === "admin") {
+          navigate("/admin/dashboard");
+        }
+      } catch { /* not admin — stay on login */ }
+    });
+    return () => unsub();
   }, []);
 
+  const triggerShake = () => { setShake(true); setTimeout(() => setShake(false), 600); };
+
   const handleLogin = async () => {
-    if (!pw.trim() || busy) return;
+    const emailTrim = email.trim();
+    if (!emailTrim || !pw || busy) return;
     setBusy(true);
     setErr("");
     try {
-      const r = await fetch("/api/admin/login", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ password: pw }),
-      });
-      const d = await r.json();
-      if (d.ok && d.token) {
-        setToken(d.token);
-        navigate("/admin/dashboard");
-      } else {
-        setErr("كلمة المرور غير صحيحة");
-        setShake(true); setTimeout(() => setShake(false), 600);
+      // Step 1 — Firebase Auth
+      const cred = await signInWithEmailAndPassword(auth, emailTrim, pw);
+      const uid  = cred.user.uid;
+
+      // Step 2 — Firestore role check
+      const snap = await getDoc(doc(db, "users", uid));
+      const role = snap.exists() ? snap.data()?.role : undefined;
+
+      if (role !== "admin") {
+        // Not admin → sign out immediately and block access
+        await signOut(auth);
+        setErr("عذراً، هذا الحساب لا يملك صلاحيات الأدمن!");
+        triggerShake();
+        return;
       }
-    } catch {
-      setErr("تعذر الاتصال بالخادم");
+
+      // Step 3 — Approved ✅
+      navigate("/admin/dashboard");
+
+    } catch (e: unknown) {
+      const code = (e as { code?: string })?.code ?? "";
+      if (code === "auth/user-not-found" || code === "auth/wrong-password" ||
+          code === "auth/invalid-credential" || code === "auth/invalid-email") {
+        setErr("البريد الإلكتروني أو كلمة المرور غير صحيحة");
+      } else if (code === "auth/too-many-requests") {
+        setErr("تم تجاوز عدد المحاولات. يرجى المحاولة لاحقاً");
+      } else {
+        setErr("تعذر الاتصال، يرجى المحاولة مجدداً");
+      }
+      triggerShake();
     } finally {
       setBusy(false);
     }
   };
 
+  const hasErr = !!err;
+  const INP: React.CSSProperties = {
+    width: "100%", padding: "10px 13px",
+    background: "rgba(255,255,255,0.04)",
+    border: `1px solid ${hasErr ? "rgba(255,80,80,0.45)" : "rgba(255,255,255,0.09)"}`,
+    color: "#e2e8f0", fontSize: "15px", outline: "none",
+    borderRadius: "5px", fontFamily: "Rajdhani, sans-serif",
+    transition: "border-color 0.2s", direction: "ltr",
+  };
+
   return (
     <div style={{ minHeight: "100vh", background: "#080a0f", display: "flex", alignItems: "center", justifyContent: "center" }}>
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;600;700&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Rajdhani:wght@400;600;700&display=swap');
         @keyframes adm-shake{0%,100%{transform:translateX(0)}20%,60%{transform:translateX(-7px)}40%,80%{transform:translateX(7px)}}
         *{box-sizing:border-box}
       `}</style>
 
-      <div style={{ width: "100%", maxWidth: "340px", padding: "20px", animation: shake ? "adm-shake 0.5s" : "none" }}>
-        <div style={{ background: "#0d1117", border: "1px solid rgba(255,255,255,0.07)", borderRadius: "8px", padding: "32px 28px" }}>
-          <div style={{ textAlign: "center", marginBottom: "28px" }}>
-            <span style={{ fontSize: "30px", display: "block", marginBottom: "12px", opacity: 0.55 }}>🗺️</span>
-            <div style={{ color: "rgba(226,232,240,0.6)", fontFamily: "Rajdhani, sans-serif", fontSize: "16px", fontWeight: 600 }}>خريطة ديالى</div>
-            <div style={{ color: "rgba(226,232,240,0.25)", fontFamily: "Rajdhani, sans-serif", fontSize: "12px", marginTop: "4px" }}>تسجيل الدخول</div>
+      <div style={{ width: "100%", maxWidth: "360px", padding: "20px", animation: shake ? "adm-shake 0.5s" : "none" }}>
+        <div style={{ background: "#0d1117", border: `1px solid ${hasErr ? "rgba(255,45,120,0.35)" : "rgba(255,255,255,0.07)"}`, borderRadius: "8px", padding: "36px 28px", transition: "border-color 0.3s" }}>
+
+          {/* Logo / Title */}
+          <div style={{ textAlign: "center", marginBottom: "30px" }}>
+            <div style={{ fontSize: "10px", fontFamily: "Orbitron, sans-serif", color: "#7b2ff788", letterSpacing: "0.22em", marginBottom: "10px" }}>
+              DIYALA · ADMIN PANEL
+            </div>
+            <span style={{ fontSize: "28px", display: "block", marginBottom: "10px" }}>🗺️</span>
+            <div style={{ color: "rgba(226,232,240,0.5)", fontFamily: "Rajdhani, sans-serif", fontSize: "14px" }}>
+              تسجيل الدخول
+            </div>
           </div>
 
+          {/* Email */}
           <div style={{ marginBottom: "12px" }}>
-            <label style={{ display: "block", fontFamily: "Rajdhani, sans-serif", fontSize: "12px", color: "rgba(226,232,240,0.35)", marginBottom: "7px" }}>كلمة المرور</label>
+            <label style={{ display: "block", fontFamily: "Rajdhani, sans-serif", fontSize: "11px", color: "rgba(226,232,240,0.3)", marginBottom: "6px", letterSpacing: "0.06em" }}>
+              البريد الإلكتروني
+            </label>
             <input
-              type="password" value={pw} autoFocus
-              onChange={e => { setPw(e.target.value); setErr(""); }}
+              type="email" value={email} autoFocus
+              onChange={e => { setEmail(e.target.value); setErr(""); }}
               onKeyDown={e => e.key === "Enter" && handleLogin()}
-              placeholder="••••••••"
-              style={{ width: "100%", padding: "10px 13px", background: "rgba(255,255,255,0.04)", border: `1px solid ${err ? "rgba(255,80,80,0.45)" : "rgba(255,255,255,0.09)"}`, color: "#e2e8f0", fontSize: "16px", letterSpacing: "0.22em", outline: "none", borderRadius: "5px", fontFamily: "Rajdhani, sans-serif", transition: "border-color 0.2s" }}
-              onFocus={e => { if (!err) e.target.style.borderColor = "rgba(255,255,255,0.22)"; }}
-              onBlur={e => { if (!err) e.target.style.borderColor = "rgba(255,255,255,0.09)"; }}
+              placeholder="admin@example.com"
+              style={INP}
+              onFocus={e => { if (!hasErr) e.target.style.borderColor = "rgba(123,47,247,0.5)"; }}
+              onBlur={e => { if (!hasErr) e.target.style.borderColor = "rgba(255,255,255,0.09)"; }}
             />
           </div>
 
-          {err && <div style={{ color: "rgba(255,90,90,0.85)", fontFamily: "Rajdhani, sans-serif", fontSize: "12px", marginBottom: "10px" }}>⚠ {err}</div>}
+          {/* Password */}
+          <div style={{ marginBottom: "16px" }}>
+            <label style={{ display: "block", fontFamily: "Rajdhani, sans-serif", fontSize: "11px", color: "rgba(226,232,240,0.3)", marginBottom: "6px", letterSpacing: "0.06em" }}>
+              كلمة المرور
+            </label>
+            <input
+              type="password" value={pw}
+              onChange={e => { setPw(e.target.value); setErr(""); }}
+              onKeyDown={e => e.key === "Enter" && handleLogin()}
+              placeholder="••••••••"
+              style={INP}
+              onFocus={e => { if (!hasErr) e.target.style.borderColor = "rgba(123,47,247,0.5)"; }}
+              onBlur={e => { if (!hasErr) e.target.style.borderColor = "rgba(255,255,255,0.09)"; }}
+            />
+          </div>
 
-          <button onClick={handleLogin} disabled={busy}
-            style={{ width: "100%", padding: "11px", background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.11)", color: busy ? "rgba(226,232,240,0.35)" : "rgba(226,232,240,0.75)", fontFamily: "Rajdhani, sans-serif", fontSize: "14px", fontWeight: 600, cursor: busy ? "wait" : "pointer", borderRadius: "5px", letterSpacing: "0.05em", transition: "all 0.18s" }}
-            onMouseEnter={e => { if (!busy) { e.currentTarget.style.background = "rgba(255,255,255,0.1)"; e.currentTarget.style.color = "#e2e8f0"; } }}
-            onMouseLeave={e => { e.currentTarget.style.background = "rgba(255,255,255,0.06)"; e.currentTarget.style.color = busy ? "rgba(226,232,240,0.35)" : "rgba(226,232,240,0.75)"; }}>
-            {busy ? "جاري الدخول..." : "دخول"}
+          {/* Error message */}
+          {err && (
+            <div style={{
+              padding: "9px 12px", borderRadius: "5px", marginBottom: "14px",
+              background: "rgba(255,45,120,0.08)", border: "1px solid rgba(255,45,120,0.35)",
+              color: "#ff6b9d", fontFamily: "Rajdhani, sans-serif",
+              fontSize: "13px", fontWeight: 600, textAlign: "center",
+            }}>
+              ⛔ {err}
+            </div>
+          )}
+
+          {/* Submit */}
+          <button
+            onClick={handleLogin} disabled={busy || !email.trim() || !pw}
+            style={{
+              width: "100%", padding: "12px",
+              background: busy ? "rgba(123,47,247,0.06)" : "rgba(123,47,247,0.14)",
+              border: `1px solid ${busy ? "rgba(123,47,247,0.18)" : "rgba(123,47,247,0.55)"}`,
+              color: busy ? "rgba(226,232,240,0.3)" : "#c4a8ff",
+              fontFamily: "Orbitron, sans-serif", fontSize: "11px",
+              fontWeight: 600, cursor: busy ? "wait" : "pointer",
+              borderRadius: "5px", letterSpacing: "0.1em",
+              transition: "all 0.18s",
+              textShadow: busy ? "none" : "0 0 10px rgba(123,47,247,0.5)",
+            }}
+            onMouseEnter={e => { if (!busy) e.currentTarget.style.background = "rgba(123,47,247,0.24)"; }}
+            onMouseLeave={e => { e.currentTarget.style.background = busy ? "rgba(123,47,247,0.06)" : "rgba(123,47,247,0.14)"; }}
+          >
+            {busy ? "⏳ جاري التحقق..." : "دخول الأدمن ›"}
           </button>
+
         </div>
       </div>
     </div>
