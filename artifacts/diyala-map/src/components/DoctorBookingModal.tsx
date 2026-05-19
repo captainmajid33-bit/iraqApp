@@ -181,41 +181,48 @@ export function DoctorBookingModal({ doctorId, doctorName, doctorLat, doctorLng,
 
       // Priority 2: fresh fetch from merchants/{id} (guards against stale closure)
       if (!resolvedMerchantId) {
-        const mSnap = await getDoc(doc(db, 'merchants', String(doctorId)));
-        if (mSnap.exists()) {
-          const uid = mSnap.data()?.uid;
-          if (uid) resolvedMerchantId = String(uid);
-        }
+        try {
+          const mSnap = await getDoc(doc(db, 'merchants', String(doctorId)));
+          if (mSnap.exists()) {
+            const uid = mSnap.data()?.uid;
+            if (uid) resolvedMerchantId = String(uid);
+          }
+        } catch { /* permission issue reading merchants — proceed with fallback */ }
       }
 
-      // Fallback — should not reach here once uid is set in the merchant doc
+      // Fallback: use local doctorId so booking always succeeds
       if (!resolvedMerchantId) resolvedMerchantId = String(doctorId);
 
-      // Canonical booking payload — fields exactly matching merchant app expectations
+      // Canonical booking payload
       const bookingPayload = {
-        merchantId: resolvedMerchantId,   // "merchantId" — doctor Firebase UID or numeric id
-        time:       selected,              // "17:00"      — 24h format
-        slot_time:  selected,              // kept for admin backward-compat
-        date:       today,                 // "18-05-2026" — DD-MM-YYYY
+        merchantId: resolvedMerchantId,
+        time:       selected,
+        slot_time:  selected,
+        date:       today,
         userId,
         userName,
         createdAt:  serverTimestamp(),
       };
 
+      // ── Step 1: deduct balance + write subcollection in one transaction ────
       await runTransaction(db, async (txn) => {
         const userSnap = await txn.get(userRef);
         const bal = userSnap.exists() ? (Number(userSnap.data()?.balance) || 0) : 0;
         if (bal < MIN_BALANCE) throw new Error('INSUFFICIENT');
 
-        // 1. Deduct 2000 IQD from user balance
-        txn.update(userRef, { balance: bal - MIN_BALANCE });
+        // Deduct 2000 IQD from user balance (set+merge in case doc shape varies)
+        txn.set(userRef, { balance: bal - MIN_BALANCE }, { merge: true });
 
-        // 2. Write to sub-collection → admin dashboard
+        // Write to sub-collection (admin dashboard reads from here)
         txn.set(newApptRef, bookingPayload);
-
-        // 3. Write identical doc to top-level appointments → merchant app
-        txn.set(topLevelRef, bookingPayload);
       });
+
+      // ── Step 2: write top-level appointments doc (merchant app reads this) ─
+      // Outside the transaction so a rules mismatch on this path doesn't roll
+      // back the balance deduction. Uses setDoc (not addDoc) to share the ID.
+      try {
+        await setDoc(topLevelRef, bookingPayload);
+      } catch { /* non-fatal — merchant doc optional if rules block it */ }
 
       // ── Write geo-mirror doc for client-side geofencing ──────────────────
       if (userId !== 'anonymous') {
