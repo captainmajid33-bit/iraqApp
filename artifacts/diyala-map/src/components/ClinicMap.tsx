@@ -14,7 +14,7 @@ import { DoctorBookingModal } from './DoctorBookingModal';
 import { ActiveOrderTracker } from './ActiveOrderTracker';
 import TrafficLayer from './TrafficLayer';
 import { useMapTheme } from '@/lib/mapTheme';
-import { collection, query, where, getDocs, onSnapshot, orderBy, limit, doc, setDoc, serverTimestamp, getDoc } from 'firebase/firestore';
+import { collection, query, where, getDocs, onSnapshot, orderBy, limit, doc, setDoc, updateDoc, serverTimestamp, getDoc } from 'firebase/firestore';
 import { auth, db } from '@/lib/firebase';
 import { getUserFromStorage } from '@/components/UserLoginOverlay';
 import { useDoctorGeofence } from '@/hooks/useDoctorGeofence';
@@ -616,6 +616,8 @@ export function ClinicMap({
   const [activeOrderStatus, setActiveOrderStatus] = useState<string>('pending');
   const [activeDriverPhone, setActiveDriverPhone] = useState<string>('');
   const [activeDriverId,    setActiveDriverId]    = useState<number>(0);
+  // Ref mirrors for use inside useCallback closures without stale captures
+  const activeDriverPhoneRef = useRef<string>('');
   const [driverLat,         setDriverLat]         = useState<number|null>(null);
   const [driverLng,         setDriverLng]         = useState<number|null>(null);
   const [driverDistKm,      setDriverDistKm]      = useState<number|null>(null);
@@ -2365,6 +2367,50 @@ export function ClinicMap({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   },[]);
 
+  // ── Keep activeDriverPhoneRef current (safe for useCallback closures) ────────
+  useEffect(() => { activeDriverPhoneRef.current = activeDriverPhone; }, [activeDriverPhone]);
+
+  // ── Sync Firestore order doc — called after REST/SSE status change ─────────
+  // This bridges the REST-based order system to Firestore so ActiveOrderTracker
+  // (which watches Firestore) can show the live driver marker + route polyline.
+  const syncOrderToFirestore = useCallback((
+    orderId:   number,
+    status:    string,
+    driverLat: number | null,
+    driverLng: number | null,
+  ) => {
+    const uid = auth.currentUser?.uid;
+    if (!uid || !orderId) return;
+    const payload: Record<string, unknown> = { status };
+    if (typeof driverLat === 'number') payload.driver_lat = driverLat;
+    if (typeof driverLng === 'number') payload.driver_lng = driverLng;
+    updateDoc(doc(db, 'orders', String(orderId)), payload).catch(() => {
+      // Doc might not exist yet (race condition on first call) — ignore silently
+    });
+    // ── Mark driver busy/free in Firestore approved_agents ─────────────────
+    // This blocks the Firestore cross-check from routing new customers to a
+    // busy driver when the REST isBusy state hasn't propagated yet.
+    const TRIP_ACTIVE    = new Set(['accepted', 'in_progress', 'driving']);
+    const TRIP_TERMINAL  = new Set(['done', 'finished', 'completed', 'cancelled', 'rejected']);
+    const phone = activeDriverPhoneRef.current;
+    if (phone) {
+      if (TRIP_ACTIVE.has(status)) {
+        // Firestore: mark agent as on-trip (non-fatal if Security Rules deny)
+        getDocs(
+          query(collection(db, 'approved_agents'), where('phone', '==', phone))
+        ).then(snap => {
+          snap.forEach(d => updateDoc(d.ref, { status: 'on_trip', isBusy: true }).catch(() => {}));
+        }).catch(() => {});
+      } else if (TRIP_TERMINAL.has(status)) {
+        getDocs(
+          query(collection(db, 'approved_agents'), where('phone', '==', phone))
+        ).then(snap => {
+          snap.forEach(d => updateDoc(d.ref, { status: 'available', isBusy: false }).catch(() => {}));
+        }).catch(() => {});
+      }
+    }
+  }, []);
+
   // ── Apply order snapshot (status + driver position) ───────────────────────
   const applyOrderSnapshot = useCallback((data: {
     id: number; status: string;
@@ -2374,6 +2420,18 @@ export function ClinicMap({
   })=>{
     setActiveOrderStatus(data.status);
     activeOrderStatusRef.current = data.status;
+
+    // ── Bridge REST status → Firestore so ActiveOrderTracker wakes up ─────────
+    // ActiveOrderTracker queries Firestore where status IN ['accepted','in_progress','driving'].
+    // The Firestore doc is created as 'pending' and never updated by the partner app,
+    // so we update it here every time REST/SSE delivers a new status.
+    syncOrderToFirestore(
+      data.id,
+      data.status,
+      data.driverLat ?? null,
+      data.driverLng ?? null,
+    );
+
     if (data.status === 'accepted' || data.status === 'driving') {
       // Chat is NOT auto-opened — user must tap 💬 or status-bar button
       // Driver accepted → stop the search loop
@@ -2417,7 +2475,7 @@ export function ClinicMap({
         setDriverEtaMin(Math.round(distKm * 2.5));
       }
     }
-  },[stopOrderTracking]);
+  },[stopOrderTracking, syncOrderToFirestore]);
 
   // ── Poll order status every 3 s ───────────────────────────────────────────
   useEffect(()=>{
@@ -2582,6 +2640,8 @@ export function ClinicMap({
           // Persist order to localStorage so it survives page refresh
           localStorage.setItem('diyala_active_order', JSON.stringify({ orderId, driverPhone, driverId: taxiDriverItem.id }));
           // ── Mirror to Firestore for real-time driver tracking ────────────
+          // from_lat/from_lng = pickup point, to_lat/to_lng = destination
+          // ActiveOrderTracker reads these to show destination marker.
           const uid = auth.currentUser?.uid;
           if (uid) {
             setDoc(doc(db, 'orders', String(orderId)), {
@@ -2590,6 +2650,10 @@ export function ClinicMap({
               status:       'pending',
               customer_lat: taxiFromPt?.lat ?? null,
               customer_lng: taxiFromPt?.lng ?? null,
+              from_lat:     taxiFromPt?.lat ?? null,
+              from_lng:     taxiFromPt?.lng ?? null,
+              to_lat:       taxiToPt?.lat   ?? null,
+              to_lng:       taxiToPt?.lng   ?? null,
               created_at:   serverTimestamp(),
             }).catch(() => { /* non-fatal */ });
           }
@@ -2722,6 +2786,22 @@ export function ClinicMap({
         setActiveDriverPhone(next.phone);
         setActiveDriverId(next.locationId);
         localStorage.setItem('diyala_active_order', JSON.stringify({ orderId:newId, driverPhone:next.phone, driverId:next.locationId }));
+        // ── Mirror new order to Firestore (same pickup/dest as original order) ─
+        const uid2 = auth.currentUser?.uid;
+        if (uid2 && newId) {
+          setDoc(doc(db, 'orders', String(newId)), {
+            customer_id:  uid2,
+            type:         'taxi',
+            status:       'pending',
+            customer_lat: fromPt.lat,
+            customer_lng: fromPt.lng,
+            from_lat:     fromPt.lat,
+            from_lng:     fromPt.lng,
+            to_lat:       toPt?.lat ?? fromPt.lat,
+            to_lng:       toPt?.lng ?? fromPt.lng,
+            created_at:   serverTimestamp(),
+          }).catch(() => {});
+        }
         // Mark this driver as tried and restart 120 s countdown
         loopIgnoredRef.current.add(next.locationId);
         setLoopActive(true);
