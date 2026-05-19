@@ -1317,10 +1317,30 @@ function SettingsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
 // ── Drivers Tab ───────────────────────────────────────────────────────────────
 interface OnlineDriver { id: number; locationId: number; driverName: string; phone: string; lat: number; lng: number; isOnline: boolean; isBusy: boolean; updatedAt: string; }
 
+// ── Firestore helper: update approved_agents status by phone ─────────────────
+async function syncAgentFirestore(phone: string, status: 'available' | 'offline', extra: Record<string, unknown> = {}) {
+  if (!phone) return;
+  try {
+    const snap = await getDocs(query(collection(db, 'approved_agents'), where('phone', '==', phone)));
+    if (snap.empty) return;
+    await Promise.all(snap.docs.map(d => updateDoc(d.ref, {
+      status,
+      isOnline: status === 'available',
+      currentTripId: null,
+      isBusy: status !== 'available',
+      ...extra,
+    })));
+    console.log(`[syncAgentFirestore] phone=${phone} → status=${status}`);
+  } catch (e) {
+    console.warn('[syncAgentFirestore] failed:', e);
+  }
+}
+
 function DriversTab({ toast }: { toast: ReturnType<typeof useToast> }) {
   const [drivers, setDrivers] = useState<OnlineDriver[]>([]);
   const [loading, setLoading] = useState(true);
   const [busying, setBusying] = useState<number | null>(null);
+  const [offlining, setOfflining] = useState<number | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -1333,7 +1353,8 @@ function DriversTab({ toast }: { toast: ReturnType<typeof useToast> }) {
 
   useEffect(() => { load(); const iv = setInterval(load, 8000); return () => clearInterval(iv); }, [load]);
 
-  const forceFree = async (locationId: number, name: string) => {
+  // ── Force-free: reset isBusy in PostgreSQL + Firestore approved_agents ───────
+  const forceFree = async (locationId: number, name: string, phone: string) => {
     setBusying(locationId);
     try {
       const r = await fetch(`/api/drivers-online/${locationId}/busy`, {
@@ -1341,10 +1362,35 @@ function DriversTab({ toast }: { toast: ReturnType<typeof useToast> }) {
         headers: { "Content-Type": "application/json", "x-admin-password": ADMIN_PW },
         body: JSON.stringify({ busy: false }),
       }).then(r => r.json());
-      if (r.ok) { toast.show(`✓ تم تحرير السائق ${name}`); load(); }
-      else toast.show(r.error ?? "فشل تحرير السائق", false);
+      if (r.ok) {
+        // Mirror to Firestore so driver app exits "في رحلة" screen
+        await syncAgentFirestore(phone, 'available');
+        toast.show(`✓ تم تحرير السائق ${name}`);
+        load();
+      } else toast.show(r.error ?? "فشل تحرير السائق", false);
     } catch { toast.show("خطأ في الاتصال", false); }
     finally { setBusying(null); }
+  };
+
+  // ── Force-offline: set isOnline=false in PostgreSQL + Firestore ───────────────
+  const forceOffline = async (locationId: number, name: string, phone: string) => {
+    setOfflining(locationId);
+    try {
+      // 1. REST API — sets isOnline=false, isBusy=false in PostgreSQL
+      const r = await fetch(`/api/drivers-online/${locationId}`, {
+        method: "DELETE",
+        headers: { "x-admin-password": ADMIN_PW },
+      });
+      if (!r.ok && r.status !== 404) {
+        toast.show("فشل إيقاف السائق من الـ API", false);
+        return;
+      }
+      // 2. Firestore approved_agents — set status=offline immediately
+      await syncAgentFirestore(phone, 'offline');
+      toast.show(`✓ تم إيقاف السائق ${name}`);
+      load();
+    } catch { toast.show("خطأ في الاتصال", false); }
+    finally { setOfflining(null); }
   };
 
   const fmtTime = (iso: string) => {
@@ -1404,11 +1450,14 @@ function DriversTab({ toast }: { toast: ReturnType<typeof useToast> }) {
               }}>
                 {dr.isBusy ? "🔴 في رحلة" : dr.isOnline ? "🟢 متاح" : "⚫ غير متصل"}
               </div>
+              {/* Buttons */}
+              <div style={{ display: "flex", flexDirection: "column", gap: "5px" }}>
               {/* Force-free button — only when busy */}
+              {/* Force-free: reset isBusy + sync Firestore → available */}
               {dr.isBusy && (
                 <button
                   disabled={busying === dr.locationId}
-                  onClick={() => forceFree(dr.locationId, dr.driverName)}
+                  onClick={() => forceFree(dr.locationId, dr.driverName, dr.phone)}
                   style={{
                     padding: "7px 14px", background: `${C.yellow}15`, border: `1px solid ${C.yellow}55`,
                     color: C.yellow, fontFamily: "Orbitron, sans-serif", fontSize: "9px",
@@ -1419,6 +1468,22 @@ function DriversTab({ toast }: { toast: ReturnType<typeof useToast> }) {
                   {busying === dr.locationId ? "..." : "⚡ فك الانشغال"}
                 </button>
               )}
+              {/* Force-offline: set isOnline=false + sync Firestore → offline */}
+              {dr.isOnline && (
+                <button
+                  disabled={offlining === dr.locationId}
+                  onClick={() => forceOffline(dr.locationId, dr.driverName, dr.phone)}
+                  style={{
+                    padding: "7px 14px", background: `${C.red}15`, border: `1px solid ${C.red}55`,
+                    color: C.red, fontFamily: "Orbitron, sans-serif", fontSize: "9px",
+                    letterSpacing: "0.08em", cursor: "pointer", borderRadius: "2px",
+                    opacity: offlining === dr.locationId ? 0.5 : 1,
+                  }}
+                >
+                  {offlining === dr.locationId ? "..." : "🔴 إيقاف السائق"}
+                </button>
+              )}
+              </div>{/* end buttons */}
             </div>
           ))}
         </div>
