@@ -786,6 +786,13 @@ export function ClinicMap({
   const [loopCurrentDriverDist, setLoopCurrentDriverDist] = useState<number|null>(null); // km to the driver currently being tried
   const loopInitDistRef    = useRef<number|null>(null);   // distance to first auto-found driver
 
+  // ── Live Firestore Sets for real-time driver availability ─────────────────
+  // Updated by onSnapshot listeners (started when loopActive=true).
+  // null  = listener not yet fired / collection unreachable → gate skipped
+  // Set   = phones currently passing that gate
+  const liveOnlineDriverPhonesRef   = useRef<Set<string> | null>(null);  // drivers col
+  const liveAvailableAgentPhonesRef = useRef<Set<string> | null>(null);  // approved_agents col
+
   const activeOrderIdRef    = useRef<number|null>(null);
   const activeOrderStatusRef= useRef<string>('pending');            // mirrors activeOrderStatus for DOM handlers
   const seenSnackIdsRef     = useRef<Set<string|number>>(new Set()); // system msgs already snackbar'd
@@ -1722,17 +1729,15 @@ export function ClinicMap({
           userLat: loc.lat, userLng: loc.lng, driverLat: d.lat, driverLng: d.lng,
         })));
 
-        // ── Dual Firestore cross-check (approved_agents ∩ drivers) ───────────
-        // Gate 1 — approved_agents: status='available' AND isOnline=true
-        //   (admin-managed, also updated by syncOrderToFirestore on trip events)
-        // Gate 2 — drivers col: isOnline=true
-        //   (partner app's authoritative live-status; set false when app closes)
-        // A driver must pass BOTH gates to be routed. Both queries run in parallel.
-        const { phones: filteredPhones, source: filterSource } = await getFilteredDriverPhones();
+        // ── Live dual-gate cross-check (approved_agents ∩ drivers) ─────────
+        // getLiveFilteredPhones() reads the two onSnapshot Sets synchronously —
+        // they are kept current in real-time, so an offline driver disappears
+        // from the Set within milliseconds of closing the partner app.
+        const { phones: filteredPhones, source: filterSource } = getLiveFilteredPhones();
         const fsFiltered = filteredPhones !== null
           ? drivers.filter(d => filteredPhones.has((d.phone ?? '').trim()))
-          : drivers; // both gates down → trust REST only
-        console.log(`[autoFindDriver] Firestore dual-gate (${filterSource}): ${fsFiltered.length}/${drivers.length} pass`);
+          : drivers; // both gates null → trust REST only
+        console.log(`[autoFindDriver] live dual-gate (${filterSource}): ${fsFiltered.length}/${drivers.length} pass`);
 
         // ── Fixed radius, sorted nearest-first ───────────────────────────────
         const SEARCH_RADIUS_KM = 10; // ⚠ TESTING: temporarily 10 km (was 2 km)
@@ -2448,6 +2453,86 @@ export function ClinicMap({
   // ── Keep activeDriverPhoneRef current (safe for useCallback closures) ────────
   useEffect(() => { activeDriverPhoneRef.current = activeDriverPhone; }, [activeDriverPhone]);
 
+  // ── Live Firestore listeners for driver availability (active while loop runs) ─
+  // Both listeners fire within milliseconds of any field change in Firestore.
+  // If a driver closes the partner app during a search, their UID doc flips
+  // isOnline=false → liveOnlineDriverPhonesRef loses their phone immediately →
+  // the next routing call (autoFindDriver / redirectToNextDriver) skips them.
+  useEffect(() => {
+    if (!loopActive) {
+      // Clear stale sets when loop stops so next session starts fresh
+      liveOnlineDriverPhonesRef.current   = null;
+      liveAvailableAgentPhonesRef.current = null;
+      return;
+    }
+
+    // Gate 2 — drivers collection: isOnline=true (partner-app authoritative)
+    const unsubDrivers = onSnapshot(
+      query(collection(db, 'drivers'), where('isOnline', '==', true)),
+      (snap) => {
+        const phones = new Set<string>();
+        snap.forEach(d => {
+          const p = d.data().phone as string | undefined;
+          if (p) phones.add(p.trim());
+        });
+        // If docs exist but none carry phone field, keep null (skip this gate)
+        liveOnlineDriverPhonesRef.current =
+          (phones.size > 0 || snap.empty) ? phones : null;
+        console.log(`[LiveFilter/drivers] isOnline=true phones: ${phones.size}`, [...phones]);
+      },
+      (err) => {
+        console.warn('[LiveFilter/drivers] snapshot error:', err?.code);
+        liveOnlineDriverPhonesRef.current = null;
+      },
+    );
+
+    // Gate 1 — approved_agents: status='available' AND isOnline=true (admin-managed)
+    const unsubAgents = onSnapshot(
+      query(
+        collection(db, 'approved_agents'),
+        where('status',   '==', 'available'),
+        where('isOnline', '==', true),
+      ),
+      (snap) => {
+        const phones = new Set<string>();
+        snap.forEach(d => {
+          const p = d.data().phone as string | undefined;
+          if (p) phones.add(p.trim());
+        });
+        liveAvailableAgentPhonesRef.current = phones;
+        console.log(`[LiveFilter/approved_agents] available+online phones: ${phones.size}`, [...phones]);
+      },
+      (err) => {
+        console.warn('[LiveFilter/approved_agents] snapshot error:', err?.code);
+        liveAvailableAgentPhonesRef.current = null;
+      },
+    );
+
+    return () => { unsubDrivers(); unsubAgents(); };
+  }, [loopActive]);
+
+  // ── Read live phone Sets synchronously (no await needed) ──────────────────
+  // Returns intersection of both gates, or falls back gracefully if either is null.
+  const getLiveFilteredPhones = useCallback((): { phones: Set<string> | null; source: string } => {
+    const agentPhones  = liveAvailableAgentPhonesRef.current;
+    const driverPhones = liveOnlineDriverPhonesRef.current;
+
+    if (agentPhones === null && driverPhones === null)
+      return { phones: null, source: 'REST-only (both gates null)' };
+    if (driverPhones === null)
+      return { phones: agentPhones, source: 'approved_agents only' };
+    if (agentPhones === null)
+      return { phones: driverPhones, source: 'drivers col only' };
+
+    // Both available → INTERSECTION (must pass both gates)
+    const intersection = new Set<string>();
+    agentPhones.forEach(p => { if (driverPhones.has(p)) intersection.add(p); });
+    return {
+      phones: intersection,
+      source: `intersection (${agentPhones.size}×${driverPhones.size}→${intersection.size})`,
+    };
+  }, []);
+
   // ── Sync Firestore order doc — called after REST/SSE status change ─────────
   // This bridges the REST-based order system to Firestore so ActiveOrderTracker
   // (which watches Firestore) can show the live driver marker + route polyline.
@@ -2809,12 +2894,12 @@ export function ClinicMap({
           ignored: loopIgnoredRef.current.has(d.locationId),
         })));
 
-      // ── Dual Firestore cross-check (approved_agents ∩ drivers) ───────────
-      const { phones: filteredPhones2, source: filterSource2 } = await getFilteredDriverPhones();
+      // ── Live dual-gate cross-check (approved_agents ∩ drivers) ─────────
+      const { phones: filteredPhones2, source: filterSource2 } = getLiveFilteredPhones();
       const fsFiltered = filteredPhones2 !== null
         ? drivers.filter(d => filteredPhones2.has((d.phone ?? '').trim()))
-        : drivers; // both gates down → trust REST only
-      console.log(`[redirectToNext] Firestore dual-gate (${filterSource2}): ${fsFiltered.length}/${drivers.length} pass`);
+        : drivers; // both gates null → trust REST only
+      console.log(`[redirectToNext] live dual-gate (${filterSource2}): ${fsFiltered.length}/${drivers.length} pass`);
 
       // Exclude already-tried drivers, filter to radius, sort nearest-first
       const available = fsFiltered
