@@ -5,10 +5,10 @@ import {
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 
-// ── Unified Firestore path — MUST match partner-hub exactly ──────────────────
-// Customer writes:  chats/{orderId}/messages  { senderId, receiverId, text, timestamp }
-// Agent reads from: chats/{orderId}/messages  (same path, same fields)
-const CHAT_COL = (id: number) => ['chats', String(id), 'messages'] as const;
+// ── Unified Firestore path — MUST match partner-hub (Flutter) exactly ────────
+// gas_bookings/{orderId}/chats  { senderId, receiverId, text, timestamp }
+// Partner app writes to this path — web app must read/write the SAME path
+const CHAT_COL = (id: number) => ['gas_bookings', String(id), 'chats'] as const;
 
 // ── Unified display message ───────────────────────────────────────────────
 interface GasMsg {
