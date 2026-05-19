@@ -349,6 +349,54 @@ export function ClinicMap({
     showDoctorClosedRef.current  = () => setDoctorClosedAlert(true);
   },[]);
 
+  // ── Live Firestore listener: track offline gas merchants ─────────────────
+  // Partner app writes: merchants/{uid} → { isOnline, status }
+  // Admin creates:      merchants/{locationId} → { uid, category, isOnline, status }
+  // We resolve both doc-ID shapes so the filter always works.
+  useEffect(()=>{
+    const unsub = onSnapshot(collection(db, 'merchants'), (snap) => {
+      // 1. Build uid → locationId map from admin-created docs (numeric IDs)
+      const uidMap = new Map<string, number>();
+      snap.docs.forEach(d => {
+        const locId = Number(d.id);
+        const uid   = d.data()?.uid as string | undefined;
+        if (!isNaN(locId) && uid) uidMap.set(uid, locId);
+      });
+      uidToLocIdRef.current = uidMap;
+
+      // 2. Build offline set — any gas merchant with isOnline:false OR status offline/مغلق
+      const offline = new Set<number>();
+      snap.docs.forEach(d => {
+        const data = d.data() ?? {};
+        const cat  = String(data.category ?? '').toLowerCase();
+        const isGas = cat === 'gas_station' || cat === 'gas' || cat === 'غاز' || cat.includes('gas');
+        if (!isGas) return;
+
+        const isOffline =
+          data.isOnline === false ||
+          data.status === 'offline' ||
+          data.status === 'مغلق';
+        if (!isOffline) return;
+
+        // Case A: doc ID is the numeric locationId (admin-created)
+        const docLocId = Number(d.id);
+        if (!isNaN(docLocId)) offline.add(docLocId);
+
+        // Case B: doc ID is the Firebase UID (partner-app-created)
+        if (isNaN(Number(d.id)) && uidMap.has(d.id)) offline.add(uidMap.get(d.id)!);
+
+        // Case C: doc has a uid field — resolve through uidMap
+        if (data.uid && uidMap.has(data.uid)) offline.add(uidMap.get(data.uid)!);
+      });
+
+      gasOfflineIdsRef.current = offline;
+      console.log(`[GasMerchants] offline IDs:`, [...offline]);
+    }, (err) => {
+      console.warn('[GasMerchants] Firestore listener error:', err?.code);
+    });
+    return () => unsub();
+  }, []);
+
   // Bridge: Leaflet popup button → open taxi routing flow
   useEffect(()=>{
     setTaxiItemRef.current = (item: MapItem) => {
@@ -725,6 +773,11 @@ export function ClinicMap({
   // ── Doctor-closed alert dialog ───────────────────────────────────────────
   const [doctorClosedAlert,  setDoctorClosedAlert]  = useState(false);
   const showDoctorClosedRef = useRef<(()=>void)|null>(null);
+
+  // ── Gas form bridge ref + offline merchants tracker ──────────────────────
+  const openGasFormRef      = useRef<(()=>void)|null>(null);
+  const gasOfflineIdsRef    = useRef<Set<number>>(new Set());   // locationIds offline in Firestore
+  const uidToLocIdRef       = useRef<Map<string, number>>(new Map()); // uid → locationId
 
   // Bridge refs — stable handles for Leaflet DOM callbacks & map click
   const setTaxiItemRef    = useRef<((item:MapItem)=>void)|null>(null);
@@ -1412,6 +1465,78 @@ export function ClinicMap({
       el.appendChild(taxiBtn);
     }
 
+    // ── Gas order button — checks Firestore merchants status ─────────────────
+    // isGasCat defined in outer scope; uses gasOfflineIdsRef for live status
+    const isGasItem =
+      item.kind === 'gas_station' || item.kind === 'gas' || item.kind === 'غاز' ||
+      (catMapRef.current.get(item.kind)?.labelEn ?? '').toLowerCase().includes('gas') ||
+      (catMapRef.current.get(item.kind)?.labelAr ?? '').includes('غاز');
+
+    if (isGasItem) {
+      const gasSep = document.createElement('div');
+      gasSep.style.cssText = 'height:1px;background:rgba(245,197,24,0.15);margin:8px 0 6px;';
+      el.appendChild(gasSep);
+
+      const gasBtn = document.createElement('button');
+      gasBtn.className = 'popup-gas-btn';
+      gasBtn.disabled  = true;
+      gasBtn.innerHTML = `<svg width="12" height="12" viewBox="0 0 28 28" fill="none" style="animation:lf-spin 0.9s linear infinite;flex-shrink:0"><circle cx="14" cy="14" r="10" stroke="#f5c518" stroke-width="2.5" stroke-dasharray="22 14" stroke-linecap="round"/></svg>جاري التحقق...`;
+      gasBtn.style.cssText = 'display:flex;align-items:center;gap:7px;width:100%;padding:8px 12px;background:rgba(245,197,24,0.06);border:1px solid rgba(245,197,24,0.3);color:rgba(245,197,24,0.5);font-family:Rajdhani,sans-serif;font-size:13px;font-weight:600;cursor:not-allowed;border-radius:0;';
+      el.appendChild(gasBtn);
+
+      // 1. Instant check from the live ref (set by onSnapshot listener)
+      const applyGasStatus = (agentOnline: boolean) => {
+        const badge = document.getElementById(statusBadgeId);
+        if (agentOnline) {
+          gasBtn.disabled = false;
+          gasBtn.innerHTML = `⛽ اطلب غاز الآن`;
+          gasBtn.style.background  = 'rgba(245,197,24,0.12)';
+          gasBtn.style.border      = '1px solid rgba(245,197,24,0.6)';
+          gasBtn.style.color       = '#f5c518';
+          gasBtn.style.cursor      = 'pointer';
+          gasBtn.style.boxShadow   = '0 0 10px rgba(245,197,24,0.18)';
+          gasBtn.addEventListener('click', () => {
+            openGasFormRef.current?.();
+            mapRef.current?.closePopup();
+          });
+        } else {
+          gasBtn.disabled = false;
+          gasBtn.innerHTML = `🔴 الوكيل غير متاح حالياً`;
+          gasBtn.style.background  = 'rgba(255,45,120,0.07)';
+          gasBtn.style.border      = '1px solid rgba(255,45,120,0.35)';
+          gasBtn.style.color       = '#ff2d78';
+          gasBtn.style.cursor      = 'default';
+          // Update status badge in popup
+          if (badge) {
+            badge.style.border     = '1px solid rgba(255,45,120,0.5)';
+            badge.style.background = 'rgba(255,45,120,0.10)';
+            badge.innerHTML = `<div style="width:8px;height:8px;border-radius:50%;background:#ff2d78;box-shadow:0 0 8px #ff2d78;flex-shrink:0;"></div><span style="font-family:Rajdhani,sans-serif;font-size:14px;font-weight:700;color:#ff2d78;letter-spacing:0.04em;">الوكيل مغلق حالياً 🔴</span>`;
+          }
+        }
+      };
+
+      // 2. Check live ref first (instant, no network call)
+      if (gasOfflineIdsRef.current.size > 0 || true) {
+        // Always do Firestore check to get freshest data
+        // Also resolve by uid in case partner-app wrote to merchants/{uid}
+        getDoc(doc(db, 'merchants', String(item.id)))
+          .then(snap => {
+            const data = snap.data() ?? {};
+            // Offline if: explicitly false/offline, OR in our live ref
+            const firestoreOffline =
+              data.isOnline === false ||
+              data.status === 'offline' ||
+              data.status === 'مغلق';
+            const refOffline = gasOfflineIdsRef.current.has(item.id);
+            applyGasStatus(!(firestoreOffline || refOffline));
+          })
+          .catch(() => {
+            // Fallback: use ref only
+            applyGasStatus(!gasOfflineIdsRef.current.has(item.id));
+          });
+      }
+    }
+
     if (adminModeRef.current) {
       const sep=document.createElement('div');
       sep.style.cssText='height:1px;background:rgba(255,45,120,0.2);margin:8px 0 6px;';
@@ -1652,6 +1777,9 @@ export function ClinicMap({
     }
     setShowGasForm(true);
   }, []);
+
+  // Keep bridge ref current so buildPopup can call openGasForm
+  useEffect(() => { openGasFormRef.current = openGasForm; }, [openGasForm]);
 
   const submitGasOrder = useCallback(async ()=>{
     const name  = taxiUserName.trim();
