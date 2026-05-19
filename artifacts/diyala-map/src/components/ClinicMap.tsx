@@ -19,11 +19,8 @@ import { auth, db } from '@/lib/firebase';
 import { getUserFromStorage } from '@/components/UserLoginOverlay';
 import { useDoctorGeofence } from '@/hooks/useDoctorGeofence';
 
-// ── Fetch phones of AVAILABLE + ONLINE agents from Firestore ─────────────
-// Returns a Set of phone strings, or null if Firestore is unreachable.
-// Requires BOTH status='available' AND isOnline=true so a driver who closed
-// the partner app (isOnline=false) is excluded even if REST cache still shows
-// them as online (stale PostgreSQL row).
+// ── Cross-check 1: approved_agents (status='available' AND isOnline=true) ──
+// Populated by the admin dashboard and by syncOrderToFirestore() in ClinicMap.
 async function getAvailableAgentPhones(): Promise<Set<string> | null> {
   try {
     const snap = await getDocs(
@@ -38,13 +35,87 @@ async function getAvailableAgentPhones(): Promise<Set<string> | null> {
       const p = d.data().phone as string | undefined;
       if (p) phones.add(p.trim());
     });
-    console.log(`[DriverFilter] Firestore available+online agents: ${phones.size}`, [...phones]);
+    console.log(`[DriverFilter/approved_agents] online+available: ${phones.size}`, [...phones]);
     return phones;
   } catch (e: any) {
-    // Non-fatal: if Firestore is unreachable, fall back to REST-only filtering
-    console.warn('[DriverFilter] Firestore unavailable — skipping status cross-check:', e?.code);
+    console.warn('[DriverFilter/approved_agents] unreachable:', e?.code);
     return null;
   }
+}
+
+// ── Cross-check 2: drivers collection (partner app's authoritative source) ──
+// The Flutter partner app writes isOnline=true/false to drivers/{uid} when the
+// driver opens/closes the app.  This collection is the ground truth for online
+// status. We build a phone-Set from docs that are currently isOnline=true so we
+// can intersect with the REST result and exclude genuinely offline drivers.
+// Returns null if the collection is unreachable OR if no docs carry a 'phone'
+// field (in which case the caller should skip this filter rather than blocking
+// all drivers).
+async function getOnlineDriverPhones(): Promise<Set<string> | null> {
+  try {
+    // Query only isOnline=true — we deliberately do NOT filter status here
+    // because partner apps may use different status strings ('available', 'idle',
+    // 'online', etc.).  The isOnline flag is the single reliable signal.
+    const snap = await getDocs(
+      query(
+        collection(db, 'drivers'),
+        where('isOnline', '==', true),
+      )
+    );
+    const phones = new Set<string>();
+    snap.forEach(d => {
+      const p = d.data().phone as string | undefined;
+      if (p) phones.add(p.trim());
+    });
+    // If NO doc has a phone field the Set is empty — return null so the caller
+    // falls back to approved_agents-only filtering instead of blocking everyone.
+    if (phones.size === 0 && snap.size > 0) {
+      console.warn('[DriverFilter/drivers] docs exist but none have phone field — skipping drivers cross-check');
+      return null;
+    }
+    console.log(`[DriverFilter/drivers] isOnline=true with phone: ${phones.size}`, [...phones]);
+    return phones;
+  } catch (e: any) {
+    console.warn('[DriverFilter/drivers] unreachable:', e?.code);
+    return null;
+  }
+}
+
+// ── Combined filter: driver must pass BOTH cross-checks to be routed ─────────
+// Uses Promise.all for a single parallel round-trip to Firestore.
+// Logic:
+//   approved_agents says available+online  → first gate (admin-side state)
+//   drivers says isOnline=true             → second gate (partner-app live state)
+// A driver is blocked if EITHER gate says they are unavailable/offline.
+// If a gate is unreachable (returns null) it is skipped (fail-open for that gate).
+async function getFilteredDriverPhones(): Promise<{
+  phones: Set<string> | null;
+  source: string;
+}> {
+  const [agentPhones, driverPhones] = await Promise.all([
+    getAvailableAgentPhones(),
+    getOnlineDriverPhones(),
+  ]);
+
+  // Both unavailable — fall back to REST-only
+  if (agentPhones === null && driverPhones === null) {
+    return { phones: null, source: 'REST-only (both Firestore gates down)' };
+  }
+
+  // Only approved_agents available
+  if (driverPhones === null) {
+    return { phones: agentPhones, source: 'approved_agents only' };
+  }
+
+  // Only drivers col available
+  if (agentPhones === null) {
+    return { phones: driverPhones, source: 'drivers col only' };
+  }
+
+  // Both available → INTERSECTION (must pass both gates)
+  const intersection = new Set<string>();
+  agentPhones.forEach(p => { if (driverPhones.has(p)) intersection.add(p); });
+  return { phones: intersection, source: `intersection (${agentPhones.size}×${driverPhones.size}→${intersection.size})` };
 }
 
 // ── Haversine distance (km) between two lat/lng points ────────────────────
@@ -1651,16 +1722,17 @@ export function ClinicMap({
           userLat: loc.lat, userLng: loc.lng, driverLat: d.lat, driverLng: d.lng,
         })));
 
-        // ── Cross-check Firestore approved_agents status ─────────────────────
-        // Firestore is the authoritative source for driver availability.
-        // REST API guarantees isOnline=true & isBusy=false at DB level,
-        // but Firestore may show "offline" / "on_trip" if driver status changed
-        // without the partner app calling the REST offline endpoint.
-        const availablePhones = await getAvailableAgentPhones();
-        const fsFiltered = availablePhones !== null
-          ? drivers.filter(d => availablePhones.has((d.phone ?? '').trim()))
-          : drivers; // fallback: Firestore unreachable → trust REST only
-        console.log(`[autoFindDriver] after Firestore cross-check: ${fsFiltered.length}/${drivers.length} driver(s) have status=available`);
+        // ── Dual Firestore cross-check (approved_agents ∩ drivers) ───────────
+        // Gate 1 — approved_agents: status='available' AND isOnline=true
+        //   (admin-managed, also updated by syncOrderToFirestore on trip events)
+        // Gate 2 — drivers col: isOnline=true
+        //   (partner app's authoritative live-status; set false when app closes)
+        // A driver must pass BOTH gates to be routed. Both queries run in parallel.
+        const { phones: filteredPhones, source: filterSource } = await getFilteredDriverPhones();
+        const fsFiltered = filteredPhones !== null
+          ? drivers.filter(d => filteredPhones.has((d.phone ?? '').trim()))
+          : drivers; // both gates down → trust REST only
+        console.log(`[autoFindDriver] Firestore dual-gate (${filterSource}): ${fsFiltered.length}/${drivers.length} pass`);
 
         // ── Fixed radius, sorted nearest-first ───────────────────────────────
         const SEARCH_RADIUS_KM = 10; // ⚠ TESTING: temporarily 10 km (was 2 km)
@@ -2737,12 +2809,12 @@ export function ClinicMap({
           ignored: loopIgnoredRef.current.has(d.locationId),
         })));
 
-      // ── Cross-check Firestore approved_agents status ──────────────────────
-      const availablePhones = await getAvailableAgentPhones();
-      const fsFiltered = availablePhones !== null
-        ? drivers.filter(d => availablePhones.has((d.phone ?? '').trim()))
-        : drivers; // fallback: Firestore unreachable → trust REST only
-      console.log(`[redirectToNext] after Firestore cross-check: ${fsFiltered.length}/${drivers.length} driver(s) have status=available`);
+      // ── Dual Firestore cross-check (approved_agents ∩ drivers) ───────────
+      const { phones: filteredPhones2, source: filterSource2 } = await getFilteredDriverPhones();
+      const fsFiltered = filteredPhones2 !== null
+        ? drivers.filter(d => filteredPhones2.has((d.phone ?? '').trim()))
+        : drivers; // both gates down → trust REST only
+      console.log(`[redirectToNext] Firestore dual-gate (${filterSource2}): ${fsFiltered.length}/${drivers.length} pass`);
 
       // Exclude already-tried drivers, filter to radius, sort nearest-first
       const available = fsFiltered
