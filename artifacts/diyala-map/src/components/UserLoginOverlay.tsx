@@ -5,7 +5,7 @@ import {
   onAuthStateChanged,
   type ConfirmationResult,
 } from 'firebase/auth';
-import { doc, setDoc, getDoc, serverTimestamp } from 'firebase/firestore';
+import { doc, setDoc, updateDoc, getDoc, serverTimestamp } from 'firebase/firestore';
 import { auth, db } from '@/lib/firebase';
 
 const STORAGE_KEY = 'diyala_user';
@@ -84,6 +84,41 @@ const S: Record<string, React.CSSProperties> = {
   },
 };
 
+// ── Firestore safe write: check-first, then update or create ─────────────────
+// NEVER overwrites balance or any field not explicitly listed.
+// Existing user → updateDoc (only name/phone/lastLogin)
+// New user      → setDoc with balance:0 initial state
+async function safeWriteUserDoc(uid: string, name: string, phone: string) {
+  const ref = doc(db, 'users', uid);
+  try {
+    const snap = await getDoc(ref);
+    if (snap.exists()) {
+      // ── EXISTING USER: only update non-financial fields ────────────────────
+      // balance, role, createdAt — NEVER touched here.
+      await updateDoc(ref, {
+        name,
+        phone,
+        lastLogin: serverTimestamp(),
+      });
+      console.log('[PhoneAuth] existing user doc updated (balance preserved)');
+    } else {
+      // ── NEW USER: create document with zero balance for the first time ──────
+      await setDoc(ref, {
+        uid,
+        name,
+        phone,
+        balance:   0,
+        role:      'user',
+        createdAt: serverTimestamp(),
+        lastLogin: serverTimestamp(),
+      });
+      console.log('[PhoneAuth] new user doc created (balance=0)');
+    }
+  } catch (e: any) {
+    console.warn('[PhoneAuth] Firestore user doc write failed (non-critical):', e?.code, e?.message);
+  }
+}
+
 export function UserLoginOverlay({ onLogin }: { onLogin: (u: DiyalaUser) => void }) {
   const [visible,   setVisible]   = useState(false);
   const [step,      setStep]      = useState<Step>('phone');
@@ -107,17 +142,15 @@ export function UserLoginOverlay({ onLogin }: { onLogin: (u: DiyalaUser) => void
   };
 
   // ── Create & pre-render an invisible RecaptchaVerifier ───────────────────
-  // Called as early as possible so Google has time to silently verify the user
-  // before they click "Send OTP". This prevents the visual challenge pop-up.
   const initRecaptcha = async () => {
-    if (captchaRef.current) return; // already initialised
+    if (captchaRef.current) return;
     try {
       const v = new RecaptchaVerifier(auth, 'rcv-container', {
-        size: 'invisible',           // ← never shows a checkbox to the user
-        callback:          () => { console.log('[PhoneAuth] reCAPTCHA ✓ solved silently'); },
-        'expired-callback':() => { console.warn('[PhoneAuth] reCAPTCHA expired — will reinit'); clearRecaptcha(); },
+        size: 'invisible',
+        callback:           () => { console.log('[PhoneAuth] reCAPTCHA ✓ solved silently'); },
+        'expired-callback': () => { console.warn('[PhoneAuth] reCAPTCHA expired — will reinit'); clearRecaptcha(); },
       });
-      await v.render(); // pre-render so the token is ready when signIn is called
+      await v.render();
       captchaRef.current = v;
       console.log('[PhoneAuth] reCAPTCHA initialised early ✓');
     } catch (e) {
@@ -126,25 +159,39 @@ export function UserLoginOverlay({ onLogin }: { onLogin: (u: DiyalaUser) => void
   };
 
   // ── Auth-state listener (runs on mount) ──────────────────────────────────
+  // Always reads from Firestore — never trusts localStorage alone for login.
+  // This guarantees balance and other server-side fields are always fresh.
   useEffect(() => {
-    // Kick off reCAPTCHA immediately — gives Google the most time to analyse
-    // the user silently, minimising the chance of a visual challenge.
     initRecaptcha();
 
     const unsub = onAuthStateChanged(auth, async (fbUser) => {
       if (fbUser) {
-        const saved = getUserFromStorage();
-        if (saved?.name && saved?.phone && saved?.uid === fbUser.uid) {
-          onLogin(saved); return;
-        }
         try {
+          // ── Always fetch from Firestore to get the latest balance/role ──────
           const snap = await getDoc(doc(db, 'users', fbUser.uid));
           if (snap.exists()) {
-            const data = snap.data() as DiyalaUser;
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
-            onLogin(data); return;
+            const data = snap.data();
+            // Merge Firestore data (full) into localStorage so balance is cached
+            const merged: DiyalaUser = {
+              name:  data.name  ?? '',
+              phone: data.phone ?? '',
+              uid:   fbUser.uid,
+              ...data,  // includes balance, role, etc.
+            };
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(merged));
+            onLogin(merged);
+            return;
           }
-        } catch { /* fall through → show form */ }
+          // User in Firebase Auth but no Firestore doc yet → fall through to form
+        } catch {
+          // Firestore unreachable — fall back to localStorage if available
+          const saved = getUserFromStorage();
+          if (saved?.name && saved?.phone) {
+            onLogin({ ...saved, uid: fbUser.uid });
+            return;
+          }
+          // Firestore AND localStorage both unavailable → show form
+        }
       }
       setVisible(true);
     });
@@ -175,7 +222,6 @@ export function UserLoginOverlay({ onLogin }: { onLogin: (u: DiyalaUser) => void
 
     setLoading(true); setError(null);
     try {
-      // Ensure verifier is ready (may already be from early init)
       if (!captchaRef.current) await initRecaptcha();
       const verifier = captchaRef.current!;
 
@@ -187,13 +233,8 @@ export function UserLoginOverlay({ onLogin }: { onLogin: (u: DiyalaUser) => void
       setCountdown(60);
       console.log('[PhoneAuth] OTP dispatched ✓');
     } catch (e: any) {
-      console.error('[PhoneAuth] sendOtp FAILED ▼', {
-        code:    e?.code,
-        message: e?.message,
-        full:    e,
-      });
+      console.error('[PhoneAuth] sendOtp FAILED ▼', { code: e?.code, message: e?.message });
       clearRecaptcha();
-      // Re-init for next attempt
       setTimeout(() => initRecaptcha(), 300);
 
       if      (e?.code === 'auth/too-many-requests')     setError('طلبات كثيرة جداً، انتظر قليلاً ثم أعد المحاولة');
@@ -208,47 +249,31 @@ export function UserLoginOverlay({ onLogin }: { onLogin: (u: DiyalaUser) => void
 
   // ── Verify OTP ────────────────────────────────────────────────────────────
   const verifyOtp = async () => {
-    if (otp.length < 6)        { setError('الرجاء إدخال الرمز المكوّن من 6 أرقام'); return; }
-    if (!confirmRef.current)   { setError('انتهت الجلسة، أعد إرسال الرمز'); return; }
+    if (otp.length < 6)       { setError('الرجاء إدخال الرمز المكوّن من 6 أرقام'); return; }
+    if (!confirmRef.current)  { setError('انتهت الجلسة، أعد إرسال الرمز'); return; }
     setLoading(true); setError(null);
     try {
       console.log('[PhoneAuth] confirming OTP...');
       const cred = await confirmRef.current.confirm(otp);
       const uid  = cred.user.uid;
       console.log('[PhoneAuth] UID:', uid);
-      const user: DiyalaUser = { name: name.trim(), phone: phone.trim(), uid };
 
-      // ① Save to localStorage immediately — onAuthStateChanged may fire before
-      //    Firestore write completes, so this ensures the listener can read the name.
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(user));
-
-      // ② Navigate right away — never block on Firestore.
+      // ① Navigate immediately — never block the user on Firestore writes
+      const localUser: DiyalaUser = { name: name.trim(), phone: phone.trim(), uid };
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(localUser));
       setStep('done');
       setVisible(false);
-      onLogin(user);
+      onLogin(localUser);
 
-      // ③ Write to Firestore in the background (non-blocking).
-      //    If Security Rules reject this, the user is still on the map.
-      setDoc(doc(db, 'users', uid), {
-        name:      user.name,
-        phone:     user.phone,
-        uid,
-        createdAt: serverTimestamp(),
-      }, { merge: true }).catch(e => {
-        console.warn('[PhoneAuth] Firestore setDoc failed (non-critical):', e?.code, e?.message);
-      });
+      // ② Firestore write in background — check-first, NEVER overwrite balance
+      safeWriteUserDoc(uid, name.trim(), phone.trim());
 
     } catch (e: any) {
-      console.error('[PhoneAuth] verifyOtp FAILED ▼', {
-        code:    e?.code,
-        message: e?.message,
-        full:    e,
-      });
+      console.error('[PhoneAuth] verifyOtp FAILED ▼', { code: e?.code, message: e?.message });
       if      (e?.code === 'auth/invalid-verification-code') setError('الرمز غير صحيح، تأكد من الأرقام');
       else if (e?.code === 'auth/code-expired')              setError('انتهت صلاحية الرمز، اضغط "إعادة الإرسال"');
       else setError(`خطأ Firebase: ${e?.code ?? e?.message ?? 'unknown'}`);
     } finally {
-      // Always unblock the UI — runs whether confirm() succeeded, failed, or hung.
       setLoading(false);
     }
   };
@@ -263,7 +288,6 @@ export function UserLoginOverlay({ onLogin }: { onLogin: (u: DiyalaUser) => void
   };
 
   // ── The reCAPTCHA anchor is ALWAYS in the DOM (never removed) ─────────────
-  // This gives Google maximum time to silently verify the user before submit.
   const captchaAnchor = (
     <div
       id="rcv-container"
