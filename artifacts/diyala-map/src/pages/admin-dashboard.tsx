@@ -1336,6 +1336,44 @@ async function syncAgentFirestore(phone: string, status: 'available' | 'offline'
   }
 }
 
+// ── Firestore helper: update drivers/{uid} by phone lookup ───────────────────
+// Partner app reads this doc to decide whether to show "online" state.
+async function syncDriversFirestore(phone: string, status: 'available' | 'offline') {
+  if (!phone) return;
+  try {
+    const snap = await getDocs(query(collection(db, 'drivers'), where('phone', '==', phone)));
+    if (snap.empty) {
+      console.log(`[syncDriversFirestore] no drivers doc for phone=${phone}`);
+      return;
+    }
+    const isOnline = status === 'available';
+    await Promise.all(snap.docs.map(d => updateDoc(d.ref, {
+      status,
+      isOnline,
+      currentTripId: null,
+    })));
+    console.log(`[syncDriversFirestore] phone=${phone} → ${status} (${snap.docs.length} doc(s))`);
+  } catch (e) {
+    console.warn('[syncDriversFirestore] failed:', e);
+  }
+}
+
+// ── Firestore helper: update merchants/{locationId} ──────────────────────────
+// Gas offline filter in ClinicMap reads this collection via onSnapshot.
+async function syncMerchantFirestore(locationId: number, status: 'available' | 'offline') {
+  if (!locationId) return;
+  try {
+    const isOnline = status === 'available';
+    await setDoc(doc(db, 'merchants', String(locationId)), {
+      isOnline,
+      status,
+    }, { merge: true });
+    console.log(`[syncMerchantFirestore] locationId=${locationId} → ${status}`);
+  } catch (e) {
+    console.warn('[syncMerchantFirestore] failed:', e);
+  }
+}
+
 function DriversTab({ toast }: { toast: ReturnType<typeof useToast> }) {
   const [drivers, setDrivers] = useState<OnlineDriver[]>([]);
   const [loading, setLoading] = useState(true);
@@ -1353,7 +1391,7 @@ function DriversTab({ toast }: { toast: ReturnType<typeof useToast> }) {
 
   useEffect(() => { load(); const iv = setInterval(load, 8000); return () => clearInterval(iv); }, [load]);
 
-  // ── Force-free: reset isBusy in PostgreSQL + Firestore approved_agents ───────
+  // ── Force-free: reset isBusy in PostgreSQL + all Firestore collections ────────
   const forceFree = async (locationId: number, name: string, phone: string) => {
     setBusying(locationId);
     try {
@@ -1363,8 +1401,12 @@ function DriversTab({ toast }: { toast: ReturnType<typeof useToast> }) {
         body: JSON.stringify({ busy: false }),
       }).then(r => r.json());
       if (r.ok) {
-        // Mirror to Firestore so driver app exits "في رحلة" screen
-        await syncAgentFirestore(phone, 'available');
+        // Mirror to ALL Firestore collections simultaneously
+        await Promise.all([
+          syncAgentFirestore(phone, 'available'),          // approved_agents (taxi filter)
+          syncDriversFirestore(phone, 'available'),        // drivers/{uid}   (partner app state)
+          syncMerchantFirestore(locationId, 'available'),  // merchants/{id}  (gas popup filter)
+        ]);
         toast.show(`✓ تم تحرير السائق ${name}`);
         load();
       } else toast.show(r.error ?? "فشل تحرير السائق", false);
@@ -1372,7 +1414,7 @@ function DriversTab({ toast }: { toast: ReturnType<typeof useToast> }) {
     finally { setBusying(null); }
   };
 
-  // ── Force-offline: set isOnline=false in PostgreSQL + Firestore ───────────────
+  // ── Force-offline: set isOnline=false in PostgreSQL + all Firestore collections
   const forceOffline = async (locationId: number, name: string, phone: string) => {
     setOfflining(locationId);
     try {
@@ -1385,8 +1427,12 @@ function DriversTab({ toast }: { toast: ReturnType<typeof useToast> }) {
         toast.show("فشل إيقاف السائق من الـ API", false);
         return;
       }
-      // 2. Firestore approved_agents — set status=offline immediately
-      await syncAgentFirestore(phone, 'offline');
+      // 2. Mirror to ALL Firestore collections simultaneously
+      await Promise.all([
+        syncAgentFirestore(phone, 'offline'),          // approved_agents (taxi filter)
+        syncDriversFirestore(phone, 'offline'),        // drivers/{uid}   (partner app state)
+        syncMerchantFirestore(locationId, 'offline'),  // merchants/{id}  (gas popup filter)
+      ]);
       toast.show(`✓ تم إيقاف السائق ${name}`);
       load();
     } catch { toast.show("خطأ في الاتصال", false); }

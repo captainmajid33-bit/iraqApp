@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import {
   collection, addDoc, onSnapshot,
-  query, serverTimestamp,
+  query, orderBy, serverTimestamp,
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 
@@ -95,7 +95,7 @@ export function GasChatOverlay({ gasOrderId, agentPhone, onMinimize, onNewMessag
     const fsPath = `${col}/${docId}/${subCol}`;
     console.log(`🔥 [GasChat] Listening -> Firestore "${fsPath}"  fields: senderId/text/timestamp`);
 
-    const q = query(collection(db, col, docId, subCol));
+    const q = query(collection(db, col, docId, subCol), orderBy('timestamp', 'asc'));
 
     const unsub = onSnapshot(
       q,
