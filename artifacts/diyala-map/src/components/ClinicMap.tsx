@@ -19,20 +19,26 @@ import { auth, db } from '@/lib/firebase';
 import { getUserFromStorage } from '@/components/UserLoginOverlay';
 import { useDoctorGeofence } from '@/hooks/useDoctorGeofence';
 
-// ── Fetch phones of AVAILABLE agents from Firestore (cross-check filter) ──
+// ── Fetch phones of AVAILABLE + ONLINE agents from Firestore ─────────────
 // Returns a Set of phone strings, or null if Firestore is unreachable.
-// "available" is the only status that should receive new orders.
+// Requires BOTH status='available' AND isOnline=true so a driver who closed
+// the partner app (isOnline=false) is excluded even if REST cache still shows
+// them as online (stale PostgreSQL row).
 async function getAvailableAgentPhones(): Promise<Set<string> | null> {
   try {
     const snap = await getDocs(
-      query(collection(db, 'approved_agents'), where('status', '==', 'available'))
+      query(
+        collection(db, 'approved_agents'),
+        where('status',   '==', 'available'),
+        where('isOnline', '==', true),
+      )
     );
     const phones = new Set<string>();
     snap.forEach(d => {
       const p = d.data().phone as string | undefined;
       if (p) phones.add(p.trim());
     });
-    console.log(`[DriverFilter] Firestore available agents: ${phones.size}`, [...phones]);
+    console.log(`[DriverFilter] Firestore available+online agents: ${phones.size}`, [...phones]);
     return phones;
   } catch (e: any) {
     // Non-fatal: if Firestore is unreachable, fall back to REST-only filtering

@@ -106,14 +106,16 @@ export function GasChatOverlay({ gasOrderId, agentPhone, onMinimize, onNewMessag
         const msgs: GasMsg[] = snap.docs
           .map(d => {
             const data = d.data();
-            // senderId field (new schema); fall back to legacy "sender" if present
+            // senderId field (new schema); fall back to legacy "sender" if present.
+            // IMPORTANT: Flutter partner app writes senderId as Firebase UID (not 'agent').
+            // Rule: senderId === 'customer' → customer bubble; anything else → agent bubble.
             const senderId = data.senderId ?? data.sender ?? 'customer';
             // Timestamp may be null for pending writes — fall back gracefully
             const ts: Date = data.timestamp?.toDate?.() ?? (d.metadata.hasPendingWrites ? new Date() : new Date(0));
             return {
               id:         d.id,
               content:    data.text ?? data.message ?? '',
-              senderRole: (senderId === 'agent' ? 'agent' : 'customer') as GasMsg['senderRole'],
+              senderRole: (senderId === 'customer' ? 'customer' : 'agent') as GasMsg['senderRole'],
               createdAt:  ts,
             };
           })
@@ -167,8 +169,13 @@ export function GasChatOverlay({ gasOrderId, agentPhone, onMinimize, onNewMessag
       }));
 
       setSysMessages(prev => {
-        const existingIds = new Set(prev.map(m => m.id));
-        const newMsgs = mapped.filter(m => !existingIds.has(m.id));
+        // Dedup by BOTH id AND content-text to prevent "وصل وكيل الغاز" flooding
+        // when the partner app fires the same system event multiple times.
+        const existingIds   = new Set(prev.map(m => m.id));
+        const existingTexts = new Set(prev.filter(m => m.isSystemMsg).map(m => m.content.trim()));
+        const newMsgs = mapped.filter(
+          m => !existingIds.has(m.id) && !existingTexts.has(m.content.trim())
+        );
         if (newMsgs.length === 0) return prev;
         newMsgs.forEach(m => console.log(`[GasChat] New SYSTEM msg id=${m.id}: ${m.content.slice(0, 40)}`));
         return [...prev, ...newMsgs];
