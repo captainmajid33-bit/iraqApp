@@ -167,55 +167,57 @@ export function DoctorBookingModal({ doctorId, doctorName, doctorLat, doctorLng,
     if (!selected) return;
     setPhase('confirming');
     setErrMsg('');
+
+    // merchantId: uid from state (loaded with slots), direct fallback to doctorId
+    const finalMerchantId = (merchantUid && merchantUid.trim()) ? merchantUid : String(doctorId);
+
+    // Build payload — no lookups, all values already in scope
+    const apptRef     = doc(collection(db, 'doctors', String(doctorId), 'appointments'));
+    const topLevelRef = doc(db, 'appointments', apptRef.id);
+    const payload = {
+      merchantId: finalMerchantId,
+      time:       selected,
+      slot_time:  selected,
+      date:       today,
+      userId,
+      userName,
+      createdAt:  serverTimestamp(),
+    };
+
+    // Write appointment — this is the core operation, must succeed
     try {
-      // Guard: re-check cached balance (avoids Firestore read inside booking)
-      if (userBalance < MIN_BALANCE) throw new Error('INSUFFICIENT');
-
-      // merchantId: cached uid set during fetchSlots, fallback to doctorId
-      const finalMerchantId = merchantUid || String(doctorId);
-
-      // 1. Deduct balance — simple update, no read needed (balance already cached)
-      const userRef = doc(db, 'users', userId);
-      await updateDoc(userRef, { balance: userBalance - MIN_BALANCE });
-
-      // 2. Build payload
-      const apptRef     = doc(collection(db, 'doctors', String(doctorId), 'appointments'));
-      const topLevelRef = doc(db, 'appointments', apptRef.id);
-      const payload = {
-        merchantId: finalMerchantId,
-        time:       selected,
-        slot_time:  selected,
-        date:       today,
-        userId,
-        userName,
-        createdAt:  serverTimestamp(),
-      };
-
-      // 3. Write to both collections — admin dashboard + merchant app
       await setDoc(apptRef, payload);
-      await setDoc(topLevelRef, payload);
-
-      // 4. Geo-mirror (non-fatal — fire and forget)
-      if (userId !== 'anonymous') {
-        setDoc(doc(collection(db, 'users', userId, 'myAppointments')), {
-          doctorId:      String(doctorId),
-          apptDocId:     apptRef.id,
-          slot_time:     selected,
-          date:          today,
-          doctorLat:     doctorLat ?? null,
-          doctorLng:     doctorLng ?? null,
-          isUserArrived: false,
-          createdAt:     serverTimestamp(),
-        }).catch(() => {});
-      }
-
-      setPhase('success');
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error('[Booking] failed:', msg, err);
-      setErrMsg(msg === 'INSUFFICIENT' ? 'رصيدك غير كافٍ!' : `فشل الحجز: ${msg}`);
+    } catch (err) {
+      console.error('[Booking] subcollection write failed:', err);
+      setErrMsg(`فشل الحجز: ${err instanceof Error ? err.message : String(err)}`);
       setPhase('slots');
+      return;
     }
+
+    // Mirror to top-level appointments (merchant app reads this) — fire and forget
+    setDoc(topLevelRef, payload).catch(e => console.warn('[Booking] top-level mirror failed:', e));
+
+    // Deduct balance — fire and forget, never blocks the booking
+    if (userId !== 'anonymous' && userBalance >= MIN_BALANCE) {
+      updateDoc(doc(db, 'users', userId), { balance: userBalance - MIN_BALANCE })
+        .catch(e => console.warn('[Booking] balance update failed (non-critical):', e));
+    }
+
+    // Geo-mirror — fire and forget
+    if (userId !== 'anonymous') {
+      setDoc(doc(collection(db, 'users', userId, 'myAppointments')), {
+        doctorId:      String(doctorId),
+        apptDocId:     apptRef.id,
+        slot_time:     selected,
+        date:          today,
+        doctorLat:     doctorLat ?? null,
+        doctorLng:     doctorLng ?? null,
+        isUserArrived: false,
+        createdAt:     serverTimestamp(),
+      }).catch(() => {});
+    }
+
+    setPhase('success');
   }, [selected, doctorId, userId, userName, today, doctorLat, doctorLng, merchantUid, userBalance]);
 
   const selectedLabel = availableSlots.find(s => s.key === selected)?.label ?? selected ?? '';
