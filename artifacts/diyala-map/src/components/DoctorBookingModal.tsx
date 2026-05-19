@@ -4,7 +4,8 @@ import {
   serverTimestamp, getDoc, doc,
   getDocs, limit, setDoc, updateDoc,
 } from 'firebase/firestore';
-import { db } from '@/lib/firebase';
+import { onAuthStateChanged } from 'firebase/auth';
+import { auth, db } from '@/lib/firebase';
 import { getUserFromStorage } from '@/components/UserLoginOverlay';
 
 const MIN_BALANCE = 2000;
@@ -78,10 +79,36 @@ export function DoctorBookingModal({ doctorId, doctorName, doctorLat, doctorLng,
   // Firebase UID of the doctor (stored in merchants/{id}.uid) — used as merchantId in appointment doc
   const [merchantUid,    setMerchantUid]    = useState<string>('');
 
-  const today    = targetDateStr();
-  const user     = getUserFromStorage();
-  const userId   = user?.uid  ?? 'anonymous';
-  const userName = user?.name ?? 'زبون';
+  const today       = targetDateStr();
+  const storedUser  = getUserFromStorage();
+
+  // ── UID + name: reactive to Firebase Auth state ───────────────────────────
+  // We use useState so the balance-check useEffect re-runs once Firebase Auth
+  // resolves (handles the race where auth.currentUser is null at first render).
+  // Priority: Firebase Auth (authoritative) → localStorage → fallback.
+  const [userId,   setUserId]   = useState<string>(
+    auth.currentUser?.uid ?? storedUser?.uid ?? 'anonymous'
+  );
+  const [userName, setUserName] = useState<string>(
+    storedUser?.name ?? auth.currentUser?.displayName ?? 'زبون'
+  );
+
+  useEffect(() => {
+    // onAuthStateChanged fires synchronously with the current user if already
+    // signed in, so this corrects any stale value from the initial render.
+    const unsub = onAuthStateChanged(auth, (fbUser) => {
+      if (fbUser) {
+        setUserId(prev => (prev === fbUser.uid ? prev : fbUser.uid));
+      }
+    });
+    return unsub;
+  }, []);
+
+  useEffect(() => {
+    // Keep userName in sync if storedUser updates (e.g., after profile edit)
+    if (storedUser?.name) setUserName(storedUser.name);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ── Step 1: Check balance → then check duplicate booking ────────────────
   useEffect(() => {
@@ -92,9 +119,10 @@ export function DoctorBookingModal({ doctorId, doctorName, doctorLat, doctorLng,
         return;
       }
       try {
-        // 1a. Balance check
+        // 1a. Read balance from users/{uid} — the single authoritative source.
+        // Use server fetch to bypass any stale Firestore cache.
         const userSnap = await getDoc(doc(db, 'users', userId));
-        const bal = userSnap.exists() ? (Number(userSnap.data()?.balance) || 0) : 0;
+        const bal = userSnap.exists() ? (Number(userSnap.data()?.balance) ?? 0) : 0;
         if (cancelled) return;
         setUserBalance(bal);
         if (bal < MIN_BALANCE) { setPhase('insufficient'); return; }
