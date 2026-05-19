@@ -1,22 +1,29 @@
 /**
  * ActiveOrderTracker.tsx
  * ─────────────────────────────────────────────────────────────────────────────
- * Firestore-based real-time driver tracking for the CUSTOMER view.
+ * Firestore-based real-time driver tracking — CUSTOMER view.
  *
- * Flow:
+ * Architecture (Order-Based Location Tracking):
  *  1. Watches Firebase Auth → gets current user UID
- *  2. Subscribes to Firestore `orders` where
- *       customer_id == uid  AND  status ∈ ['accepted','in_progress','driving']
- *  3. For the active order, shows a driver marker on the Leaflet map
- *     and draws an OSRM real-road route  driver → customer
- *  4. Cleans up automatically when status → completed / cancelled / done
+ *  2. Subscribes to THREE Firestore collections for accepted orders:
+ *       • orders        (taxi trips)
+ *       • trips         (alternative taxi collection used by partner app)
+ *       • gas_bookings  (gas agent orders)
+ *  3. On first accepted order found, extracts driver_id / agent_id
+ *  4. Opens a DEDICATED channel to drivers/{driver_id} for live GPS
+ *  5. Falls back to driver_lat/driver_lng inside the order doc if no driver_id
+ *  6. Shows a single animated driver marker + OSRM route on the Leaflet map
+ *  7. Cleans up automatically on terminal status (done/cancelled/completed)
  *
- * Invisible component — all output is on the Leaflet map.
+ * NO global driver stream. NO public driver markers.
+ * Location tracking is strictly order-gated and driver-specific.
  */
 import { useEffect, useRef, useCallback } from 'react';
 import L from 'leaflet';
 import { onAuthStateChanged } from 'firebase/auth';
-import { collection, query, where, onSnapshot, doc } from 'firebase/firestore';
+import {
+  collection, query, where, onSnapshot, doc,
+} from 'firebase/firestore';
 import { auth, db } from '@/lib/firebase';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -28,7 +35,7 @@ interface Props {
 type OrderType = 'taxi' | 'gas';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
-const ACTIVE_STATUSES  = ['accepted', 'in_progress', 'driving'];
+const ACTIVE_STATUSES   = ['accepted', 'in_progress', 'driving'] as const;
 const TERMINAL_STATUSES = new Set(['completed', 'cancelled', 'done', 'finished', 'rejected']);
 
 // ── Icons ─────────────────────────────────────────────────────────────────────
@@ -64,7 +71,7 @@ function makeTrackedDriverIcon(type: OrderType): L.DivIcon {
   });
 }
 
-// ── OSRM route drawing ────────────────────────────────────────────────────────
+// ── OSRM route drawing ─────────────────────────────────────────────────────────
 async function drawOsrmRoute(
   map:     L.Map,
   fromLat: number, fromLng: number,
@@ -75,7 +82,6 @@ async function drawOsrmRoute(
   try {
     glowRef.current?.remove(); glowRef.current = null;
     lineRef.current?.remove(); lineRef.current = null;
-
     const url = `https://router.project-osrm.org/route/v1/driving/`
       + `${fromLng},${fromLat};${toLng},${toLat}`
       + `?overview=full&geometries=geojson`;
@@ -84,7 +90,6 @@ async function drawOsrmRoute(
     const data = await res.json();
     const coords = data.routes?.[0]?.geometry?.coordinates;
     if (!coords?.length) return;
-
     const latlngs = coords.map(([lng, lat]: [number, number]) => [lat, lng] as [number, number]);
     glowRef.current = L.polyline(latlngs, { color: '#00d4ff', weight: 9,  opacity: 0.18 }).addTo(map);
     lineRef.current = L.polyline(latlngs, { color: '#00d4ff', weight: 3,  opacity: 0.85, dashArray: '8,6' }).addTo(map);
@@ -92,44 +97,52 @@ async function drawOsrmRoute(
   } catch { /* silent */ }
 }
 
-// ── Component ─────────────────────────────────────────────────────────────────
+// ── Component ──────────────────────────────────────────────────────────────────
 export function ActiveOrderTracker({ mapRef, userLocation }: Props) {
-  const userLocRef      = useRef(userLocation);
-  const markerRef       = useRef<L.Marker | null>(null);
-  const routeGlowRef    = useRef<L.Polyline | null>(null);
-  const routeLineRef    = useRef<L.Polyline | null>(null);
-  const routeTimerRef   = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const uidRef          = useRef<string | null>(null);
-  const orderUnsubRef   = useRef<(() => void) | null>(null);
-  const queryUnsubRef   = useRef<(() => void) | null>(null);
-  const activeOrderId   = useRef<string | null>(null);
+  const userLocRef        = useRef(userLocation);
+  const markerRef         = useRef<L.Marker | null>(null);
+  const routeGlowRef      = useRef<L.Polyline | null>(null);
+  const routeLineRef      = useRef<L.Polyline | null>(null);
+  const routeTimerRef     = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Active tracking state
+  const activeOrderDocId  = useRef<string | null>(null);  // Firestore doc ID of active order
+  const activeDriverId    = useRef<string | null>(null);  // drivers/{uid} we are watching
+  const orderUnsubRef     = useRef<(() => void) | null>(null);   // unsub for order doc
+  const driverUnsubRef    = useRef<(() => void) | null>(null);   // unsub for drivers/{id}
+  const queryUnsubsRef    = useRef<Array<() => void>>([]);       // unsubs for collection queries
 
   // Keep userLoc ref current
   useEffect(() => { userLocRef.current = userLocation; }, [userLocation]);
 
-  // ── Cleanup helpers ───────────────────────────────────────────────────────
+  // ── Cleanup helpers ─────────────────────────────────────────────────────────
   const clearVisuals = useCallback(() => {
-    markerRef.current?.remove();     markerRef.current   = null;
+    markerRef.current?.remove();     markerRef.current    = null;
     routeGlowRef.current?.remove();  routeGlowRef.current = null;
     routeLineRef.current?.remove();  routeLineRef.current = null;
-    if (routeTimerRef.current) clearTimeout(routeTimerRef.current);
+    if (routeTimerRef.current) { clearTimeout(routeTimerRef.current); routeTimerRef.current = null; }
+  }, []);
+
+  const stopDriverWatch = useCallback(() => {
+    driverUnsubRef.current?.();
+    driverUnsubRef.current = null;
+    activeDriverId.current = null;
   }, []);
 
   const stopOrderWatch = useCallback(() => {
     orderUnsubRef.current?.();
-    orderUnsubRef.current = null;
-    activeOrderId.current = null;
+    orderUnsubRef.current  = null;
+    activeOrderDocId.current = null;
   }, []);
 
   const fullCleanup = useCallback(() => {
     clearVisuals();
+    stopDriverWatch();
     stopOrderWatch();
-  }, [clearVisuals, stopOrderWatch]);
+  }, [clearVisuals, stopDriverWatch, stopOrderWatch]);
 
-  // ── Apply driver position update ──────────────────────────────────────────
-  const applyDriverPosition = useCallback((
-    lat:  number, lng:  number, type: OrderType,
-  ) => {
+  // ── Apply driver GPS position ───────────────────────────────────────────────
+  const applyDriverPosition = useCallback((lat: number, lng: number, type: OrderType) => {
     const map = mapRef.current;
     if (!map) return;
 
@@ -146,7 +159,7 @@ export function ActiveOrderTracker({ mapRef, userLocation }: Props) {
       if (el) el.style.transition = 'transform 0.9s linear';
     }
 
-    // Redraw route every time driver moves (debounced 1 s)
+    // Redraw OSRM route (debounced 1 s) every time driver moves
     const userLoc = userLocRef.current;
     if (userLoc && routeTimerRef.current === null) {
       routeTimerRef.current = setTimeout(() => {
@@ -158,89 +171,152 @@ export function ActiveOrderTracker({ mapRef, userLocation }: Props) {
     }
   }, [mapRef]);
 
-  // ── Subscribe to a single order document for live updates ────────────────
-  const watchOrder = useCallback((orderId: string, type: OrderType) => {
-    // Avoid double-subscribing same order
-    if (activeOrderId.current === orderId) return;
-    stopOrderWatch();
-    activeOrderId.current = orderId;
+  // ── Watch drivers/{driverId} for live GPS ────────────────────────────────────
+  // Called once we know the accepted driver's UID. Opens a dedicated channel.
+  const watchDriverLocation = useCallback((driverId: string, type: OrderType) => {
+    if (activeDriverId.current === driverId) return;  // already watching
+    stopDriverWatch();
+    activeDriverId.current = driverId;
 
-    orderUnsubRef.current = onSnapshot(
-      doc(db, 'orders', orderId),
+    console.log(`[ActiveOrderTracker] 📍 subscribing to drivers/${driverId}`);
+
+    driverUnsubRef.current = onSnapshot(
+      doc(db, 'drivers', driverId),
       (snap) => {
         const data = snap.data();
         if (!data) return;
-
-        // Terminal state → cleanup
-        if (TERMINAL_STATUSES.has(data.status)) {
-          fullCleanup();
-          return;
-        }
-
-        // Update driver marker if coordinates are present
-        const lat = data.driver_lat;
-        const lng = data.driver_lng;
+        const lat = data.lat ?? data.latitude  ?? data.driver_lat;
+        const lng = data.lng ?? data.longitude ?? data.driver_lng;
         if (typeof lat === 'number' && typeof lng === 'number') {
           applyDriverPosition(lat, lng, type);
         }
       },
-      (err) => { console.warn('[ActiveOrderTracker] order watch error:', err); },
+      (err) => {
+        console.warn(`[ActiveOrderTracker] drivers/${driverId} error:`, err?.code);
+      },
     );
-  }, [applyDriverPosition, fullCleanup, stopOrderWatch]);
+  }, [applyDriverPosition, stopDriverWatch]);
 
-  // ── Main Firestore query — listen for accepted orders of this user ─────────
-  useEffect(() => {
-    let queryUnsub: (() => void) | null = null;
+  // ── Watch a single order doc for status + fallback position ─────────────────
+  // Opens driver location channel as soon as driverId is known.
+  const watchOrderDoc = useCallback((
+    collection_: string,
+    docId: string,
+    type: OrderType,
+  ) => {
+    if (activeOrderDocId.current === docId) return;
+    stopOrderWatch();
+    activeOrderDocId.current = docId;
 
-    const authUnsub = onAuthStateChanged(auth, (fbUser) => {
-      // Cleanup previous query if user changed
-      queryUnsub?.();
-      queryUnsubRef.current = null;
-      fullCleanup();
+    console.log(`[ActiveOrderTracker] watching ${collection_}/${docId}`);
 
-      if (!fbUser) { uidRef.current = null; return; }
-      uidRef.current = fbUser.uid;
+    orderUnsubRef.current = onSnapshot(
+      doc(db, collection_, docId),
+      (snap) => {
+        const data = snap.data();
+        if (!data) return;
 
-      const q = query(
-        collection(db, 'orders'),
-        where('customer_id', '==', fbUser.uid),
-        where('status',      'in',  ACTIVE_STATUSES),
-      );
-
-      queryUnsub = onSnapshot(q, (snap) => {
-        if (snap.empty) {
-          // No active orders — clear everything
+        // Terminal → full cleanup
+        if (TERMINAL_STATUSES.has(data.status)) {
+          console.log(`[ActiveOrderTracker] order ${docId} terminal (${data.status}) — cleanup`);
           fullCleanup();
           return;
         }
 
-        // Pick the most recent active order doc
-        const docSnap = snap.docs[0];
-        const data    = docSnap.data();
-        const type: OrderType = data.type === 'gas' ? 'gas' : 'taxi';
+        // ── Extract driver UID from various field names ─────────────────────
+        // Partner app writes: driver_id (Firebase UID) OR agent_id (gas)
+        const driverId: string | null =
+          data.driver_id   ??   // partner app sets this on accept
+          data.agent_id    ??   // gas agent UID
+          data.agentId     ??
+          data.driverId    ??
+          null;
 
-        // Start watching this specific order for position updates
-        watchOrder(docSnap.id, type);
+        // ── Subscribe to drivers/{driverId} for primary live location ────────
+        if (driverId) {
+          watchDriverLocation(driverId, type);
+        }
 
-        // Apply current driver position immediately (if already set)
-        const lat = data.driver_lat;
-        const lng = data.driver_lng;
+        // ── Fallback: read driver_lat/driver_lng embedded in order doc ───────
+        // Used when the partner app updates the order doc directly (REST flow)
+        const lat = data.driver_lat ?? data.driverLat;
+        const lng = data.driver_lng ?? data.driverLng;
         if (typeof lat === 'number' && typeof lng === 'number') {
           applyDriverPosition(lat, lng, type);
         }
-      }, (err) => {
-        console.warn('[ActiveOrderTracker] query error:', err);
-      });
+      },
+      (err) => {
+        console.warn(`[ActiveOrderTracker] ${collection_}/${docId} error:`, err?.code);
+      },
+    );
+  }, [applyDriverPosition, fullCleanup, stopOrderWatch, watchDriverLocation]);
 
-      queryUnsubRef.current = queryUnsub;
+  // ── Main effect: auth → query THREE collections ────────────────────────────
+  useEffect(() => {
+    const authUnsub = onAuthStateChanged(auth, (fbUser) => {
+      // Tear down previous subscriptions when user changes
+      queryUnsubsRef.current.forEach(u => u());
+      queryUnsubsRef.current = [];
+      fullCleanup();
+
+      if (!fbUser) return;
+
+      const uid = fbUser.uid;
+      console.log(`[ActiveOrderTracker] user ${uid} — subscribing to accepted orders`);
+
+      // Helper: subscribe to one collection
+      const subscribeCol = (colName: string, type: OrderType) => {
+        const q = query(
+          collection(db, colName),
+          where('customer_id', '==', uid),
+          where('status', 'in', ACTIVE_STATUSES as unknown as string[]),
+        );
+
+        const unsub = onSnapshot(q, (snap) => {
+          if (snap.empty) {
+            // No active orders in this collection — clear if this was our source
+            return;
+          }
+
+          // Pick the most recent active order
+          const docSnap = snap.docs[0];
+          const data    = docSnap.data();
+          const orderType: OrderType = colName === 'gas_bookings' ? 'gas' : type;
+
+          // Start watching this specific order doc for driver updates
+          watchOrderDoc(colName, docSnap.id, orderType);
+
+          // Apply position immediately if already embedded in order doc
+          const driverId: string | null =
+            data.driver_id ?? data.agent_id ?? data.agentId ?? data.driverId ?? null;
+          if (driverId) {
+            watchDriverLocation(driverId, orderType);
+          }
+          const lat = data.driver_lat ?? data.driverLat;
+          const lng = data.driver_lng ?? data.driverLng;
+          if (typeof lat === 'number' && typeof lng === 'number') {
+            applyDriverPosition(lat, lng, orderType);
+          }
+        }, (err) => {
+          console.warn(`[ActiveOrderTracker] ${colName} query error:`, err?.code);
+        });
+
+        queryUnsubsRef.current.push(unsub);
+      };
+
+      // ── Subscribe to all three order collections ──────────────────────────
+      subscribeCol('orders',        'taxi');  // standard taxi orders
+      subscribeCol('trips',         'taxi');  // alternative partner-hub trips collection
+      subscribeCol('gas_bookings',  'gas');   // gas agent orders
     });
 
     return () => {
       authUnsub();
-      queryUnsub?.();
+      queryUnsubsRef.current.forEach(u => u());
+      queryUnsubsRef.current = [];
       fullCleanup();
     };
-  }, [applyDriverPosition, fullCleanup, watchOrder]);
+  }, [applyDriverPosition, fullCleanup, watchOrderDoc, watchDriverLocation]);
 
-  return null; // invisible — all rendering is on the Leaflet map
+  return null;
 }
