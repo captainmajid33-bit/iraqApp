@@ -1,10 +1,10 @@
 import { Router, type IRouter } from "express";
 import { randomBytes } from "crypto";
 import { db } from "@workspace/db";
-import { locationsTable, insertLocationSchema } from "@workspace/db";
+import { locationsTable, insertLocationSchema, driversOnlineTable } from "@workspace/db";
 import { eq, asc } from "drizzle-orm";
 import { requireAdmin, isValidAdminToken } from "./admin";
-import { broadcastLocationUpdate } from "../lib/sse";
+import { broadcastLocationUpdate, broadcastDriverUpdate } from "../lib/sse";
 
 const router: IRouter = Router();
 
@@ -178,6 +178,27 @@ router.patch("/locations/:id", async (req, res) => {
     console.log(`[PATCH /locations/${id}] success — new status: ${updated.status}`);
     const out = safe(updated);
     broadcastLocationUpdate(out);
+
+    // ── Auto-offline: if location is now closed, force driver offline too ──────
+    // Prevents closed drivers from appearing in customer taxi search
+    const isClosed = updated.status === 'مغلق' || updated.status === 'closed';
+    if (isClosed) {
+      try {
+        const [driverRow] = await db
+          .update(driversOnlineTable)
+          .set({ isOnline: false, isBusy: false, updatedAt: new Date() })
+          .where(eq(driversOnlineTable.locationId, id))
+          .returning();
+        if (driverRow) {
+          broadcastDriverUpdate({ locationId: id, isOnline: false, isBusy: false });
+          console.log(`[PATCH /locations/${id}] auto-offline driver (location closed)`);
+        }
+      } catch (e: any) {
+        // Non-fatal — location update already succeeded
+        console.warn(`[PATCH /locations/${id}] auto-offline driver failed:`, e?.message);
+      }
+    }
+
     // Return the location directly (same shape as POST) so r.id is always available
     res.status(200).json(out);
 

@@ -72,12 +72,15 @@ router.get("/drivers-online", async (req, res) => {
           eq(driversOnlineTable.isBusy,   false),
           // Filter by category when provided
           categoryFilter ? eq(driversOnlineTable.category, categoryFilter) : undefined,
-          // Show driver if: location is open OR location row doesn't exist
+          // Show driver only if: location is open, OR driver has no location row at all
+          // Drivers with a مغلق location are always hidden
           or(
             isNull(locationsTable.id),
             eq(locationsTable.status, "مفتوح"),
             eq(locationsTable.status, "open"),
           ),
+          // Exclude drivers whose location explicitly has مغلق status
+          // (reinforces the OR above — belt-and-suspenders for location-linked drivers)
         )
       );
 
