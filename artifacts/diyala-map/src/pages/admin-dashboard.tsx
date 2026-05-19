@@ -3429,10 +3429,24 @@ function DoctorCard({
   async function resetAllAppts() {
     setResetting(true);
     try {
-      const colRef = collection(db, "doctors", String(doctor.id), "appointments");
-      const snap   = await getDocs(colRef);
-      const batch  = writeBatch(db);
-      snap.forEach(d => batch.delete(d.ref));
+      const batch = writeBatch(db);
+
+      // 1) Delete from subcollection doctors/{id}/appointments (old path)
+      const subColRef = collection(db, "doctors", String(doctor.id), "appointments");
+      const subSnap   = await getDocs(subColRef);
+      subSnap.forEach(d => batch.delete(d.ref));
+
+      // 2) Resolve the doctor's Firebase UID from merchants/{id}.uid
+      //    then delete from top-level appointments where merchantId == uid
+      const mSnap = await getDoc(doc(db, "merchants", String(doctor.id)));
+      const merchantUid = mSnap.exists() ? (mSnap.data()?.uid as string | undefined) : undefined;
+
+      if (merchantUid) {
+        const topQ    = query(collection(db, "appointments"), where("merchantId", "==", merchantUid));
+        const topSnap = await getDocs(topQ);
+        topSnap.forEach(d => batch.delete(d.ref));
+      }
+
       await batch.commit();
       setShowResetConfirm(false);
     } catch {
