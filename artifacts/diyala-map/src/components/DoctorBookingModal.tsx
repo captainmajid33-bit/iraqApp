@@ -162,104 +162,62 @@ export function DoctorBookingModal({ doctorId, doctorName, doctorLat, doctorLng,
     setPhase('cost_confirm');
   }, [selected]);
 
-  // ── Run booking: deduct balance then write appointment docs ──────────────
+  // ── Confirm booking ───────────────────────────────────────────────────────
   const executeBooking = useCallback(async () => {
     if (!selected) return;
     setPhase('confirming');
     setErrMsg('');
-
-    // ── 1. Resolve merchantId (uid from merchants doc, fallback to doctorId) ─
-    let resolvedMerchantId = merchantUid;
-    if (!resolvedMerchantId) {
-      try {
-        const mSnap = await getDoc(doc(db, 'merchants', String(doctorId)));
-        const uid = mSnap.exists() ? (mSnap.data()?.uid ?? null) : null;
-        resolvedMerchantId = uid ? String(uid) : String(doctorId);
-      } catch {
-        resolvedMerchantId = String(doctorId);
-      }
-    }
-    if (!resolvedMerchantId) resolvedMerchantId = String(doctorId);
-
-    // ── 2. Deduct balance — isolated transaction (only touches users/{uid}) ─
-    const userRef = doc(db, 'users', userId);
     try {
+      // merchantId: use cached uid from state (set during fetchSlots), fallback to doctorId
+      const finalMerchantId = merchantUid || String(doctorId);
+
+      // 1. Deduct balance (transaction on users/{uid} only)
+      const userRef = doc(db, 'users', userId);
       await runTransaction(db, async (txn) => {
-        const userSnap = await txn.get(userRef);
-        const bal = userSnap.exists() ? (Number(userSnap.data()?.balance) ?? 0) : 0;
+        const snap = await txn.get(userRef);
+        const bal  = snap.exists() ? (Number(snap.data()?.balance) || 0) : 0;
         if (bal < MIN_BALANCE) throw new Error('INSUFFICIENT');
         txn.set(userRef, { balance: bal - MIN_BALANCE }, { merge: true });
       });
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error('[Booking] balance transaction failed:', msg, err);
-      setErrMsg(msg === 'INSUFFICIENT' ? 'رصيدك غير كافٍ!' : `فشل خصم الرصيد: ${msg}`);
-      setPhase('slots');
-      return;
-    }
 
-    // ── 3. Build appointment payload ───────────────────────────────────────
-    const apptCol     = collection(db, 'doctors', String(doctorId), 'appointments');
-    const newApptRef  = doc(apptCol);
-    const topLevelRef = doc(db, 'appointments', newApptRef.id);
+      // 2. Build payload
+      const apptRef     = doc(collection(db, 'doctors', String(doctorId), 'appointments'));
+      const topLevelRef = doc(db, 'appointments', apptRef.id);
+      const payload = {
+        merchantId: finalMerchantId,
+        time:       selected,
+        slot_time:  selected,
+        date:       today,
+        userId,
+        userName,
+        createdAt:  serverTimestamp(),
+      };
 
-    const bookingPayload = {
-      merchantId: resolvedMerchantId,
-      time:       selected,
-      slot_time:  selected,
-      date:       today,
-      userId,
-      userName,
-      createdAt:  serverTimestamp(),
-    };
+      // 3. Write to both collections — admin dashboard + merchant app
+      await setDoc(apptRef, payload);
+      await setDoc(topLevelRef, payload);
 
-    // ── 4. Write appointment docs (non-atomic — balance already deducted) ──
-    let apptWriteOk = false;
-
-    // 4a. Sub-collection → admin dashboard reads from here
-    try {
-      await setDoc(newApptRef, bookingPayload);
-      apptWriteOk = true;
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error('[Booking] subcollection write failed:', msg, err);
-    }
-
-    // 4b. Top-level appointments → merchant app reads from here
-    try {
-      await setDoc(topLevelRef, bookingPayload);
-      apptWriteOk = true;
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error('[Booking] top-level appointments write failed:', msg, err);
-    }
-
-    if (!apptWriteOk) {
-      setErrMsg('تم خصم الرصيد لكن فشل حفظ الحجز — يرجى التواصل مع الدعم.');
-      setPhase('slots');
-      return;
-    }
-
-    // ── 5. Geo-mirror doc (non-fatal) ──────────────────────────────────────
-    if (userId !== 'anonymous') {
-      try {
-        const mirrorRef = doc(collection(db, 'users', userId, 'myAppointments'));
-        await setDoc(mirrorRef, {
+      // 4. Geo-mirror (non-fatal)
+      if (userId !== 'anonymous') {
+        setDoc(doc(collection(db, 'users', userId, 'myAppointments')), {
           doctorId:      String(doctorId),
-          apptDocId:     newApptRef.id,
+          apptDocId:     apptRef.id,
           slot_time:     selected,
           date:          today,
           doctorLat:     doctorLat ?? null,
           doctorLng:     doctorLng ?? null,
           isUserArrived: false,
           createdAt:     serverTimestamp(),
-        });
-      } catch (err: unknown) {
-        console.error('[Booking] geo-mirror write failed (non-fatal):', err);
+        }).catch(() => {});
       }
-    }
 
-    setPhase('success');
+      setPhase('success');
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('[Booking] failed:', msg, err);
+      setErrMsg(msg === 'INSUFFICIENT' ? 'رصيدك غير كافٍ!' : `فشل الحجز: ${msg}`);
+      setPhase('slots');
+    }
   }, [selected, doctorId, userId, userName, today, doctorLat, doctorLng, merchantUid]);
 
   const selectedLabel = availableSlots.find(s => s.key === selected)?.label ?? selected ?? '';
