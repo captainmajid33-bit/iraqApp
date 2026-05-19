@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import {
   collection, query, where, onSnapshot,
   serverTimestamp, getDoc, doc,
-  getDocs, limit, runTransaction, setDoc,
+  getDocs, limit, setDoc, updateDoc,
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { getUserFromStorage } from '@/components/UserLoginOverlay';
@@ -168,17 +168,15 @@ export function DoctorBookingModal({ doctorId, doctorName, doctorLat, doctorLng,
     setPhase('confirming');
     setErrMsg('');
     try {
-      // merchantId: use cached uid from state (set during fetchSlots), fallback to doctorId
+      // Guard: re-check cached balance (avoids Firestore read inside booking)
+      if (userBalance < MIN_BALANCE) throw new Error('INSUFFICIENT');
+
+      // merchantId: cached uid set during fetchSlots, fallback to doctorId
       const finalMerchantId = merchantUid || String(doctorId);
 
-      // 1. Deduct balance (transaction on users/{uid} only)
+      // 1. Deduct balance — simple update, no read needed (balance already cached)
       const userRef = doc(db, 'users', userId);
-      await runTransaction(db, async (txn) => {
-        const snap = await txn.get(userRef);
-        const bal  = snap.exists() ? (Number(snap.data()?.balance) || 0) : 0;
-        if (bal < MIN_BALANCE) throw new Error('INSUFFICIENT');
-        txn.set(userRef, { balance: bal - MIN_BALANCE }, { merge: true });
-      });
+      await updateDoc(userRef, { balance: userBalance - MIN_BALANCE });
 
       // 2. Build payload
       const apptRef     = doc(collection(db, 'doctors', String(doctorId), 'appointments'));
@@ -197,7 +195,7 @@ export function DoctorBookingModal({ doctorId, doctorName, doctorLat, doctorLng,
       await setDoc(apptRef, payload);
       await setDoc(topLevelRef, payload);
 
-      // 4. Geo-mirror (non-fatal)
+      // 4. Geo-mirror (non-fatal — fire and forget)
       if (userId !== 'anonymous') {
         setDoc(doc(collection(db, 'users', userId, 'myAppointments')), {
           doctorId:      String(doctorId),
@@ -218,7 +216,7 @@ export function DoctorBookingModal({ doctorId, doctorName, doctorLat, doctorLng,
       setErrMsg(msg === 'INSUFFICIENT' ? 'رصيدك غير كافٍ!' : `فشل الحجز: ${msg}`);
       setPhase('slots');
     }
-  }, [selected, doctorId, userId, userName, today, doctorLat, doctorLng, merchantUid]);
+  }, [selected, doctorId, userId, userName, today, doctorLat, doctorLng, merchantUid, userBalance]);
 
   const selectedLabel = availableSlots.find(s => s.key === selected)?.label ?? selected ?? '';
 
