@@ -2754,10 +2754,18 @@ export function ClinicMap({
     return ()=> clearTimeout(t);
   },[loopActive, loopCountdown]);
 
+  // ── Helper: returns true for mobile-service categories (taxi / gas agent)
+  // These are NOT fixed physical locations — they should never appear as map pins.
+  // Driver positions are shown exclusively by <ActiveOrderTracker> after order acceptance.
+  const isMobileServiceItem = useCallback((item: MapItem) => {
+    const labelEn = catMapRef.current.get(item.kind)?.labelEn ?? '';
+    return isTaxiCat(item.kind, labelEn) || isGasCat(item.kind, labelEn);
+  }, []);
+
   // Sync markers — 3 modes:
-  //  NAV   (routeTarget set)  → hide ALL category markers (route + special nav marker handle it)
-  //  FOCUS (activeFilter set) → show only that category
-  //  ALL   (no filter)        → show every item
+  //  NAV    (routeTarget set)       → hide ALL category markers (route handles it)
+  //  FOCUS  (activeFilter set)      → show only that category (excluding taxi/gas)
+  //  ALL    (no filter / taxi/gas)  → show every non-mobile-service item
   useEffect(()=>{
     if (!mapRef.current) return;
     // Clear existing category markers
@@ -2767,9 +2775,15 @@ export function ClinicMap({
     // NAV MODE — no regular markers; navTargetMarkerRef handles the target pin
     if (routeTarget) return;
 
-    const visible = activeFilter
-      ? items.filter(i=>i.kind===activeFilter && i.status!=='معطّل')
-      : items.filter(i=>i.status!=='معطّل');
+    // If activeFilter is a mobile-service category (taxi/gas), treat as "no filter"
+    // so static landmarks remain visible while the taxi/gas UI takes over
+    const filterLabelEn = catMapRef.current.get(activeFilter)?.labelEn ?? '';
+    const filterIsMobile = isTaxiCat(activeFilter, filterLabelEn) || isGasCat(activeFilter, filterLabelEn);
+    const effectiveFilter = filterIsMobile ? '' : activeFilter;
+
+    const visible = effectiveFilter
+      ? items.filter(i => i.kind === effectiveFilter && i.status !== 'معطّل' && !isMobileServiceItem(i))
+      : items.filter(i => i.status !== 'معطّل' && !isMobileServiceItem(i));
 
     visible.forEach(item=>{
       const isOpen    = item.status==='مفتوح';
@@ -2786,18 +2800,22 @@ export function ClinicMap({
       pendingJumpRef.current = null;
       setTimeout(()=>{ markersRef.current[jumpId]?.openPopup(); }, 500);
     }
-  },[items,activeFilter,selectedItem,buildPopup,routeTarget]);
+  },[items,activeFilter,selectedItem,buildPopup,routeTarget,isMobileServiceItem]);
 
   // Update selected icon without full re-render (skip in nav mode)
   useEffect(()=>{
     if (routeTarget) return;
-    const visible = activeFilter
-      ? items.filter(i=>i.kind===activeFilter && i.status!=='معطّل')
-      : items.filter(i=>i.status!=='معطّل');
+    // Same mobile-service exclusion — never update icons for taxi/gas pins (they don't exist)
+    const filterLabelEn2 = catMapRef.current.get(activeFilter)?.labelEn ?? '';
+    const filterIsMobile2 = isTaxiCat(activeFilter, filterLabelEn2) || isGasCat(activeFilter, filterLabelEn2);
+    const effectiveFilter2 = filterIsMobile2 ? '' : activeFilter;
+    const visible = effectiveFilter2
+      ? items.filter(i => i.kind === effectiveFilter2 && i.status !== 'معطّل' && !isMobileServiceItem(i))
+      : items.filter(i => i.status !== 'معطّل' && !isMobileServiceItem(i));
     visible.forEach(item=>{
       markersRef.current[item.id]?.setIcon(makeIcon(item.kind,catMapRef.current,item.status==='مفتوح',selectedItem?.id===item.id,item.name,item.icon_url));
     });
-  },[selectedItem,items,activeFilter,routeTarget]);
+  },[selectedItem,items,activeFilter,routeTarget,isMobileServiceItem]);
 
   // ── Nav target marker — show dedicated pin during navigation ──────────────
   useEffect(()=>{
@@ -2820,7 +2838,7 @@ export function ClinicMap({
       // Remove old layer
       manualNavLayerRef.current?.remove();
       const group = L.layerGroup();
-      items.filter(i=>i.status!=='معطّل').forEach(item=>{
+      items.filter(i=>i.status!=='معطّل' && !isMobileServiceItem(i)).forEach(item=>{
         const cat   = catMapRef.current.get(item.kind);
         const color = cat?.color ?? '#00f5d4';
         // Dot marker — non-interactive so map drag works through it
