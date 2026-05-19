@@ -3431,21 +3431,29 @@ function DoctorCard({
     try {
       const batch = writeBatch(db);
 
-      // 1) Delete from subcollection doctors/{id}/appointments (old path)
+      // 1) Delete from subcollection doctors/{id}/appointments (old storage path)
       const subColRef = collection(db, "doctors", String(doctor.id), "appointments");
       const subSnap   = await getDocs(subColRef);
       subSnap.forEach(d => batch.delete(d.ref));
 
-      // 2) Resolve the doctor's Firebase UID from merchants/{id}.uid
-      //    then delete from top-level appointments where merchantId == uid
-      const mSnap = await getDoc(doc(db, "merchants", String(doctor.id)));
-      const merchantUid = mSnap.exists() ? (mSnap.data()?.uid as string | undefined) : undefined;
+      // 2) Collect the merchantId values we need to query against:
+      //    - always include the numeric string fallback (e.g. "25")
+      //    - include the Firebase UID if present in merchants/{id}.uid
+      const merchantIdValues = new Set<string>([String(doctor.id)]);
+      try {
+        const mSnap = await getDoc(doc(db, "merchants", String(doctor.id)));
+        if (mSnap.exists()) {
+          const uid = mSnap.data()?.uid as string | undefined;
+          if (uid) merchantIdValues.add(uid);
+        }
+      } catch { /* permission issue — proceed with numeric fallback only */ }
 
-      if (merchantUid) {
-        const topQ    = query(collection(db, "appointments"), where("merchantId", "==", merchantUid));
-        const topSnap = await getDocs(topQ);
-        topSnap.forEach(d => batch.delete(d.ref));
-      }
+      // 3) Delete from top-level appointments for each merchantId value
+      //    (Firestore `in` operator supports up to 30 values)
+      const ids = Array.from(merchantIdValues);
+      const topQ    = query(collection(db, "appointments"), where("merchantId", "in", ids));
+      const topSnap = await getDocs(topQ);
+      topSnap.forEach(d => batch.delete(d.ref));
 
       await batch.commit();
       setShowResetConfirm(false);
