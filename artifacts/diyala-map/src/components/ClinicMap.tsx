@@ -2783,10 +2783,15 @@ export function ClinicMap({
     }
     // Driver rejected → redirect to next available driver immediately.
     // ① redirectLockRef blocks duplicate calls (poll + SSE race).
-    // ② Clear activeOrderId NOW — this kills the 3-second polling interval
-    //    *before* redirectToNextDriver fires, so the poll cannot deliver the
-    //    old order's stale 'rejected' snapshot during the customer-cancel window.
+    // ② Clear current-driver UI instantly so the customer sees "searching…"
+    //    rather than the rejected driver's name / countdown freezing on screen.
     if (data.status === 'rejected') {
+      // Reset UI to "searching" state before the async redirect completes
+      setActiveOrderStatus('pending');
+      activeOrderStatusRef.current = 'pending';
+      setLoopCurrentDriver('');
+      setLoopCurrentDriverDist(null);
+      setLoopCountdown(120);
       if (!redirectLockRef.current) {
         // Keep activeOrderId — reassign-driver PATCH reuses same orderId.
         // No setActiveOrderId(null) here: Firestore listener stays alive
@@ -2801,6 +2806,11 @@ export function ClinicMap({
       //    instead of 'rejected' — treat identically: redirect to next driver.
       //    Do NOT stop the loop; the same orderId is reused via reassign-driver.
       if (data.status === 'cancelled' && loopActiveRef.current) {
+        setActiveOrderStatus('pending');
+        activeOrderStatusRef.current = 'pending';
+        setLoopCurrentDriver('');
+        setLoopCurrentDriverDist(null);
+        setLoopCountdown(120);
         if (!redirectLockRef.current) redirectToNextRef.current();
         return;
       }
