@@ -722,6 +722,7 @@ export function ClinicMap({
   const [showGasChat,          setShowGasChat]          = useState(false);
   const [gasUnread,            setGasUnread]            = useState(false);
   const [hasUnreadChat,        setHasUnreadChat]        = useState(false);
+  const [unreadChatCount,      setUnreadChatCount]      = useState(0);
   const showChatRef = useRef(false);
   const [showGasCancelConfirm, setShowGasCancelConfirm] = useState(false);
 
@@ -807,6 +808,11 @@ export function ClinicMap({
   // Set   = phones currently passing that gate
   const liveOnlineDriverPhonesRef   = useRef<Set<string> | null>(null);  // drivers col
   const liveAvailableAgentPhonesRef = useRef<Set<string> | null>(null);  // approved_agents col
+  // ── Live-radar helpers ────────────────────────────────────────────────────
+  const loopActiveRef          = useRef(false);                          // mirrors loopActive for snapshot callbacks
+  const autoFindDriverRef      = useRef<()=>Promise<void>>(async()=>{}); // stable ptr → updated after definition
+  const prevDriverPhonesRef    = useRef<Set<string>>(new Set());         // tracks previous online phones
+  const newDriverSearchTimer   = useRef<ReturnType<typeof setTimeout>|null>(null); // debounce for auto-trigger
 
   const activeOrderIdRef    = useRef<number|null>(null);
   const activeOrderStatusRef= useRef<string>('pending');            // mirrors activeOrderStatus for DOM handlers
@@ -1849,6 +1855,11 @@ export function ClinicMap({
     }
   },[taxiCategory, onFilterChange]);
 
+  // ── Keep autoFindDriverRef stable for snapshot callbacks ─────────────────
+  useEffect(() => { autoFindDriverRef.current = autoFindDriver; }, [autoFindDriver]);
+  // ── Keep loopActiveRef in sync for snapshot callbacks ────────────────────
+  useEffect(() => { loopActiveRef.current = loopActive; }, [loopActive]);
+
   // ── Gas form: open with auto reverse-geocode ─────────────────────────────
   const openGasForm = useCallback(async ()=>{
     // Block if there's already an active gas order
@@ -2363,20 +2374,34 @@ export function ClinicMap({
   // ── Stop active order tracking (driver arrived / cancelled) ───────────────
   const stopOrderTracking = useCallback(()=>{
     // Remove driver marker
-    driverMarkerRef.current?.remove(); driverMarkerRef.current = null;
-    // Remove taxi route polylines and markers
+    driverMarkerRef.current?.remove();   driverMarkerRef.current   = null;
+    // Remove ALL taxi route/pin overlays
     taxiGlowLineRef.current?.remove();   taxiGlowLineRef.current   = null;
     taxiRouteLineRef.current?.remove();  taxiRouteLineRef.current  = null;
     taxiQuickPolyRef.current?.remove();  taxiQuickPolyRef.current  = null;
     taxiFromMarkerRef.current?.remove(); taxiFromMarkerRef.current = null;
     taxiToMarkerRef.current?.remove();   taxiToMarkerRef.current   = null;
-    // Reset state
+    // Reset active-order state
     setActiveOrderId(null);    setActiveOrderStatus('pending');
     setDriverLat(null);        setDriverLng(null);
     setDriverDistKm(null);     setDriverEtaMin(null);
     setShowChat(false);        prevDriverPosRef.current = null;
-    activeOrderIdRef.current    = null;
+    activeOrderIdRef.current     = null;
     activeOrderStatusRef.current = 'pending';
+    // Reset chat unread
+    setHasUnreadChat(false);   setUnreadChatCount(0);
+    // Reset quick taxi form (so map opens fresh for next order)
+    setTaxiQuickDest('');
+    setTaxiQuickFromPt(null);  setTaxiQuickToPt(null);
+    setTaxiQuickDistKm(null);  setTaxiQuickPrice(null);
+    // Reset manual taxi routing UI state
+    setTaxiStep('idle');       taxiStepRef.current = 'idle';
+    setTaxiFromPt(null);       setTaxiToPt(null);
+    setTaxiDistKm(null);       setTaxiEstPrice(null);
+    setTaxiDriverItem(null);   setTaxiAutoConnect(false);
+    setTaxiSuccess(false);     setTaxiError(null);
+    setTaxiFromPlaced(false);  setTaxiDestName('');
+    taxiFromPtRef.current = null;
     localStorage.removeItem('diyala_active_order');
     // Clear the search loop
     setLoopActive(false); setLoopCountdown(null); setLoopCurrentDriver(''); setLoopCurrentDriverDist(null);
@@ -2504,13 +2529,23 @@ export function ClinicMap({
           const p = data.phone as string | undefined;
           if (p) phones.add(p.trim());
         });
-        // snap.empty → no drivers at all → empty Set (blocks all)
-        // phones.size=0 but snap not empty → docs exist but none pass filter
-        //   → also empty Set (all blocked) which is the correct safe outcome
-        // phones.size=0 AND snap.empty → return null to skip this gate
         liveOnlineDriverPhonesRef.current =
           (!snap.empty || phones.size > 0) ? phones : null;
-        console.log(`[LiveFilter/drivers] online+available phones: ${phones.size}`, [...phones]);
+
+        // ── New-driver trigger: if loop is searching and a new phone appeared,
+        //    immediately re-run autoFindDriver instead of waiting for the 120s cycle ─
+        const prev = prevDriverPhonesRef.current;
+        const hasNewPhone = [...phones].some(p => !prev.has(p));
+        prevDriverPhonesRef.current = new Set(phones);
+        if (hasNewPhone && loopActiveRef.current) {
+          console.log(`[LiveFilter/drivers] new driver(s) detected while loop active — triggering search`);
+          if (newDriverSearchTimer.current) clearTimeout(newDriverSearchTimer.current);
+          newDriverSearchTimer.current = setTimeout(() => {
+            if (loopActiveRef.current) autoFindDriverRef.current();
+          }, 900); // 900ms debounce — prevents thrashing on rapid updates
+        } else {
+          console.log(`[LiveFilter/drivers] online+available phones: ${phones.size}`, [...phones]);
+        }
       },
       (err) => {
         console.warn('[LiveFilter/drivers] snapshot error:', err?.code);
@@ -2744,20 +2779,32 @@ export function ClinicMap({
   // ── Keep showChatRef in sync with showChat ────────────────────────────────
   useEffect(()=>{ showChatRef.current = showChat; }, [showChat]);
 
-  // ── Taxi chat unread: Firestore live listener ─────────────────────────────
+  // ── Taxi chat unread: Firestore live listener (with count) ───────────────
   useEffect(()=>{
-    if (!activeOrderId) { setHasUnreadChat(false); return; }
+    if (!activeOrderId) {
+      setHasUnreadChat(false);
+      setUnreadChatCount(0);
+      return;
+    }
+    // Listen to ALL messages — count those from non-customer (driver/agent)
+    // that arrived after the chat was last opened (tracked by showChatRef).
     const q = query(
       collection(db, 'chats', String(activeOrderId), 'messages'),
-      orderBy('timestamp', 'desc'),
-      limit(1),
+      orderBy('timestamp', 'asc'),
     );
     const unsub = onSnapshot(q, snap => {
       if (snap.empty) return;
-      const last = snap.docs[0].data();
-      const sender: string = last.senderId ?? last.sender ?? '';
-      if (sender !== 'customer' && !showChatRef.current) {
+      if (showChatRef.current) return; // chat is open — nothing is unread
+      // Count messages from non-customer sender
+      let count = 0;
+      snap.forEach(d => {
+        const data = d.data();
+        const sender: string = data.senderId ?? data.sender ?? '';
+        if (sender !== 'customer') count++;
+      });
+      if (count > 0) {
         setHasUnreadChat(true);
+        setUnreadChatCount(count);
       }
     }, () => {/* ignore errors */});
     return () => unsub();
@@ -4791,14 +4838,17 @@ export function ClinicMap({
               {/* Chat toggle button */}
               {activeOrderId && activeOrderStatus !== 'done' && activeOrderStatus !== 'cancelled' && (
                 <button
-                  onClick={()=>{ setShowChat(true); setHasUnreadChat(false); }}
+                  onClick={()=>{ setShowChat(true); setHasUnreadChat(false); setUnreadChatCount(0); }}
                   style={{
                     background: showChat ? 'rgba(123,47,247,0.25)' : 'rgba(123,47,247,0.1)',
-                    border:'1px solid rgba(123,47,247,0.5)',
-                    color:'#c77dff',fontFamily:'Orbitron,sans-serif',fontSize:'8px',
+                    border:`1px solid ${hasUnreadChat ? '#ff2d50' : 'rgba(123,47,247,0.5)'}`,
+                    color: hasUnreadChat ? '#ff8099' : '#c77dff',
+                    fontFamily:'Orbitron,sans-serif',fontSize:'8px',
                     letterSpacing:'0.1em',padding:'6px 10px',cursor:'pointer',
                     flexShrink:0,transition:'all 0.2s',
-                    boxShadow: showChat ? '0 0 14px rgba(123,47,247,0.3)' : 'none',
+                    boxShadow: hasUnreadChat
+                      ? '0 0 18px rgba(255,45,80,0.5)'
+                      : showChat ? '0 0 14px rgba(123,47,247,0.3)' : 'none',
                     position:'relative',
                   }}
                   onMouseEnter={e=>{(e.currentTarget as HTMLElement).style.background='rgba(123,47,247,0.3)';}}
@@ -4807,13 +4857,18 @@ export function ClinicMap({
                   💬 دردشة
                   {hasUnreadChat && (
                     <span style={{
-                      position:'absolute', top:'-4px', right:'-4px',
-                      width:'10px', height:'10px', borderRadius:'50%',
+                      position:'absolute', top:'-6px', right:'-6px',
+                      minWidth:'16px', height:'16px', borderRadius:'8px',
+                      padding:'0 3px',
                       background:'#ff2d50',
                       boxShadow:'0 0 8px #ff2d50, 0 0 16px rgba(255,45,80,0.6)',
                       animation:'chat-unread-pulse 1.4s ease-in-out infinite',
-                      display:'block',
-                    }}/>
+                      display:'flex', alignItems:'center', justifyContent:'center',
+                      fontFamily:'Orbitron,sans-serif', fontSize:'7px',
+                      color:'#fff', fontWeight:700,
+                    }}>
+                      {unreadChatCount > 0 ? (unreadChatCount > 9 ? '9+' : unreadChatCount) : '!'}
+                    </span>
                   )}
                 </button>
               )}
@@ -5088,12 +5143,12 @@ export function ClinicMap({
       {/* ── Floating Chat Icon (shown when chat is minimized and trip is active) ── */}
       {activeOrderId && !showChat && ['pending','accepted','driving'].includes(activeOrderStatus) && (
         <button
-          onClick={()=>{ setShowChat(true); setHasUnreadChat(false); }}
+          onClick={()=>{ setShowChat(true); setHasUnreadChat(false); setUnreadChatCount(0); }}
           title="فتح الدردشة"
           style={{
             position:'absolute', bottom:'90px', left:'16px', zIndex:4001,
             width:'54px', height:'54px', borderRadius:'50%',
-            background: hasUnreadChat ? 'rgba(5,8,15,0.97)' : 'rgba(5,8,15,0.97)',
+            background:'rgba(5,8,15,0.97)',
             border: hasUnreadChat ? '2px solid #ff2d50' : '2px solid #7b2ff7',
             boxShadow: hasUnreadChat
               ? '0 0 22px rgba(255,45,80,0.7), 0 0 8px rgba(255,45,80,0.4)'
@@ -5113,14 +5168,17 @@ export function ClinicMap({
           }}>CHAT</span>
           {hasUnreadChat && (
             <span style={{
-              position:'absolute', top:'-3px', right:'-3px',
-              width:'16px', height:'16px', borderRadius:'50%',
+              position:'absolute', top:'-4px', right:'-4px',
+              minWidth:'18px', height:'18px', borderRadius:'9px',
+              padding:'0 3px',
               background:'#ff2d50',
               boxShadow:'0 0 10px #ff2d50, 0 0 20px rgba(255,45,80,0.7)',
               animation:'chat-unread-pulse 1.4s ease-in-out infinite',
               display:'flex', alignItems:'center', justifyContent:'center',
-              fontFamily:'Orbitron,sans-serif', fontSize:'7px', color:'#fff', fontWeight:700,
-            }}>!</span>
+              fontFamily:'Orbitron,sans-serif', fontSize:'8px', color:'#fff', fontWeight:700,
+            }}>
+              {unreadChatCount > 0 ? (unreadChatCount > 9 ? '9+' : unreadChatCount) : '!'}
+            </span>
           )}
         </button>
       )}
