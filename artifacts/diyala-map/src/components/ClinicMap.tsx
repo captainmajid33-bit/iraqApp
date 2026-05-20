@@ -2021,7 +2021,17 @@ export function ClinicMap({
       const drivers: DriverRow[] = Array.isArray(dRaw) ? (dRaw as DriverRow[]) : [];
       const SEARCH_RADIUS_KM = 10;
 
-      const available = drivers
+      // ── Live dual-gate cross-check (approved_agents ∩ drivers) ──────────────
+      // getLiveFilteredPhones() reads the pre-warmed onSnapshot Sets synchronously.
+      // If a driver is offline in Firestore (isOnline=false or status≠available),
+      // their phone is NOT in the Set → they are excluded here before any order is placed.
+      const { phones: dispatchFilterPhones, source: dispatchFilterSrc } = getLiveFilteredPhones();
+      const fsFilteredDrivers = dispatchFilterPhones !== null
+        ? drivers.filter(d => dispatchFilterPhones.has((d.phone ?? '').trim()))
+        : drivers; // both gates still null (very first mount, no internet) → trust REST
+      console.log(`[dispatchTaxiNow] live dual-gate (${dispatchFilterSrc}): ${fsFilteredDrivers.length}/${drivers.length} pass`);
+
+      const available = fsFilteredDrivers
         .map(d=>({ ...d, distKm: haversineDist(fromPt.lat, fromPt.lng, d.lat, d.lng) }))
         .filter(d=>d.distKm <= SEARCH_RADIUS_KM)
         .sort((a,b)=>a.distKm - b.distKm);
@@ -2459,20 +2469,18 @@ export function ClinicMap({
   // ── Keep activeDriverPhoneRef current (safe for useCallback closures) ────────
   useEffect(() => { activeDriverPhoneRef.current = activeDriverPhone; }, [activeDriverPhone]);
 
-  // ── Live Firestore listeners for driver availability (active while loop runs) ─
-  // Both listeners fire within milliseconds of any field change in Firestore.
-  // If a driver closes the partner app during a search, their UID doc flips
-  // isOnline=false → liveOnlineDriverPhonesRef loses their phone immediately →
-  // the next routing call (autoFindDriver / redirectToNextDriver) skips them.
+  // ── Live Firestore listeners for driver availability (always-on from mount) ──
+  // Started once when the map mounts — NOT gated on loopActive.
+  // This eliminates the race-condition where loopActive=true triggers the
+  // listener AND autoFindDriver at the same time; listeners are pre-warmed
+  // before the user ever taps "search", so Sets are already populated.
+  //
+  // Gate 1 — approved_agents: status='available' AND isOnline=true (admin-managed)
+  // Gate 2 — drivers col:     isOnline=true  (partner-app authoritative)
+  // A driver must appear in BOTH sets to be routed (intersection).
+  // Any field change in Firestore propagates here in < 1 second.
   useEffect(() => {
-    if (!loopActive) {
-      // Clear stale sets when loop stops so next session starts fresh
-      liveOnlineDriverPhonesRef.current   = null;
-      liveAvailableAgentPhonesRef.current = null;
-      return;
-    }
-
-    // Gate 2 — drivers collection: isOnline=true (partner-app authoritative)
+    // Gate 2 — drivers collection: isOnline=true
     const unsubDrivers = onSnapshot(
       query(collection(db, 'drivers'), where('isOnline', '==', true)),
       (snap) => {
@@ -2481,7 +2489,8 @@ export function ClinicMap({
           const p = d.data().phone as string | undefined;
           if (p) phones.add(p.trim());
         });
-        // If docs exist but none carry phone field, keep null (skip this gate)
+        // snap.empty means NO drivers online → empty Set (blocks all)
+        // phones.size=0 but snap has docs → docs lack phone field → skip gate (null)
         liveOnlineDriverPhonesRef.current =
           (phones.size > 0 || snap.empty) ? phones : null;
         console.log(`[LiveFilter/drivers] isOnline=true phones: ${phones.size}`, [...phones]);
@@ -2492,7 +2501,7 @@ export function ClinicMap({
       },
     );
 
-    // Gate 1 — approved_agents: status='available' AND isOnline=true (admin-managed)
+    // Gate 1 — approved_agents: status='available' AND isOnline=true
     const unsubAgents = onSnapshot(
       query(
         collection(db, 'approved_agents'),
@@ -2515,7 +2524,8 @@ export function ClinicMap({
     );
 
     return () => { unsubDrivers(); unsubAgents(); };
-  }, [loopActive]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // ← empty deps: start once on mount, stop on unmount
 
   // ── Read live phone Sets synchronously (no await needed) ──────────────────
   // Returns intersection of both gates, or falls back gracefully if either is null.
