@@ -809,6 +809,12 @@ export function ClinicMap({
   const loopEstPriceRef    = useRef<number>(0);
   const redirectToNextRef  = useRef<()=>Promise<void>>(async()=>{});   // stable pointer, updated after def
   const [loopCurrentDriverDist, setLoopCurrentDriverDist] = useState<number|null>(null); // km to the driver currently being tried
+  // ── Online drivers state: rebuilt from Firestore snapshot on every change ──
+  // Using React STATE (not ref) so the map re-renders immediately when any
+  // driver flips isOnline ↔ false without requiring a page refresh.
+  const [onlineDrivers, setOnlineDrivers] = useState<Array<{
+    phone: string; lat: number|null; lng: number|null; name: string;
+  }>>([]);
   const loopInitDistRef    = useRef<number|null>(null);   // distance to first auto-found driver
   // ── Redirect guard ────────────────────────────────────────────────────────
   // true while redirectToNextDriver is mid-flight (between cancel-old & create-new).
@@ -830,8 +836,9 @@ export function ClinicMap({
   // ── Live-radar helpers ────────────────────────────────────────────────────
   const loopActiveRef          = useRef(false);                          // mirrors loopActive for snapshot callbacks
   const autoFindDriverRef      = useRef<()=>Promise<void>>(async()=>{}); // stable ptr → updated after definition
-  const prevDriverPhonesRef    = useRef<Set<string>>(new Set());         // tracks previous online phones
+  const prevDriverPhonesRef    = useRef<Set<string>>(new Set());         // tracks previous online phones (new-driver trigger only)
   const newDriverSearchTimer   = useRef<ReturnType<typeof setTimeout>|null>(null); // debounce for auto-trigger
+  const onlineDriverMarkersRef = useRef<Map<string, L.Marker>>(new Map()); // phone → Leaflet marker
 
   const activeOrderIdRef    = useRef<number|null>(null);
   const activeOrderStatusRef= useRef<string>('pending');            // mirrors activeOrderStatus for DOM handlers
@@ -2540,46 +2547,64 @@ export function ClinicMap({
     const unsubDrivers = onSnapshot(
       collection(db, 'drivers'),   // fetch ALL — filter client-side (type-mismatch safe)
       (snap) => {
-        const phones = new Set<string>();
+        // ── Rebuild from scratch on every snapshot ─────────────────────────
+        // When a driver presses "offline" their Firestore doc stays — only
+        // isOnline changes to false.  We re-filter the ENTIRE collection here
+        // so React state reflects reality immediately without comparing with
+        // a stale previous array.
+        const phones      = new Set<string>();
+        const activeDocs: Array<{phone:string; lat:number|null; lng:number|null; name:string}> = [];
+
         snap.forEach(d => {
           const data = d.data();
-          // ── Gate: فئة التكسي فقط — استبعاد وكلاء الغاز وأي فئات أخرى ──
+          // ── Category gate: taxi only ──────────────────────────────────────
           const dtype: string = (data.driverType ?? data.category ?? '').toString().toLowerCase();
-          if (dtype && dtype !== 'taxi') return;  // غير تكسي → تجاهل
-          if (!isOnlineTruthy(data.isOnline)) return;  // offline (bool or str)
-          if (!isAvailable(data.status))      return;  // not 'available'
+          if (dtype && dtype !== 'taxi') return;
+          // ── Live status gates (direct field read, no prev comparison) ─────
+          if (!isOnlineTruthy(data.isOnline)) return;   // bool true OR string 'true'
+          if (!isAvailable(data.status))      return;   // must be 'available'
           const p = data.phone as string | undefined;
-          if (p) phones.add(p.trim());
+          if (!p) return;
+          phones.add(p.trim());
+          activeDocs.push({
+            phone: p.trim(),
+            lat:   typeof data.lat === 'number' ? data.lat : null,
+            lng:   typeof data.lng === 'number' ? data.lng : null,
+            name:  (data.driverName ?? data.name ?? '') as string,
+          });
         });
-        liveOnlineDriverPhonesRef.current =
-          (!snap.empty || phones.size > 0) ? phones : null;
 
-        // ── New-driver trigger: if loop is searching and a new phone appeared,
-        //    immediately re-run autoFindDriver instead of waiting for the 120s cycle ─
-        const prev = prevDriverPhonesRef.current;
-        const hasNewPhone   = [...phones].some(p => !prev.has(p));
-        // ── Offline-driver trigger: if the driver currently being contacted
-        //    went offline, redirect immediately to the next available driver.
-        const disappeared   = [...prev].filter(p => !phones.has(p));
+        // Update live-filter ref (sync, for getLiveFilteredPhones cross-check)
+        liveOnlineDriverPhonesRef.current = (!snap.empty || phones.size > 0) ? phones : null;
+
+        // Update React state → triggers immediate re-render + marker redraw
+        setOnlineDrivers(activeDocs);
+
+        // ── New-driver trigger (kept for search loop auto-wake) ──────────────
+        const prev        = prevDriverPhonesRef.current;
+        const hasNewPhone = [...phones].some(p => !prev.has(p));
         prevDriverPhonesRef.current = new Set(phones);
-
-        if (disappeared.length > 0 && loopActiveRef.current) {
-          const curPhone = activeDriverPhoneRef.current;
-          if (curPhone && disappeared.includes(curPhone) && !redirectLockRef.current) {
-            console.log(`[LiveFilter/drivers] current driver (${curPhone}) went offline — redirecting`);
-            redirectToNextRef.current();
-          }
-        }
 
         if (hasNewPhone && loopActiveRef.current) {
           console.log(`[LiveFilter/drivers] new driver(s) detected while loop active — triggering search`);
           if (newDriverSearchTimer.current) clearTimeout(newDriverSearchTimer.current);
           newDriverSearchTimer.current = setTimeout(() => {
             if (loopActiveRef.current) autoFindDriverRef.current();
-          }, 900); // 900ms debounce — prevents thrashing on rapid updates
-        } else {
-          console.log(`[LiveFilter/drivers] online+available phones: ${phones.size}`, [...phones]);
+          }, 900);
         }
+
+        // ── Offline-driver trigger (direct field check, no prev diff needed) ─
+        // If the driver currently being contacted is no longer in the online
+        // set, redirect to the next driver immediately.
+        if (loopActiveRef.current && !redirectLockRef.current) {
+          const curPhone = activeDriverPhoneRef.current;
+          if (curPhone && !phones.has(curPhone)) {
+            console.log(`[LiveFilter/drivers] current driver (${curPhone}) went offline — redirecting`);
+            redirectToNextRef.current();
+          }
+        }
+
+        console.log(`[LiveFilter/drivers] online+available: ${phones.size}`, [...phones]);
       },
       (err) => {
         console.warn('[LiveFilter/drivers] snapshot error:', err?.code);
@@ -2611,6 +2636,55 @@ export function ClinicMap({
     return () => { unsubDrivers(); unsubAgents(); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // ← empty deps: start once on mount, stop on unmount
+
+  // ── Render / sync Leaflet markers for online taxi drivers ─────────────────
+  // Runs every time `onlineDrivers` state changes (set by Firestore snapshot).
+  // Uses a phone→marker Map to add new drivers, remove offline drivers, and
+  // update positions — all in < 1 ms, no page refresh needed.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    const existing = onlineDriverMarkersRef.current;
+    const currentPhones = new Set(onlineDrivers.map(d => d.phone));
+
+    // Remove markers for drivers who went offline
+    existing.forEach((marker, phone) => {
+      if (!currentPhones.has(phone)) {
+        marker.remove();
+        existing.delete(phone);
+      }
+    });
+
+    // Add or reposition markers for online drivers
+    onlineDrivers.forEach(driver => {
+      if (typeof driver.lat !== 'number' || typeof driver.lng !== 'number') return;
+      if (existing.has(driver.phone)) {
+        // Driver already has a marker — just move it
+        existing.get(driver.phone)!.setLatLng([driver.lat, driver.lng]);
+      } else {
+        // New driver came online — create a marker
+        const icon = L.divIcon({
+          className: '',
+          html: `<div style="
+            width:30px;height:30px;border-radius:50%;
+            background:rgba(0,245,212,0.18);
+            border:2px solid #00f5d4;
+            display:flex;align-items:center;justify-content:center;
+            font-size:16px;box-shadow:0 0 8px #00f5d4aa;">
+            🚕
+          </div>`,
+          iconSize: [30, 30],
+          iconAnchor: [15, 15],
+        });
+        const marker = L.marker([driver.lat, driver.lng], {
+          icon,
+          zIndexOffset: 400,
+          title: driver.name || 'سائق متاح',
+        }).addTo(map);
+        existing.set(driver.phone, marker);
+      }
+    });
+  }, [onlineDrivers]);
 
   // ── Read live phone Sets synchronously (no await needed) ──────────────────
   // Returns intersection of both gates, or falls back gracefully if either is null.
