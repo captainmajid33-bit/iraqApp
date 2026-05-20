@@ -752,7 +752,7 @@ function CategoriesTab({ cats, onRefresh, toast }: { cats: Cat[]; onRefresh: () 
 
 // ── MediaItem type ────────────────────────────────────────────────────────────
 type MediaItem = {
-  type:         "image" | "video";
+  type:         "image" | "video" | "youtube";
   url:          string;
   customHeight?: number;
   objectFit?:   "cover" | "contain" | "fill";
@@ -769,6 +769,27 @@ function parseMediaItems(raw: string): MediaItem[] {
   }
   if (t) return [{ type: "image", url: t }];
   return [];
+}
+
+// ── YouTube helpers ────────────────────────────────────────────────────────────
+function extractYouTubeId(url: string): string | null {
+  if (!url) return null;
+  // Handles: watch?v=, youtu.be/, /embed/, /live/, /shorts/
+  const m = url.match(
+    /(?:youtube\.com\/(?:watch\?(?:.*&)?v=|embed\/|live\/|shorts\/)|youtu\.be\/)([A-Za-z0-9_-]{11})/
+  );
+  return m ? m[1] : null;
+}
+
+function toYouTubeEmbed(url: string): string {
+  const id = extractYouTubeId(url);
+  if (!id) return url;
+  return `https://www.youtube-nocookie.com/embed/${id}?autoplay=1&mute=1&controls=1&rel=0`;
+}
+
+function ytThumbnail(url: string): string {
+  const id = extractYouTubeId(url);
+  return id ? `https://img.youtube.com/vi/${id}/mqdefault.jpg` : "";
 }
 
 const DEFAULT_HEIGHT = 190;
@@ -790,11 +811,11 @@ function SettingsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
   const [uploading,      setUploading]      = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [urlInput,       setUrlInput]       = useState("");
-  const [urlType,        setUrlType]        = useState<"image" | "video">("image");
+  const [urlType,        setUrlType]        = useState<"image" | "video" | "youtube">("image");
   const [newHeight,      setNewHeight]      = useState<number>(DEFAULT_HEIGHT);
   const [newFit,         setNewFit]         = useState<"cover" | "contain" | "fill">("cover");
   const [previewUrl,     setPreviewUrl]     = useState<string>("");
-  const [previewType,    setPreviewType]    = useState<"image" | "video">("image");
+  const [previewType,    setPreviewType]    = useState<"image" | "video" | "youtube">("image");
   const fileInputRef     = useRef<HTMLInputElement>(null);
   const previewVideoRef  = useRef<HTMLVideoElement>(null);
 
@@ -883,8 +904,12 @@ function SettingsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
   const handleAddUrl = async () => {
     const url = urlInput.trim();
     if (!url) return;
+    if (urlType === "youtube" && !extractYouTubeId(url)) {
+      toast.show("رابط يوتيوب غير صحيح — تأكد من صيغة الرابط", false);
+      return;
+    }
     const next = [...items, { type: urlType, url, customHeight: newHeight, objectFit: newFit }];
-    await persistItems(next, "✓ تمت إضافة الرابط للسلايدر");
+    await persistItems(next, urlType === "youtube" ? "✓ تمت إضافة فيديو يوتيوب للسلايدر" : "✓ تمت إضافة الرابط للسلايدر");
     setUrlInput("");
     setPreviewUrl("");
   };
@@ -959,15 +984,21 @@ function SettingsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
         <div style={{ display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" }}>
           <select
             value={urlType}
-            onChange={e => setUrlType(e.target.value as "image" | "video")}
+            onChange={e => {
+              const t = e.target.value as "image" | "video" | "youtube";
+              setUrlType(t);
+              setPreviewType(t);
+              if (urlInput.trim()) setPreviewUrl(urlInput.trim());
+            }}
             disabled={busy}
             style={{
-              ...FLD, width: "110px", flexShrink: 0, cursor: "pointer",
+              ...FLD, width: "128px", flexShrink: 0, cursor: "pointer",
               padding: "8px 10px",
             }}
           >
             <option value="image">🖼 صورة</option>
             <option value="video">🎬 فيديو</option>
+            <option value="youtube">▶️ يوتيوب</option>
           </select>
           <input
             style={{ ...FLD, flex: 1, minWidth: "200px" }}
@@ -977,7 +1008,7 @@ function SettingsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
               setPreviewUrl(e.target.value.trim());
               setPreviewType(urlType);
             }}
-            placeholder="https://example.com/media.jpg"
+            placeholder={urlType === "youtube" ? "https://youtube.com/watch?v=..." : "https://example.com/media.jpg"}
             onFocus={ff} onBlur={fb}
             onKeyDown={e => e.key === "Enter" && !busy && handleAddUrl()}
             disabled={busy}
@@ -1090,7 +1121,29 @@ function SettingsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
             <div style={{ flex: 1, position: "relative", overflow: "hidden" }}>
               {previewUrl ? (
                 <>
-                  {previewType === "video" ? (
+                  {previewType === "youtube" ? (
+                    // YouTube iframe preview
+                    extractYouTubeId(previewUrl) ? (
+                      <iframe
+                        key={previewUrl}
+                        src={toYouTubeEmbed(previewUrl)}
+                        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                        allowFullScreen
+                        style={{ position: "absolute", inset: 0, width: "100%", height: "100%", border: "none", display: "block" }}
+                      />
+                    ) : (
+                      <div style={{
+                        position: "absolute", inset: 0, display: "flex", flexDirection: "column",
+                        alignItems: "center", justifyContent: "center", gap: "8px",
+                        background: "rgba(255,0,0,0.05)",
+                      }}>
+                        <span style={{ fontSize: "28px" }}>▶️</span>
+                        <span style={{ fontFamily: "Rajdhani, sans-serif", fontSize: "11px", color: "#ff5555" }}>
+                          رابط يوتيوب غير صحيح
+                        </span>
+                      </div>
+                    )
+                  ) : previewType === "video" ? (
                     <video
                       ref={previewVideoRef}
                       key={previewUrl}
@@ -1109,23 +1162,27 @@ function SettingsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
                       style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: newFit, objectPosition: "center", display: "block" }}
                     />
                   )}
-                  {/* Right-edge fade */}
-                  <div style={{
-                    position: "absolute", inset: 0, zIndex: 1,
-                    background: "linear-gradient(to right, rgba(5,8,15,0.05) 60%, rgba(5,8,15,0.75) 100%)",
-                    pointerEvents: "none",
-                  }} />
-                  {/* Fit label overlay */}
-                  <div style={{
-                    position: "absolute", top: "8px", right: "8px", zIndex: 4,
-                    fontFamily: "Orbitron, sans-serif", fontSize: "8px", letterSpacing: "0.1em",
-                    color: "#fff", background: "rgba(0,0,0,0.55)",
-                    padding: "3px 8px", borderRadius: "2px",
-                    border: `1px solid ${C.blue}44`,
-                    backdropFilter: "blur(4px)",
-                  }}>
-                    {newFit.toUpperCase()}
-                  </div>
+                  {/* Right-edge fade (not on YouTube) */}
+                  {previewType !== "youtube" && (
+                    <div style={{
+                      position: "absolute", inset: 0, zIndex: 1,
+                      background: "linear-gradient(to right, rgba(5,8,15,0.05) 60%, rgba(5,8,15,0.75) 100%)",
+                      pointerEvents: "none",
+                    }} />
+                  )}
+                  {/* Fit label overlay (not on YouTube) */}
+                  {previewType !== "youtube" && (
+                    <div style={{
+                      position: "absolute", top: "8px", right: "8px", zIndex: 4,
+                      fontFamily: "Orbitron, sans-serif", fontSize: "8px", letterSpacing: "0.1em",
+                      color: "#fff", background: "rgba(0,0,0,0.55)",
+                      padding: "3px 8px", borderRadius: "2px",
+                      border: `1px solid ${C.blue}44`,
+                      backdropFilter: "blur(4px)",
+                    }}>
+                      {newFit.toUpperCase()}
+                    </div>
+                  )}
                 </>
               ) : (
                 <div style={{
@@ -1216,16 +1273,25 @@ function SettingsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
               }}>
                 {/* Type badge */}
                 <div style={{
-                  flexShrink: 0, width: "56px", textAlign: "center",
+                  flexShrink: 0, width: "66px", textAlign: "center",
                   padding: "3px 0",
-                  background: item.type === "video" ? `${C.blue}18` : `${C.purple}18`,
-                  border: `1px solid ${item.type === "video" ? C.blue : C.purple}55`,
+                  background: item.type === "video"
+                    ? `${C.blue}18`
+                    : item.type === "youtube"
+                    ? "rgba(255,0,0,0.12)"
+                    : `${C.purple}18`,
+                  border: `1px solid ${
+                    item.type === "video" ? C.blue
+                    : item.type === "youtube" ? "#ff4444"
+                    : C.purple}55`,
                   borderRadius: "2px",
                   fontFamily: "Orbitron, sans-serif", fontSize: "8px",
-                  color: item.type === "video" ? C.blue : C.purple,
+                  color: item.type === "video" ? C.blue
+                       : item.type === "youtube" ? "#ff6666"
+                       : C.purple,
                   letterSpacing: "0.08em",
                 }}>
-                  {item.type === "video" ? "🎬 VIDEO" : "🖼 IMAGE"}
+                  {item.type === "video" ? "🎬 VIDEO" : item.type === "youtube" ? "▶️ YT" : "🖼 IMAGE"}
                 </div>
 
                 {/* Thumbnail / icon */}
@@ -1237,6 +1303,13 @@ function SettingsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
                 }}>
                   {item.type === "image"
                     ? <img src={item.url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                    : item.type === "youtube"
+                    ? <img
+                        src={ytThumbnail(item.url)}
+                        alt="yt"
+                        style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                        onError={e => { (e.target as HTMLImageElement).style.display = "none"; }}
+                      />
                     : <span style={{ fontSize: "18px" }}>🎬</span>
                   }
                 </div>
