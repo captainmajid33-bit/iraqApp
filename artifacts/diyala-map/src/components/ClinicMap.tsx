@@ -2557,8 +2557,20 @@ export function ClinicMap({
         // ── New-driver trigger: if loop is searching and a new phone appeared,
         //    immediately re-run autoFindDriver instead of waiting for the 120s cycle ─
         const prev = prevDriverPhonesRef.current;
-        const hasNewPhone = [...phones].some(p => !prev.has(p));
+        const hasNewPhone   = [...phones].some(p => !prev.has(p));
+        // ── Offline-driver trigger: if the driver currently being contacted
+        //    went offline, redirect immediately to the next available driver.
+        const disappeared   = [...prev].filter(p => !phones.has(p));
         prevDriverPhonesRef.current = new Set(phones);
+
+        if (disappeared.length > 0 && loopActiveRef.current) {
+          const curPhone = activeDriverPhoneRef.current;
+          if (curPhone && disappeared.includes(curPhone) && !redirectLockRef.current) {
+            console.log(`[LiveFilter/drivers] current driver (${curPhone}) went offline — redirecting`);
+            redirectToNextRef.current();
+          }
+        }
+
         if (hasNewPhone && loopActiveRef.current) {
           console.log(`[LiveFilter/drivers] new driver(s) detected while loop active — triggering search`);
           if (newDriverSearchTimer.current) clearTimeout(newDriverSearchTimer.current);
@@ -2690,11 +2702,17 @@ export function ClinicMap({
       setLoopActive(false); setLoopCountdown(null);
     }
     // Driver rejected → redirect to next available driver immediately.
-    // redirectLockRef blocks duplicate calls: the 3-second poll may deliver
-    // 'rejected' again WHILE customer-cancel is still in-flight, causing a
-    // second concurrent redirect → double orders → accidental cancellation.
+    // ① redirectLockRef blocks duplicate calls (poll + SSE race).
+    // ② Clear activeOrderId NOW — this kills the 3-second polling interval
+    //    *before* redirectToNextDriver fires, so the poll cannot deliver the
+    //    old order's stale 'rejected' snapshot during the customer-cancel window.
     if (data.status === 'rejected') {
-      if (!redirectLockRef.current) redirectToNextRef.current();
+      if (!redirectLockRef.current) {
+        // Kill the poll immediately by clearing the order from state/ref.
+        setActiveOrderId(null);
+        activeOrderIdRef.current = null;
+        redirectToNextRef.current();
+      }
       return;
     }
     // 'done' or 'finished' → hide chat and show rating dialog before clearing
@@ -2739,9 +2757,16 @@ export function ClinicMap({
   },[stopOrderTracking, syncOrderToFirestore]);
 
   // ── Poll order status every 3 s ───────────────────────────────────────────
+  // Fix: skip entirely while a redirect is in-flight (redirectLockRef=true).
+  // Without this guard the poll can fire during the ~500 ms customer-cancel
+  // window, fetch the OLD order still showing 'rejected', and launch a SECOND
+  // concurrent redirectToNextDriver — causing double orders / accidental cancel.
   useEffect(()=>{
     if (!activeOrderId) return;
     const poll = async ()=>{
+      // Do NOT read the old order while a redirect is executing — the order
+      // has already been (or is being) cancelled; any snapshot would be stale.
+      if (redirectLockRef.current) return;
       try {
         const res = await fetch(`/api/orders/${activeOrderId}`);
         if (!res.ok) return;
