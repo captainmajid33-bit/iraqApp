@@ -1,7 +1,7 @@
 import { Router, type IRouter } from "express";
 import { db } from "@workspace/db";
 import { driversOnlineTable, locationsTable, ordersTable } from "@workspace/db";
-import { eq, and, or, isNull } from "drizzle-orm";
+import { eq, and, or, isNull, gt, lt } from "drizzle-orm";
 import { broadcastDriverUpdate, broadcastOrderUpdate } from "../lib/sse";
 
 const router: IRouter = Router();
@@ -40,17 +40,26 @@ router.get("/drivers-online/all", async (req, res) => {
   }
 });
 
+// ── DRIVER_TTL_MS: how long a driver can be silent before treated as offline ──
+// The Flutter partner app sends a PUT (location ping) while online.
+// When the driver presses "مغلق" the app stops pinging — so updatedAt goes
+// stale. Any driver whose last ping is older than this value is excluded from
+// search results, acting as an automatic offline fallback.
+const DRIVER_TTL_MS = 3 * 60 * 1000; // 3 minutes
+
 // ── GET /api/drivers-online ───────────────────────────────────────────────────
 // Public — returns only drivers that are:
 //   • isOnline  = true
 //   • isBusy    = false
 //   • category  = ?category query param (optional, e.g. 'taxi')
 //   • location.status = 'مفتوح' (not disabled / closed)
+//   • updatedAt > NOW() - DRIVER_TTL_MS  (TTL: driver pinged recently)
 router.get("/drivers-online", async (req, res) => {
   const categoryFilter = typeof req.query.category === "string" && req.query.category.trim()
     ? req.query.category.trim()
     : null;
   try {
+    const cutoff = new Date(Date.now() - DRIVER_TTL_MS);
     const rows = await db
       .select({
         id:         driversOnlineTable.id,
@@ -70,6 +79,8 @@ router.get("/drivers-online", async (req, res) => {
         and(
           eq(driversOnlineTable.isOnline, true),
           eq(driversOnlineTable.isBusy,   false),
+          // TTL: exclude drivers that haven't pinged recently (e.g. pressed مغلق)
+          gt(driversOnlineTable.updatedAt, cutoff),
           // Filter by category when provided
           categoryFilter ? eq(driversOnlineTable.category, categoryFilter) : undefined,
           // Show driver only if: location is open, OR driver has no location row at all
@@ -79,8 +90,6 @@ router.get("/drivers-online", async (req, res) => {
             eq(locationsTable.status, "مفتوح"),
             eq(locationsTable.status, "open"),
           ),
-          // Exclude drivers whose location explicitly has مغلق status
-          // (reinforces the OR above — belt-and-suspenders for location-linked drivers)
         )
       );
 
@@ -242,3 +251,75 @@ router.delete("/drivers-online/:locationId", async (req, res) => {
 });
 
 export default router;
+
+// ── Stale-driver cleanup job ──────────────────────────────────────────────────
+// Runs every 60 s. Finds drivers whose updatedAt is older than DRIVER_TTL_MS
+// (meaning the Flutter partner app stopped pinging — driver pressed "مغلق"
+// without calling the DELETE endpoint). Marks them isOnline=false and
+// auto-rejects any pending taxi orders assigned to them so the customer
+// search-loop redirects immediately without waiting for the full countdown.
+export function startStaleDriverCleanup() {
+  setInterval(async () => {
+    try {
+      const cutoff = new Date(Date.now() - DRIVER_TTL_MS);
+
+      // 1. Find drivers that are marked online but haven't pinged recently
+      const stale = await db
+        .select({ locationId: driversOnlineTable.locationId, phone: driversOnlineTable.phone, driverName: driversOnlineTable.driverName })
+        .from(driversOnlineTable)
+        .where(and(
+          eq(driversOnlineTable.isOnline, true),
+          lt(driversOnlineTable.updatedAt, cutoff),
+        ));
+
+      if (stale.length === 0) return;
+
+      for (const driver of stale) {
+        // 2. Mark the driver offline
+        await db
+          .update(driversOnlineTable)
+          .set({ isOnline: false, isBusy: false, updatedAt: new Date() })
+          .where(eq(driversOnlineTable.locationId, driver.locationId));
+
+        broadcastDriverUpdate({
+          locationId: driver.locationId,
+          isOnline:   false,
+          isBusy:     false,
+          phone:      driver.phone      ?? '',
+          driverName: driver.driverName ?? '',
+        });
+
+        console.log(`[stale-cleanup] driver ${driver.locationId} (${driver.driverName}) went stale — marked offline`);
+
+        // 3. Auto-reject any pending orders assigned to this driver
+        const pendingOrders = await db
+          .select({ id: ordersTable.id })
+          .from(ordersTable)
+          .where(and(
+            eq(ordersTable.locationId, driver.locationId),
+            eq(ordersTable.status, 'pending'),
+          ));
+
+        for (const ord of pendingOrders) {
+          const [rejected] = await db
+            .update(ordersTable)
+            .set({ status: 'rejected' })
+            .where(eq(ordersTable.id, ord.id))
+            .returning();
+          if (rejected) {
+            broadcastOrderUpdate({
+              id:         rejected.id,
+              status:     'rejected',
+              locationId: rejected.locationId,
+              driverLat:  rejected.driverLat,
+              driverLng:  rejected.driverLng,
+            });
+            console.log(`[stale-cleanup] auto-rejected order #${rejected.id} (driver ${driver.locationId} stale)`);
+          }
+        }
+      }
+    } catch (err) {
+      console.error('[stale-cleanup] error:', err);
+    }
+  }, 60_000);
+}
