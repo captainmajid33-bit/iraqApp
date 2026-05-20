@@ -2519,11 +2519,14 @@ export function ClinicMap({
     //   Flutter may write boolean true OR string 'true'; we filter client-side
     //   via isOnlineTruthy() to accept both without losing any driver docs.
     const unsubDrivers = onSnapshot(
-      collection(db, 'drivers'),   // fetch ALL — filter below
+      collection(db, 'drivers'),   // fetch ALL — filter client-side (type-mismatch safe)
       (snap) => {
         const phones = new Set<string>();
         snap.forEach(d => {
           const data = d.data();
+          // ── Gate: فئة التكسي فقط — استبعاد وكلاء الغاز وأي فئات أخرى ──
+          const dtype: string = (data.driverType ?? data.category ?? '').toString().toLowerCase();
+          if (dtype && dtype !== 'taxi') return;  // غير تكسي → تجاهل
           if (!isOnlineTruthy(data.isOnline)) return;  // offline (bool or str)
           if (!isAvailable(data.status))      return;  // not 'available'
           const p = data.phone as string | undefined;
