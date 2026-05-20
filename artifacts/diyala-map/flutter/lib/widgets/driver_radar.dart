@@ -24,6 +24,7 @@
 //    )
 // ============================================================================
 
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -119,6 +120,90 @@ class TaxiRadarEngine {
         .where('isOnline',   isEqualTo: true)         // server-side ✅ (Flutter writes bool)
         .where('status',     isEqualTo: 'available')  // server-side ✅
         .snapshots();
+  }
+}
+
+// ── TaxiOrderRouter ───────────────────────────────────────────────────────────
+// محرك التوجيه المتسلسل: يُرسل الطلب للسائقين واحداً تلو الآخر دون إلغاء الرحلة.
+//
+// القانون الصارم:
+//   ✅ driver_rejected | timeout → انتقل للسائق التالي (status يبقى 'searching')
+//   ✅ كل السائقين جُرّبوا ولم يقبل أحد → status = 'no_drivers_found'
+//   ❌ ممنوع منعاً باتاً: استدعاء cancelOrder() أو تغيير status → 'cancelled'
+//      إلا إذا ضغط الزبون زر الإلغاء يدوياً (خارج هذه الدالة تماماً)
+//
+// الاستخدام:
+//   final router = TaxiOrderRouter();
+//   await router.assignOrderToNextDriver(rideId, driverIds, 0);
+//   // عند إغلاق الشاشة أو إلغاء الزبون يدوياً:
+//   router.dispose();
+class TaxiOrderRouter {
+  // الاشتراك الحالي — نحتفظ بمرجع واحد فقط لضمان إلغائه قبل فتح الجديد
+  StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _rideSub;
+
+  // ── الدالة الرئيسية ───────────────────────────────────────────────────────
+  Future<void> assignOrderToNextDriver(
+    String       rideId,
+    List<String> availableDriverIds,
+    int          currentIndex,
+  ) async {
+    // 1. أوقف الاستماع للسائق السابق قبل البدء بالجديد (منع memory leaks)
+    await _rideSub?.cancel();
+    _rideSub = null;
+
+    // 2. انتهت قائمة السائقين دون قبول → أغلق الطلب بـ 'no_drivers_found'
+    if (currentIndex >= availableDriverIds.length) {
+      await FirebaseFirestore.instance
+          .collection('rides')
+          .doc(rideId)
+          .update({'status': 'no_drivers_found'});
+      return;
+    }
+
+    final targetDriverId = availableDriverIds[currentIndex];
+
+    // 3. حدّث وثيقة الرحلة: سائق جديد + عداد جديد + status يبقى 'searching'
+    //    ⚠ لا يُغيَّر status إلى 'cancelled' هنا أبداً
+    await FirebaseFirestore.instance
+        .collection('rides')
+        .doc(rideId)
+        .update({
+          'currentDriverId': targetDriverId,
+          'status':          'searching', // ← يبقى مفتوحاً دائماً
+          'timer':           15,          // ← عداد جديد 15 ثانية
+        });
+
+    // 4. استمع لرد السائق الحالي فقط (قبول / رفض / انتهاء وقت)
+    _rideSub = FirebaseFirestore.instance
+        .collection('rides')
+        .doc(rideId)
+        .snapshots()
+        .listen((rideDoc) {
+      if (!rideDoc.exists) return;
+      final status = (rideDoc.data()?['status'] as String?) ?? '';
+
+      if (status == 'accepted') {
+        // السائق قَبِل → أوقف الاستماع وانتهى البحث بنجاح
+        _rideSub?.cancel();
+        _rideSub = null;
+        return;
+      }
+
+      if (status == 'driver_rejected' || status == 'timeout') {
+        // ⚠ ممنوع منعاً باتاً استدعاء cancelOrder() هنا
+        // فقط ننتقل للسائق التالي في القائمة
+        _rideSub?.cancel();
+        _rideSub = null;
+        assignOrderToNextDriver(rideId, availableDriverIds, currentIndex + 1);
+      }
+    });
+  }
+
+  // ── تنظيف الموارد ─────────────────────────────────────────────────────────
+  // استدعِ dispose() عند إغلاق الشاشة أو عند إلغاء الزبون يدوياً
+  void dispose() {
+    _rideSub?.cancel();
+    _rideSub = null;
   }
 }
 
