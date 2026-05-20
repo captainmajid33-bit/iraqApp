@@ -178,6 +178,57 @@ router.get("/orders/:id", async (req, res) => {
   }
 });
 
+// ── PATCH /api/orders/:id/reassign-driver — redirect loop: move order silently ─
+// Reassigns an existing order to a new driver by updating locationId + resetting
+// status to 'pending'. Does NOT broadcast 'cancelled' to the customer — the loop
+// keeps the same orderId throughout the entire search session.
+router.patch("/orders/:id/reassign-driver", async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) { res.status(400).json({ error: "id غير صالح" }); return; }
+
+  const { locationId } = req.body ?? {};
+  if (typeof locationId !== "number") {
+    res.status(400).json({ error: "locationId (number) مطلوب" }); return;
+  }
+
+  try {
+    // Get old driver so we can free them
+    const [current] = await db
+      .select({ locationId: ordersTable.locationId })
+      .from(ordersTable)
+      .where(eq(ordersTable.id, id));
+
+    if (!current) { res.status(404).json({ error: "الطلب غير موجود" }); return; }
+
+    // Free old driver (non-fatal)
+    if (current.locationId !== locationId) {
+      await setDriverBusy(current.locationId, false);
+    }
+
+    // Reassign — reset status to pending for new driver
+    const [updated] = await db
+      .update(ordersTable)
+      .set({ locationId, status: 'pending', updatedAt: new Date() })
+      .where(eq(ordersTable.id, id))
+      .returning();
+
+    if (!updated) { res.status(404).json({ error: "الطلب غير موجود" }); return; }
+
+    // Ensure new driver is not stuck as busy
+    await setDriverBusy(locationId, false);
+
+    // Notify new driver's app (partner app polls by locationId)
+    // NOTE: no 'cancelled' event — customer keeps same orderId, loop stays alive.
+    broadcastOrderUpdate({ id: updated.id, status: 'pending', locationId });
+
+    console.log(`[PATCH /orders/${id}/reassign-driver] ${current.locationId} → ${locationId}`);
+    res.json({ ok: true, orderId: id });
+  } catch (err: any) {
+    console.error("[PATCH /orders/:id/reassign-driver] error:", err);
+    res.status(500).json({ error: "فشل إعادة تعيين السائق" });
+  }
+});
+
 // ── PATCH /api/orders/:id/driver-location — partner app sends GPS ────────────
 router.patch("/orders/:id/driver-location", async (req, res) => {
   try {
