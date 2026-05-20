@@ -2865,9 +2865,14 @@ export function ClinicMap({
     return () => unsub();
   },[activeOrderId, applyOrderSnapshot]);
 
-  // ── SSE listener for real-time order updates ──────────────────────────────
+  // ── SSE listener: order_update + driver_update ────────────────────────────
+  // driver_update fires when any driver goes online/offline via the REST API
+  // (PUT /api/drivers-online → online, DELETE → offline).
+  // We merge it into the onlineDrivers React state so map markers update
+  // immediately without waiting for the next Firestore snapshot.
   useEffect(()=>{
     const es = new EventSource('/api/events');
+
     es.addEventListener('order_update', (e: MessageEvent)=>{
       try {
         const { order } = JSON.parse(e.data) as { order: any };
@@ -2875,6 +2880,45 @@ export function ClinicMap({
         applyOrderSnapshot(order, 'sse');
       } catch { /* */ }
     });
+
+    es.addEventListener('driver_update', (e: MessageEvent)=>{
+      try {
+        const { driver } = JSON.parse(e.data) as { driver: any };
+        if (!driver) return;
+        const phone = String(driver.phone ?? '').trim();
+        if (!phone) return;
+        const goingOffline = !driver.isOnline || driver.isBusy === true;
+        setOnlineDrivers(prev => {
+          if (goingOffline) {
+            // Remove this driver from the visible list immediately
+            return prev.filter(d => d.phone !== phone);
+          }
+          // Driver came online or updated position — add or update
+          const idx = prev.findIndex(d => d.phone === phone);
+          const entry = {
+            phone,
+            lat:  typeof driver.lat  === 'number' ? driver.lat  : (prev[idx]?.lat  ?? null),
+            lng:  typeof driver.lng  === 'number' ? driver.lng  : (prev[idx]?.lng  ?? null),
+            name: (driver.driverName ?? prev[idx]?.name ?? '') as string,
+          };
+          if (idx === -1) return [...prev, entry];
+          return prev.map((d, i) => i === idx ? entry : d);
+        });
+        // Also keep the live-filter ref in sync (used by getLiveFilteredPhones cross-check)
+        if (liveOnlineDriverPhonesRef.current !== null) {
+          if (goingOffline) liveOnlineDriverPhonesRef.current.delete(phone);
+          else              liveOnlineDriverPhonesRef.current.add(phone);
+        }
+        // If the loop is active and the current driver just went offline, redirect
+        if (goingOffline && loopActiveRef.current && !redirectLockRef.current) {
+          if (phone === activeDriverPhoneRef.current) {
+            console.log(`[driver_update SSE] current driver (${phone}) went offline — redirecting`);
+            redirectToNextRef.current();
+          }
+        }
+      } catch { /* */ }
+    });
+
     es.onerror = ()=> es.close();
     return ()=> es.close();
   // eslint-disable-next-line react-hooks/exhaustive-deps
