@@ -2,7 +2,11 @@
 //  driver_radar.dart
 //  ديالى — رادار سائقي التكسي المتاحين في الوقت الفعلي
 //
-//  يعرض فقط السائقين الذين تنطبق عليهم الشروط الثلاثة معاً:
+//  يستخدم StreamBuilder + .snapshots() للتحديث اللحظي بدون إعادة تسجيل دخول.
+//  بمجرد أن يضغط السائق "مفتوح/مغلق" في تطبيقه، يتحدث الرادار في أجزاء
+//  من الثانية تلقائياً.
+//
+//  الشروط الثلاثة المطلوبة معاً:
 //    1. driverType == 'taxi'      ← فئة التكسي فقط (استبعاد الغاز وغيره)
 //    2. isOnline  == true         ← التطبيق مفتوح والسائق متصل
 //    3. status    == 'available'  ← ليس في رحلة حالية
@@ -20,7 +24,6 @@
 //    )
 // ============================================================================
 
-import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -91,8 +94,21 @@ bool _isTaxiType(dynamic val) {
   return s == 'taxi' || s.isEmpty;
 }
 
-// ── DriverRadar widget ────────────────────────────────────────────────────────
-class DriverRadar extends StatefulWidget {
+// ── الدالة الرئيسية: Stream حي من Firestore ───────────────────────────────────
+// تُعيد Stream يستمع لحظة بلحظة — كل تغيير في isOnline أو status يُفعّل rebuild
+// ⚠ isOnline لا نضعه في where() لأن Flutter قد يكتبه bool أو String
+//   نفلتره client-side داخل StreamBuilder لضمان قبول كلا النوعين
+Stream<QuerySnapshot<Map<String, dynamic>>> getAvailableTaxiDrivers() {
+  return FirebaseFirestore.instance
+      .collection('drivers')
+      .where('driverType', isEqualTo: 'taxi') // server-side: فئة التكسي فقط
+      .snapshots();                            // .snapshots() = الاستماع الحي المستمر
+}
+
+// ── DriverRadar widget — StatelessWidget + StreamBuilder ──────────────────────
+// لا initState ، لا dispose ، لا StreamSubscription يدوي.
+// Flutter يدير دورة حياة الـ Stream تلقائياً: يفتحه عند البناء ويغلقه عند التدمير.
+class DriverRadar extends StatelessWidget {
   final double                      customerLat;
   final double                      customerLng;
   final double                      radiusKm;
@@ -106,193 +122,184 @@ class DriverRadar extends StatefulWidget {
     this.onDriverSelected,
   });
 
-  @override
-  State<DriverRadar> createState() => _DriverRadarState();
-}
+  // ── تحويل snapshot → قائمة TaxiDriver مُرتّبة ────────────────────────────
+  List<TaxiDriver> _parseDrivers(QuerySnapshot<Map<String, dynamic>> snap) {
+    final drivers = <TaxiDriver>[];
 
-class _DriverRadarState extends State<DriverRadar> {
-  List<TaxiDriver> _drivers = [];
-  bool             _loading = true;
-  StreamSubscription? _sub;
+    for (final doc in snap.docs) {
+      final d = doc.data();
 
-  @override
-  void initState() {
-    super.initState();
-    _subscribeDrivers();
-  }
+      // شرط 1: فئة التكسي (double-check client-side)
+      if (!_isTaxiType(d['driverType'])) continue;
 
-  @override
-  void dispose() {
-    _sub?.cancel();
-    super.dispose();
-  }
+      // شرط 2: متصل — يقبل bool true أو String 'true' (Flutter type-mismatch safe)
+      if (!_isTruthy(d['isOnline'])) continue;
 
-  // ── Firestore real-time listener ──────────────────────────────────────────
-  // ⚠ لا نضع where('isOnline', isEqualTo: true) في الاستعلام مباشرة
-  //   لأن Flutter قد يكتب boolean أو String — نفلتر client-side بأمان.
-  // نضع where('driverType') فقط (String موثوق) لتقليل القراءات.
-  void _subscribeDrivers() {
-    // الاستعلام: جلب سائقي التكسي أولاً (Server-side filter على driverType)
-    // ثم نفلتر isOnline + status + المسافة client-side
-    final query = FirebaseFirestore.instance
-        .collection('drivers')
-        .where('driverType', isEqualTo: 'taxi'); // ← فئة التكسي فقط (server-side)
+      // شرط 3: متاح وليس بداخل رحلة
+      if (!_isAvailable(d['status'])) continue;
 
-    _sub = query.snapshots().listen(
-      (snap) {
-        final drivers = <TaxiDriver>[];
+      // الإحداثيات
+      final lat = (d['lat'] as num?)?.toDouble() ??
+                  (d['latitude'] as num?)?.toDouble();
+      final lng = (d['lng'] as num?)?.toDouble() ??
+                  (d['longitude'] as num?)?.toDouble();
+      if (lat == null || lng == null) continue;
 
-        for (final doc in snap.docs) {
-          final d = doc.data();
+      // شرط 4: ضمن نطاق البحث
+      final distKm = _haversineKm(customerLat, customerLng, lat, lng);
+      if (distKm > radiusKm) continue;
 
-          // ── شرط 1: فئة التكسي (double-check client-side) ──────────────────
-          if (!_isTaxiType(d['driverType'])) continue;
+      drivers.add(TaxiDriver(
+        docId:      doc.id,
+        phone:      (d['phone']      as String?) ?? '',
+        name:       (d['name']       as String?) ??
+                    (d['driverName'] as String?) ?? 'سائق',
+        lat:        lat,
+        lng:        lng,
+        distanceKm: distKm,
+        isOnline:   true,
+        status:     'available',
+        driverType: 'taxi',
+      ));
+    }
 
-          // ── شرط 2: متصل (isOnline = true | 'true') ───────────────────────
-          if (!_isTruthy(d['isOnline'])) continue;
-
-          // ── شرط 3: متاح وليس بداخل رحلة ─────────────────────────────────
-          if (!_isAvailable(d['status'])) continue;
-
-          // ── الإحداثيات ────────────────────────────────────────────────────
-          final lat = (d['lat'] as num?)?.toDouble() ??
-                      (d['latitude'] as num?)?.toDouble();
-          final lng = (d['lng'] as num?)?.toDouble() ??
-                      (d['longitude'] as num?)?.toDouble();
-          if (lat == null || lng == null) continue;
-
-          // ── شرط 4: ضمن نطاق البحث ────────────────────────────────────────
-          final distKm = _haversineKm(
-            widget.customerLat, widget.customerLng, lat, lng,
-          );
-          if (distKm > widget.radiusKm) continue;
-
-          drivers.add(TaxiDriver(
-            docId:      doc.id,
-            phone:      (d['phone']  as String?) ?? '',
-            name:       (d['name']   as String?) ??
-                        (d['driverName'] as String?) ?? 'سائق',
-            lat:        lat,
-            lng:        lng,
-            distanceKm: distKm,
-            isOnline:   true,
-            status:     'available',
-            driverType: 'taxi',
-          ));
-        }
-
-        // رتّب تصاعدياً حسب المسافة
-        drivers.sort((a, b) => a.distanceKm.compareTo(b.distanceKm));
-
-        if (mounted) {
-          setState(() {
-            _drivers = drivers;
-            _loading  = false;
-          });
-        }
-      },
-      onError: (_) {
-        if (mounted) setState(() => _loading = false);
-      },
-    );
+    // ترتيب تصاعدي حسب المسافة
+    drivers.sort((a, b) => a.distanceKm.compareTo(b.distanceKm));
+    return drivers;
   }
 
   @override
   Widget build(BuildContext context) {
-    if (_loading) return _buildLoading();
-    if (_drivers.isEmpty) return _buildEmpty();
+    return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+      // ─── هذا السطر هو قلب الميزة ───────────────────────────────────────────
+      // .snapshots() يفتح اتصالاً دائماً مع Firestore.
+      // كل مرة يضغط السائق "مفتوح" أو "مغلق" يُطلق Firestore حدثاً جديداً
+      // فيُعيد Flutter بناء الـ Widget تلقائياً دون أي تدخل من المستخدم.
+      stream: getAvailableTaxiDrivers(),
+      builder: (context, snapshot) {
+        // حالة التحميل الأولي
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return _buildLoading();
+        }
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+        // حالة الخطأ
+        if (snapshot.hasError) {
+          return _buildError(snapshot.error.toString());
+        }
+
+        // لا بيانات بعد
+        if (!snapshot.hasData) return _buildLoading();
+
+        // ── تحويل البيانات وتطبيق الفلاتر client-side ────────────────────
+        final drivers = _parseDrivers(snapshot.data!);
+
+        if (drivers.isEmpty) return _buildEmpty();
+
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // عنوان الرادار
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+              child: Row(
+                children: [
+                  Container(
+                    width: 3, height: 20,
+                    color: _kGreen,
+                    margin: const EdgeInsets.only(right: 8),
+                  ),
+                  Text(
+                    'سائقو التكسي المتاحون  ·  ${drivers.length}',
+                    style: const TextStyle(
+                      fontFamily: 'Orbitron',
+                      fontSize: 10,
+                      color: _kGreen,
+                      letterSpacing: 1.4,
+                    ),
+                  ),
+                  const Spacer(),
+                  _PulseDot(color: _kGreen),
+                ],
+              ),
+            ),
+
+            // قائمة السائقين — تتحدث لحظة بلحظة
+            ListView.builder(
+              shrinkWrap:  true,
+              physics:     const NeverScrollableScrollPhysics(),
+              itemCount:   drivers.length,
+              itemBuilder: (_, i) => _DriverCard(
+                driver: drivers[i],
+                onTap:  () => onDriverSelected?.call(drivers[i]),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  // ── حالات المساعدة ────────────────────────────────────────────────────────
+  Widget _buildLoading() => Container(
+    height: 120,
+    alignment: Alignment.center,
+    child: const SizedBox(
+      width: 28, height: 28,
+      child: CircularProgressIndicator(strokeWidth: 2, color: _kPurple),
+    ),
+  );
+
+  Widget _buildEmpty() => Container(
+    margin: const EdgeInsets.all(16),
+    padding: const EdgeInsets.symmetric(vertical: 24, horizontal: 16),
+    decoration: BoxDecoration(
+      color: _kSurf,
+      border: Border.all(color: _kDim.withOpacity(0.3)),
+      borderRadius: BorderRadius.circular(4),
+    ),
+    child: const Column(
+      mainAxisSize: MainAxisSize.min,
       children: [
-        // ── عنوان الرادار ──────────────────────────────────────────────────
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-          child: Row(
-            children: [
-              Container(
-                width: 3, height: 20,
-                color: _kGreen,
-                margin: const EdgeInsets.only(right: 8),
-              ),
-              Text(
-                'سائقو التكسي المتاحون  ·  ${_drivers.length}',
-                style: const TextStyle(
-                  fontFamily: 'Orbitron',
-                  fontSize: 10,
-                  color: _kGreen,
-                  letterSpacing: 1.4,
-                ),
-              ),
-              const Spacer(),
-              // نبضة حية
-              _PulseDot(color: _kGreen),
-            ],
-          ),
+        Icon(Icons.local_taxi_outlined, color: _kDim, size: 32),
+        SizedBox(height: 8),
+        Text(
+          'لا يوجد سائقو تكسي متاحون حالياً',
+          style: TextStyle(fontFamily: 'Rajdhani', fontSize: 13, color: _kDim),
+          textAlign: TextAlign.center,
         ),
+        SizedBox(height: 4),
+        Text(
+          'سيظهر السائق فور اتصاله بالتطبيق',
+          style: TextStyle(fontFamily: 'Rajdhani', fontSize: 11,
+              color: Color(0xFF2D3748)),
+          textAlign: TextAlign.center,
+        ),
+      ],
+    ),
+  );
 
-        // ── قائمة السائقين ─────────────────────────────────────────────────
-        ListView.builder(
-          shrinkWrap:  true,
-          physics:     const NeverScrollableScrollPhysics(),
-          itemCount:   _drivers.length,
-          itemBuilder: (_, i) => _DriverCard(
-            driver:   _drivers[i],
-            onTap:    () => widget.onDriverSelected?.call(_drivers[i]),
+  Widget _buildError(String msg) => Container(
+    margin: const EdgeInsets.all(16),
+    padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 16),
+    decoration: BoxDecoration(
+      color: _kSurf,
+      border: Border.all(color: _kRed.withOpacity(0.4)),
+      borderRadius: BorderRadius.circular(4),
+    ),
+    child: Row(
+      children: [
+        const Icon(Icons.warning_amber_rounded, color: _kRed, size: 18),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Text(
+            'تعذّر تحميل الرادار',
+            style: const TextStyle(fontFamily: 'Rajdhani', fontSize: 12,
+                color: _kRed),
           ),
         ),
       ],
-    );
-  }
-
-  Widget _buildLoading() {
-    return Container(
-      height: 120,
-      alignment: Alignment.center,
-      child: const SizedBox(
-        width: 28, height: 28,
-        child: CircularProgressIndicator(strokeWidth: 2, color: _kPurple),
-      ),
-    );
-  }
-
-  Widget _buildEmpty() {
-    return Container(
-      margin: const EdgeInsets.all(16),
-      padding: const EdgeInsets.symmetric(vertical: 24, horizontal: 16),
-      decoration: BoxDecoration(
-        color: _kSurf,
-        border: Border.all(color: _kDim.withOpacity(0.3)),
-        borderRadius: BorderRadius.circular(4),
-      ),
-      child: const Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(Icons.local_taxi_outlined, color: _kDim, size: 32),
-          SizedBox(height: 8),
-          Text(
-            'لا يوجد سائقو تكسي متاحون حالياً',
-            style: TextStyle(
-              fontFamily: 'Rajdhani',
-              fontSize: 13,
-              color: _kDim,
-            ),
-            textAlign: TextAlign.center,
-          ),
-          SizedBox(height: 4),
-          Text(
-            'سيظهر السائق فور اتصاله بالتطبيق',
-            style: TextStyle(
-              fontFamily: 'Rajdhani',
-              fontSize: 11,
-              color: Color(0xFF2D3748),
-            ),
-            textAlign: TextAlign.center,
-          ),
-        ],
-      ),
-    );
-  }
+    ),
+  );
 }
 
 // ── Driver card ────────────────────────────────────────────────────────────────
