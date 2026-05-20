@@ -63,20 +63,27 @@ class _MediaItem {
   }
 }
 
-// ── YouTube ID extractor (mirrors web helper) ─────────────────────────────────
-String? _extractYouTubeId(String url) {
-  final uri = Uri.tryParse(url);
-  if (uri == null) return null;
-  // youtu.be/<id>
-  if (uri.host == 'youtu.be') return uri.pathSegments.firstOrNull;
-  // youtube.com/watch?v=<id>
-  if (uri.queryParameters.containsKey('v')) return uri.queryParameters['v'];
-  // youtube.com/embed/<id>  |  /live/<id>  |  /shorts/<id>
-  if (uri.pathSegments.length >= 2 &&
-      ['embed', 'live', 'shorts'].contains(uri.pathSegments[0])) {
-    return uri.pathSegments[1];
+// ── YouTube ID extractor ──────────────────────────────────────────────────────
+// مرن ويقبل: shorts/  |  youtu.be/  |  watch?v=  |  ?si=  |  embed/  |  live/
+String? _extractYouTubeId(String rawUrl) {
+  if (rawUrl.isEmpty) return null;
+  final url = rawUrl.trim();
+
+  // 1. Shorts: youtube.com/shorts/<id>?...
+  if (url.contains('shorts/')) {
+    final part = url.split('shorts/').last.split('?').first.split('&').first;
+    if (part.length == 11) return part;
   }
-  return null;
+
+  // 2. youtu.be/<id>?...  (رابط المشاركة القصير)
+  if (url.contains('youtu.be/')) {
+    final part = url.split('youtu.be/').last.split('?').first.split('&').first;
+    if (part.length == 11) return part;
+  }
+
+  // 3. روابط يوتيوب التقليدية — استخدم الـ SDK مباشرة
+  //    يعالج: watch?v=  |  embed/  |  live/  |  ?si=  |  أي query param آخر
+  return YoutubePlayer.convertUrlToId(url);
 }
 
 // ── BannerCarousel (public widget) ────────────────────────────────────────────
@@ -340,12 +347,12 @@ class _YouTubeSlideState extends State<_YouTubeSlide> {
     _ctrl = YoutubePlayerController(
       initialVideoId: id,
       flags: const YoutubePlayerFlags(
-        autoPlay:          true,
-        mute:              false,
-        isLive:            false,   // ⚠ عدّلها إلى true إذا كان بثاً مباشراً
-        forceHD:           false,
-        enableCaption:     false,
-        hideControls:      false,
+        autoPlay:               true,
+        mute:                   false,  // بدون كتم — الزبون يسمع البث مباشرة
+        isLive:                 true,   // يضمن تشغيل البث المباشر فوراً
+        forceHD:                false,
+        enableCaption:          false,
+        hideControls:           false,
         controlsVisibleAtStart: true,
       ),
     );
