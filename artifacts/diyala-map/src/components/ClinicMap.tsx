@@ -2794,10 +2794,14 @@ export function ClinicMap({
     }
     // 'done' or 'finished' → hide chat and show rating dialog before clearing
     if (data.status === 'done' || data.status === 'finished' || data.status === 'cancelled') {
-      // ── 'cancelled' echo after redirect: the old order was intentionally
-      //    cancelled by redirectToNextDriver to free the driver — the loop is
-      //    still alive and a new order has been (or is being) created.
-      //    Ignore this echo completely; do NOT stop the search.
+      // ── 'cancelled' while search loop is active: driver app sent 'cancelled'
+      //    instead of 'rejected' — treat identically: redirect to next driver.
+      //    Do NOT stop the loop; the same orderId is reused via reassign-driver.
+      if (data.status === 'cancelled' && loopActiveRef.current) {
+        if (!redirectLockRef.current) redirectToNextRef.current();
+        return;
+      }
+      // Stale 'cancelled' guard (safety net for old redirect code path)
       if (data.status === 'cancelled' && isRedirectingRef.current) return;
 
       setShowChat(false);
