@@ -5,11 +5,27 @@ const CLOCK_W  = 154;
 const INTERVAL = 5000;
 
 type MediaItem = {
-  type:          "image" | "video";
+  type:          "image" | "video" | "youtube";
   url:           string;
   customHeight?: number;
   objectFit?:    "cover" | "contain" | "fill";
 };
+
+// Convert any YouTube URL variant to a safe https embed URL
+function toYouTubeEmbed(url: string): string | null {
+  try {
+    // Already an embed URL
+    const embedMatch = url.match(/youtube\.com\/embed\/([A-Za-z0-9_-]{11})/);
+    if (embedMatch) return `https://www.youtube.com/embed/${embedMatch[1]}`;
+    // Standard watch URL: youtube.com/watch?v=ID
+    const watchMatch = url.match(/(?:youtube\.com\/watch\?.*v=)([A-Za-z0-9_-]{11})/);
+    if (watchMatch) return `https://www.youtube.com/embed/${watchMatch[1]}`;
+    // Short URL: youtu.be/ID
+    const shortMatch = url.match(/youtu\.be\/([A-Za-z0-9_-]{11})/);
+    if (shortMatch) return `https://www.youtube.com/embed/${shortMatch[1]}`;
+  } catch { /* */ }
+  return null;
+}
 
 function parseMediaItems(raw: string): MediaItem[] {
   if (!raw) return [];
@@ -17,9 +33,20 @@ function parseMediaItems(raw: string): MediaItem[] {
   if (trimmed.startsWith("[")) {
     try {
       const parsed = JSON.parse(trimmed);
-      if (Array.isArray(parsed) && parsed.length > 0) return parsed as MediaItem[];
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return (parsed as MediaItem[]).map(item => {
+          if (item.type === "youtube") {
+            const embed = toYouTubeEmbed(item.url);
+            return embed ? { ...item, url: embed } : item;
+          }
+          return item;
+        });
+      }
     } catch { /* */ }
   }
+  // Auto-detect YouTube URL passed as plain string
+  const embed = toYouTubeEmbed(trimmed);
+  if (embed) return [{ type: "youtube", url: embed }];
   if (trimmed) return [{ type: "image", url: trimmed }];
   return [];
 }
@@ -159,7 +186,24 @@ function FullscreenModal({
         }} />
 
         {/* ── Media ── */}
-        {item.type === "video" ? (
+        {item.type === "youtube" ? (
+          <iframe
+            key={item.url}
+            src={item.url}
+            title="YouTube Video Player"
+            frameBorder="0"
+            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+            allowFullScreen
+            style={{
+              width:        "min(90vw, 960px)",
+              height:       "min(80vh, 540px)",
+              borderRadius: "4px",
+              display:      "block",
+              border:       "none",
+              background:   "#000",
+            }}
+          />
+        ) : item.type === "video" ? (
           <video
             ref={videoRef}
             key={item.url}
@@ -228,7 +272,7 @@ function FullscreenModal({
           <IconClose />
         </button>
 
-        {/* ── Video controls bar (video only) ── */}
+        {/* ── Video controls bar (video only, not YouTube) ── */}
         {item.type === "video" && (
           <div style={{
             position:   "absolute",
@@ -427,7 +471,17 @@ export function Header() {
                   transition: "opacity 0.35s ease",
                 }}
               >
-                {current!.type === "video" ? (
+                {current!.type === "youtube" ? (
+                  <iframe
+                    key={current!.url}
+                    src={current!.url}
+                    title="YouTube Video Player"
+                    frameBorder="0"
+                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                    allowFullScreen
+                    style={{ width: '100%', height: '100%', border: 'none', display: 'block' }}
+                  />
+                ) : current!.type === "video" ? (
                   <video
                     key={current!.url}
                     src={current!.url}
@@ -464,7 +518,7 @@ export function Header() {
                 pointerEvents: "none",
               }} />
 
-              {/* ── Mute / Unmute button (video only) ── */}
+              {/* ── Mute / Unmute button (video only, not YouTube) ── */}
               {current!.type === "video" && (
                 <button
                   onClick={() => setIsMuted(m => !m)}
