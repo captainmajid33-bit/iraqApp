@@ -717,6 +717,7 @@ export function ClinicMap({
   const [activeOrderStatus, setActiveOrderStatus] = useState<string>('pending');
   const [activeDriverPhone, setActiveDriverPhone] = useState<string>('');
   const [activeDriverId,    setActiveDriverId]    = useState<number>(0);
+  const activeDriverIdRef = useRef<number>(0);
   // Ref mirrors for use inside useCallback closures without stale captures
   const activeDriverPhoneRef = useRef<string>('');
   const [driverLat,         setDriverLat]         = useState<number|null>(null);
@@ -1885,6 +1886,8 @@ export function ClinicMap({
   useEffect(() => { autoFindDriverRef.current = autoFindDriver; }, [autoFindDriver]);
   // ── Keep loopActiveRef in sync for snapshot callbacks ────────────────────
   useEffect(() => { loopActiveRef.current = loopActive; }, [loopActive]);
+  // ── Keep activeDriverIdRef in sync ────────────────────────────────────────
+  useEffect(() => { activeDriverIdRef.current = activeDriverId; }, [activeDriverId]);
 
   // ── Gas form: open with auto reverse-geocode ─────────────────────────────
   const openGasForm = useCallback(async ()=>{
@@ -2913,10 +2916,13 @@ export function ClinicMap({
           if (goingOffline) liveOnlineDriverPhonesRef.current.delete(phone);
           else              liveOnlineDriverPhonesRef.current.add(phone);
         }
-        // If the loop is active and the current driver just went offline, redirect
+        // If the loop is active and the current driver just went offline, redirect.
+        // Check by phone OR by locationId (locationId is more reliable when phone is empty).
         if (goingOffline && loopActiveRef.current && !redirectLockRef.current) {
-          if (phone === activeDriverPhoneRef.current) {
-            console.log(`[driver_update SSE] current driver (${phone}) went offline — redirecting`);
+          const matchByPhone = phone && phone === activeDriverPhoneRef.current;
+          const matchById    = driver.locationId && driver.locationId === activeDriverIdRef.current;
+          if (matchByPhone || matchById) {
+            console.log(`[driver_update SSE] current driver (${phone || driver.locationId}) went offline — redirecting`);
             redirectToNextRef.current();
           }
         }

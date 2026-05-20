@@ -1,8 +1,8 @@
 import { Router, type IRouter } from "express";
 import { db } from "@workspace/db";
-import { driversOnlineTable, locationsTable } from "@workspace/db";
+import { driversOnlineTable, locationsTable, ordersTable } from "@workspace/db";
 import { eq, and, or, isNull } from "drizzle-orm";
-import { broadcastDriverUpdate } from "../lib/sse";
+import { broadcastDriverUpdate, broadcastOrderUpdate } from "../lib/sse";
 
 const router: IRouter = Router();
 
@@ -203,6 +203,37 @@ router.delete("/drivers-online/:locationId", async (req, res) => {
       phone:      offlined?.phone      ?? '',
       driverName: offlined?.driverName ?? '',
     });
+
+    // ── Auto-reject any pending order assigned to this driver ─────────────
+    // If the driver goes offline while a taxi order is waiting for acceptance,
+    // reject it immediately so the customer search-loop redirects to the next
+    // available driver without waiting for the full countdown timer.
+    const pendingOrders = await db
+      .select({ id: ordersTable.id, locationId: ordersTable.locationId })
+      .from(ordersTable)
+      .where(and(
+        eq(ordersTable.locationId, locationId),
+        eq(ordersTable.status, 'pending'),
+      ));
+
+    for (const ord of pendingOrders) {
+      const [rejected] = await db
+        .update(ordersTable)
+        .set({ status: 'rejected' })
+        .where(eq(ordersTable.id, ord.id))
+        .returning();
+      if (rejected) {
+        broadcastOrderUpdate({
+          id:         rejected.id,
+          status:     'rejected',
+          locationId: rejected.locationId,
+          driverLat:  rejected.driverLat,
+          driverLng:  rejected.driverLng,
+        });
+        console.log(`[DELETE /drivers-online] auto-rejected order #${rejected.id} (driver ${locationId} went offline)`);
+      }
+    }
+
     res.json({ ok: true });
   } catch (err: any) {
     console.error("[DELETE /drivers-online/:locationId] error:", err);
