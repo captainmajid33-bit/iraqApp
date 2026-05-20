@@ -693,8 +693,17 @@ export function ClinicMap({
   const [taxiToPt,       setTaxiToPt]       = useState<{lat:number;lng:number}|null>(null);
   const [taxiDistKm,     setTaxiDistKm]     = useState<number|null>(null);
   const [taxiEstPrice,   setTaxiEstPrice]   = useState<number|null>(null);
-  const [taxiUserName,   setTaxiUserName]   = useState('');
-  const [taxiUserPhone,  setTaxiUserPhone]  = useState('');
+  // ── Lazy initializers: read localStorage synchronously on first render ───
+  // This eliminates the blank-field flash — values are ready before the first
+  // paint, no useEffect delay, no async fetch needed.
+  const [taxiUserName,  setTaxiUserName]  = useState<string>(() => {
+    try { return JSON.parse(localStorage.getItem('diyala_user') ?? 'null')?.name  ?? ''; }
+    catch { return ''; }
+  });
+  const [taxiUserPhone, setTaxiUserPhone] = useState<string>(() => {
+    try { return JSON.parse(localStorage.getItem('diyala_user') ?? 'null')?.phone ?? ''; }
+    catch { return ''; }
+  });
   const [taxiLoading,      setTaxiLoading]      = useState(false);
   const [taxiRouteLoading, setTaxiRouteLoading] = useState(false); // OSRM fetch in progress
   const [taxiError,        setTaxiError]        = useState<string|null>(null);
