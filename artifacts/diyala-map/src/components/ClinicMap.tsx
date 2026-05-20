@@ -2750,25 +2750,28 @@ export function ClinicMap({
   }, []);
 
   // ── Apply order snapshot (status + driver position) ───────────────────────
+  // source: 'firestore' → do NOT write back to Firestore (breaks circular loop)
+  //         'sse' | 'rest' → sync status to Firestore so ActiveOrderTracker wakes
   const applyOrderSnapshot = useCallback((data: {
     id: number; status: string;
     driverLat?: number|null; driverLng?: number|null;
     fromLat?: number|null; fromLng?: number|null;
     locationId?: number|null; userName?: string|null;
-  })=>{
+  }, source: 'firestore' | 'sse' | 'rest' = 'rest')=>{
     setActiveOrderStatus(data.status);
     activeOrderStatusRef.current = data.status;
 
-    // ── Bridge REST status → Firestore so ActiveOrderTracker wakes up ─────────
-    // ActiveOrderTracker queries Firestore where status IN ['accepted','in_progress','driving'].
-    // The Firestore doc is created as 'pending' and never updated by the partner app,
-    // so we update it here every time REST/SSE delivers a new status.
-    syncOrderToFirestore(
-      data.id,
-      data.status,
-      data.driverLat ?? null,
-      data.driverLng ?? null,
-    );
+    // ── Bridge REST/SSE status → Firestore so ActiveOrderTracker wakes up ────
+    // Skip when data already came from Firestore — prevents a circular echo:
+    //   applyOrderSnapshot → syncOrderToFirestore → onSnapshot → applyOrderSnapshot ...
+    if (source !== 'firestore') {
+      syncOrderToFirestore(
+        data.id,
+        data.status,
+        data.driverLat ?? null,
+        data.driverLng ?? null,
+      );
+    }
 
     if (data.status === 'accepted' || data.status === 'driving') {
       // Chat is NOT auto-opened — user must tap 💬 or status-bar button
@@ -2830,27 +2833,36 @@ export function ClinicMap({
     }
   },[stopOrderTracking, syncOrderToFirestore]);
 
-  // ── Poll order status every 3 s ───────────────────────────────────────────
-  // Fix: skip entirely while a redirect is in-flight (redirectLockRef=true).
-  // Without this guard the poll can fire during the ~500 ms customer-cancel
-  // window, fetch the OLD order still showing 'rejected', and launch a SECOND
-  // concurrent redirectToNextDriver — causing double orders / accidental cancel.
+  // ── Firestore real-time order listener (replaces the old 3-second REST poll) ─
+  // The Firestore document `orders/{orderId}` is written by:
+  //   • This web app (setDoc on order creation, syncOrderToFirestore on status change)
+  //   • The Flutter partner app (accepted / rejected / in_progress / done)
+  // Listening here gives sub-second latency with zero caching — the exact same
+  // field-level change from the driver app arrives here immediately.
+  // `source:'firestore'` prevents applyOrderSnapshot from writing back to
+  // Firestore (syncOrderToFirestore), avoiding a circular snapshot echo.
   useEffect(()=>{
     if (!activeOrderId) return;
-    const poll = async ()=>{
-      // Do NOT read the old order while a redirect is executing — the order
-      // has already been (or is being) cancelled; any snapshot would be stale.
-      if (redirectLockRef.current) return;
-      try {
-        const res = await fetch(`/api/orders/${activeOrderId}`);
-        if (!res.ok) return;
-        const data = await res.json();
-        applyOrderSnapshot(data);
-      } catch { /* silent */ }
-    };
-    poll(); // immediate first fetch
-    const iv = setInterval(poll, 3000);
-    return ()=> clearInterval(iv);
+    const unsub = onSnapshot(
+      doc(db, 'orders', String(activeOrderId)),
+      (snap) => {
+        if (!snap.exists()) return;
+        const d = snap.data();
+        if (!d || redirectLockRef.current) return; // skip during redirect
+        applyOrderSnapshot({
+          id:        activeOrderId,
+          status:    (d.status ?? '') as string,
+          driverLat: typeof d.driver_lat === 'number' ? d.driver_lat : null,
+          driverLng: typeof d.driver_lng === 'number' ? d.driver_lng : null,
+          fromLat:   typeof d.from_lat   === 'number' ? d.from_lat   : null,
+          fromLng:   typeof d.from_lng   === 'number' ? d.from_lng   : null,
+          locationId: d.location_id ?? null,
+          userName:   d.user_name   ?? null,
+        }, 'firestore');
+      },
+      () => { /* Firestore unreachable — SSE below is the fallback */ },
+    );
+    return () => unsub();
   },[activeOrderId, applyOrderSnapshot]);
 
   // ── SSE listener for real-time order updates ──────────────────────────────
@@ -2860,7 +2872,7 @@ export function ClinicMap({
       try {
         const { order } = JSON.parse(e.data) as { order: any };
         if (order?.id !== activeOrderIdRef.current) return;
-        applyOrderSnapshot(order);
+        applyOrderSnapshot(order, 'sse');
       } catch { /* */ }
     });
     es.onerror = ()=> es.close();
