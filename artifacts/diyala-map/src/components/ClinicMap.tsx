@@ -814,6 +814,12 @@ export function ClinicMap({
   // true while redirectToNextDriver is mid-flight (between cancel-old & create-new).
   // Prevents the 'cancelled' SSE/poll echo from triggering stopOrderTracking().
   const isRedirectingRef   = useRef(false);
+  // ── Concurrency lock ──────────────────────────────────────────────────────
+  // Prevents the 3-second poll from triggering a second concurrent
+  // redirectToNextDriver while the first one is still awaiting customer-cancel.
+  // Without this, a 'rejected' poll response during the cancel-fetch window
+  // launches a duplicate redirect → double orders / accidental cancellation.
+  const redirectLockRef    = useRef(false);
 
   // ── Live Firestore Sets for real-time driver availability ─────────────────
   // Updated by onSnapshot listeners (started when loopActive=true).
@@ -2683,9 +2689,12 @@ export function ClinicMap({
       // Driver accepted → stop the search loop
       setLoopActive(false); setLoopCountdown(null);
     }
-    // Driver rejected → redirect to next available driver immediately
+    // Driver rejected → redirect to next available driver immediately.
+    // redirectLockRef blocks duplicate calls: the 3-second poll may deliver
+    // 'rejected' again WHILE customer-cancel is still in-flight, causing a
+    // second concurrent redirect → double orders → accidental cancellation.
     if (data.status === 'rejected') {
-      redirectToNextRef.current();
+      if (!redirectLockRef.current) redirectToNextRef.current();
       return;
     }
     // 'done' or 'finished' → hide chat and show rating dialog before clearing
@@ -2967,6 +2976,12 @@ export function ClinicMap({
 
   // ── Redirect to next available driver (loop core) ────────────────────────
   const redirectToNextDriver = useCallback(async ()=>{
+    // ── Concurrency lock: bail if a redirect is already in-flight ────────────
+    // The 3-second poll can fire a second 'rejected' response WHILE customer-cancel
+    // is still awaiting, causing a duplicate execution and accidental cancellation.
+    if (redirectLockRef.current) return;
+    redirectLockRef.current = true;
+
     // 1. Cancel current pending order on server (non-fatal if it fails).
     //    Guard isRedirectingRef so that the resulting 'cancelled' SSE echo
     //    does NOT trigger stopOrderTracking() — the loop must stay alive.
@@ -2982,7 +2997,7 @@ export function ClinicMap({
 
     // 3. Find next uncontacted driver
     const loc = loopFromPtRef.current;
-    if (!loc) { stopOrderTracking(); return; }
+    if (!loc) { redirectLockRef.current = false; stopOrderTracking(); return; }
 
     try {
       // API filters isOnline=true & isBusy=false & category=taxi at DB level.
@@ -3017,6 +3032,7 @@ export function ClinicMap({
 
       if (available.length === 0) {
         // All available drivers tried — give up
+        redirectLockRef.current = false;
         setLoopActive(false); setLoopCountdown(null); setLoopCurrentDriver(''); setLoopCurrentDriverDist(null);
         setTaxiNoDriverSnack(true);
         setTimeout(()=> setTaxiNoDriverSnack(false), 7000);
@@ -3075,17 +3091,20 @@ export function ClinicMap({
         loopIgnoredRef.current.add(next.locationId);
         setLoopActive(true);
         setLoopCountdown(120);
-        // New order is live — safe to clear redirect guard
+        // New order is live — release both guards
         isRedirectingRef.current = false;
+        redirectLockRef.current  = false;
       } else {
         // Driver already busy / error — skip to next immediately
         isRedirectingRef.current = false;
+        redirectLockRef.current  = false;
         loopIgnoredRef.current.add(next.locationId);
         redirectToNextRef.current();
       }
     } catch {
-      // Network error — clear guard and stop gracefully
+      // Network error — release guards and stop gracefully
       isRedirectingRef.current = false;
+      redirectLockRef.current  = false;
       stopOrderTracking();
     }
   },[stopOrderTracking]);
