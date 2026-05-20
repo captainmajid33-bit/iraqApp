@@ -19,20 +19,35 @@ import { auth, db } from '@/lib/firebase';
 import { getUserFromStorage } from '@/components/UserLoginOverlay';
 import { useDoctorGeofence } from '@/hooks/useDoctorGeofence';
 
-// ── Cross-check 1: approved_agents (status='available' AND isOnline=true) ──
+// ── Type-safe isOnline check ───────────────────────────────────────────────
+// Flutter may write isOnline as boolean true OR string 'true'.
+// Firestore where('isOnline','==',true) only matches boolean — so we always
+// fetch without the where clause and filter client-side using this helper.
+function isOnlineTruthy(val: unknown): boolean {
+  return val === true || val === 'true';
+}
+// status check: accepts 'available' (boolean-safe)
+function isAvailable(val: unknown): boolean {
+  return val === 'available';
+}
+
+// ── Cross-check 1: approved_agents (status='available' AND isOnline truthy) ─
 // Populated by the admin dashboard and by syncOrderToFirestore() in ClinicMap.
+// We fetch by status='available' (always a string) and filter isOnline client-
+// side to handle boolean vs string inconsistency from different write sources.
 async function getAvailableAgentPhones(): Promise<Set<string> | null> {
   try {
     const snap = await getDocs(
       query(
         collection(db, 'approved_agents'),
-        where('status',   '==', 'available'),
-        where('isOnline', '==', true),
+        where('status', '==', 'available'),
       )
     );
     const phones = new Set<string>();
     snap.forEach(d => {
-      const p = d.data().phone as string | undefined;
+      const data = d.data();
+      if (!isOnlineTruthy(data.isOnline)) return; // skip offline (bool OR string)
+      const p = data.phone as string | undefined;
       if (p) phones.add(p.trim());
     });
     console.log(`[DriverFilter/approved_agents] online+available: ${phones.size}`, [...phones]);
@@ -44,36 +59,30 @@ async function getAvailableAgentPhones(): Promise<Set<string> | null> {
 }
 
 // ── Cross-check 2: drivers collection (partner app's authoritative source) ──
-// The Flutter partner app writes isOnline=true/false to drivers/{uid} when the
-// driver opens/closes the app.  This collection is the ground truth for online
-// status. We build a phone-Set from docs that are currently isOnline=true so we
-// can intersect with the REST result and exclude genuinely offline drivers.
+// The Flutter partner app writes isOnline=true/false (boolean) OR 'true'/'false'
+// (string) and status='available'/'offline'.  We fetch ALL docs and filter
+// client-side to be tolerant of both types (Data-Type Mismatch guard).
 // Returns null if the collection is unreachable OR if no docs carry a 'phone'
-// field (in which case the caller should skip this filter rather than blocking
-// all drivers).
+// field (caller then skips this gate rather than blocking all drivers).
 async function getOnlineDriverPhones(): Promise<Set<string> | null> {
   try {
-    // Query only isOnline=true — we deliberately do NOT filter status here
-    // because partner apps may use different status strings ('available', 'idle',
-    // 'online', etc.).  The isOnline flag is the single reliable signal.
-    const snap = await getDocs(
-      query(
-        collection(db, 'drivers'),
-        where('isOnline', '==', true),
-      )
-    );
+    // Fetch all driver docs — no where clause so both boolean AND string
+    // values of isOnline are captured; we filter client-side.
+    const snap = await getDocs(collection(db, 'drivers'));
     const phones = new Set<string>();
     snap.forEach(d => {
-      const p = d.data().phone as string | undefined;
+      const data = d.data();
+      // Must be online (truthy) AND status available
+      if (!isOnlineTruthy(data.isOnline)) return;
+      if (!isAvailable(data.status)) return;
+      const p = data.phone as string | undefined;
       if (p) phones.add(p.trim());
     });
-    // If NO doc has a phone field the Set is empty — return null so the caller
-    // falls back to approved_agents-only filtering instead of blocking everyone.
     if (phones.size === 0 && snap.size > 0) {
-      console.warn('[DriverFilter/drivers] docs exist but none have phone field — skipping drivers cross-check');
+      console.warn('[DriverFilter/drivers] docs exist but none pass online+available filter — skipping gate');
       return null;
     }
-    console.log(`[DriverFilter/drivers] isOnline=true with phone: ${phones.size}`, [...phones]);
+    console.log(`[DriverFilter/drivers] online+available with phone: ${phones.size}`, [...phones]);
     return phones;
   } catch (e: any) {
     console.warn('[DriverFilter/drivers] unreachable:', e?.code);
@@ -2480,20 +2489,28 @@ export function ClinicMap({
   // A driver must appear in BOTH sets to be routed (intersection).
   // Any field change in Firestore propagates here in < 1 second.
   useEffect(() => {
-    // Gate 2 — drivers collection: isOnline=true
+    // Gate 2 — drivers collection: isOnline=true/`'true'` AND status='available'
+    // ⚠ NO where('isOnline') clause — Firestore type-checks strictly.
+    //   Flutter may write boolean true OR string 'true'; we filter client-side
+    //   via isOnlineTruthy() to accept both without losing any driver docs.
     const unsubDrivers = onSnapshot(
-      query(collection(db, 'drivers'), where('isOnline', '==', true)),
+      collection(db, 'drivers'),   // fetch ALL — filter below
       (snap) => {
         const phones = new Set<string>();
         snap.forEach(d => {
-          const p = d.data().phone as string | undefined;
+          const data = d.data();
+          if (!isOnlineTruthy(data.isOnline)) return;  // offline (bool or str)
+          if (!isAvailable(data.status))      return;  // not 'available'
+          const p = data.phone as string | undefined;
           if (p) phones.add(p.trim());
         });
-        // snap.empty means NO drivers online → empty Set (blocks all)
-        // phones.size=0 but snap has docs → docs lack phone field → skip gate (null)
+        // snap.empty → no drivers at all → empty Set (blocks all)
+        // phones.size=0 but snap not empty → docs exist but none pass filter
+        //   → also empty Set (all blocked) which is the correct safe outcome
+        // phones.size=0 AND snap.empty → return null to skip this gate
         liveOnlineDriverPhonesRef.current =
-          (phones.size > 0 || snap.empty) ? phones : null;
-        console.log(`[LiveFilter/drivers] isOnline=true phones: ${phones.size}`, [...phones]);
+          (!snap.empty || phones.size > 0) ? phones : null;
+        console.log(`[LiveFilter/drivers] online+available phones: ${phones.size}`, [...phones]);
       },
       (err) => {
         console.warn('[LiveFilter/drivers] snapshot error:', err?.code);
@@ -2501,17 +2518,16 @@ export function ClinicMap({
       },
     );
 
-    // Gate 1 — approved_agents: status='available' AND isOnline=true
+    // Gate 1 — approved_agents: status='available' AND isOnline truthy
+    // Fetch by status (reliable string) and filter isOnline client-side.
     const unsubAgents = onSnapshot(
-      query(
-        collection(db, 'approved_agents'),
-        where('status',   '==', 'available'),
-        where('isOnline', '==', true),
-      ),
+      query(collection(db, 'approved_agents'), where('status', '==', 'available')),
       (snap) => {
         const phones = new Set<string>();
         snap.forEach(d => {
-          const p = d.data().phone as string | undefined;
+          const data = d.data();
+          if (!isOnlineTruthy(data.isOnline)) return;  // skip offline
+          const p = data.phone as string | undefined;
           if (p) phones.add(p.trim());
         });
         liveAvailableAgentPhonesRef.current = phones;
