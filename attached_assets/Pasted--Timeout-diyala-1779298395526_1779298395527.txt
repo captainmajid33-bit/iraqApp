@@ -1,0 +1,57 @@
+أمر برمجي قطعي وقسري: استبدال كود محرك الرادار والـ Timeout بالكامل شلع قلع (ملف تطبيق الزبون diyala-gta-map)!
+
+المشاكل الحالية مستمرة:
+1. الرادار ثابت (Static) ولا يحدث وضع السائق (مغلق/مفتوح) إلا بعد تسجيل الخروج والدخول.
+2. بمجرد أن يضغط السائق "رفض" أو ينتهي الوقت، يتم إلغاء الطلب فوراً للزبون بدلاً من تمريره للسائق التالي المتاح.
+
+قم بحذف كود الرادار والـ Dispatch القديم بالكامل، واحقن هذا الكود الجاهز والمفلتر 100% بدون أي اجتهاد من عندك:
+
+// 1. محرك الاستماع المباشر لايف للسائقين المتاحين (يمنع الحاجة لتسجيل الخروج)
+StreamBuilder<QuerySnapshot>(
+  stream: FirebaseFirestore.instance
+      .collection('drivers')
+      .where('driverType', isEqualTo: 'taxi') // فئة التكسي فقط للجميع
+      .where('isOnline', isEqualTo: true)     // المفتوحين حقيقة (Boolean true)
+      .where('status', isEqualTo: 'available') // المتاحين حالياً
+      .snapshots(), // ربط مباشر واير بـ واير مع السيرفر
+  builder: (context, snapshot) {
+    if (!snapshot.hasData) return const CircularProgressIndicator();
+    final activeDrivers = snapshot.data!.docs;
+    
+    // تحديث الماركرز على الخريطة تلقائياً بكسر من الثانية عند أي تغيير في حالة السائق
+    updateMapMarkers(activeDrivers); 
+    
+    return YourRadarUI(drivers: activeDrivers);
+  },
+);
+
+// 2. دالة التمرير المتسلسل الذكية (تمنع إلغاء الطلب عند الرفض وتنقله للسائق التالي)
+void dispatchOrderToNextDriver(String rideId, List<String> driversList, int index) async {
+  if (index >= driversList.length) {
+    // هنا فقط ينتهي البحث إذا تم رفض الطلب من جميع السائقين المتاحين بالمنطقة
+    await FirebaseFirestore.instance.collection('rides').doc(rideId).update({
+      'status': 'no_drivers_found'
+    });
+    return;
+  }
+
+  // إرسال الطلب للسائق الحالي في اللوب مع إبقاء حالة الرحلة جاري البحث (searching)
+  await FirebaseFirestore.instance.collection('rides').doc(rideId).update({
+    'currentDriverId': driversList[index],
+    'status': 'searching', // القفل الصارم: تظل مستمرة ومفتوحة
+    'driverTimer': 15,     // عداد جديد 15 ثانية للسائق الحالي
+  });
+
+  // الاستماع لرد السائق الحالي
+  var subscription = FirebaseFirestore.instance.collection('rides').doc(rideId).snapshots().listen((rideDoc) {
+    String currentStatus = rideDoc['status'];
+    
+    // إذا السائق رفض أو انتهى الوقت: نلغي الاستماع ونمرر فوراً للسائق الذي يليه بالمنطقة
+    if (currentStatus == 'driver_rejected' || currentStatus == 'timeout') {
+      // ممنوع منعاً باتاً استدعاء دالة cancelOrder() أو تحويل الحالة إلى 'cancelled' هنا!
+      dispatchOrderToNextDriver(rideId, driversList, index + 1);
+    }
+  });
+}
+
+قم بحقن هذا المحرك المتكامل الآن واشحن التحديث فوراً لإنهاء هذه العلة!
