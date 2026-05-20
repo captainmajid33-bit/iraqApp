@@ -104,27 +104,7 @@ router.post("/orders", async (req, res) => {
 
     const driverLabel = loc?.name ?? onlineRow?.driverName ?? `driver#${locationId}`;
 
-    // ── Auto-cancel STALE (> 3 min old) pending/driving orders for this driver ─
-    // Prevents the partner app from seeing ghost orders while preserving any
-    // recently-created orders (e.g. a redirect that just fired milliseconds ago).
-    // Using a 3-minute threshold means: brand-new orders are NEVER cancelled here,
-    // only genuine ghosts that were never properly closed.
-    const staleThreshold = new Date(Date.now() - 3 * 60 * 1000); // 3 minutes ago
-    const stale = await db
-      .update(ordersTable)
-      .set({ status: 'cancelled' })
-      .where(and(
-        eq(ordersTable.locationId, locationId),
-        inArray(ordersTable.status, ['pending', 'accepted', 'driving']),
-        lt(ordersTable.createdAt, staleThreshold),
-      ))
-      .returning({ id: ordersTable.id, locationId: ordersTable.locationId });
-
-    for (const s of stale) {
-      broadcastOrderUpdate({ id: s.id, status: 'cancelled', locationId: s.locationId });
-      console.log(`[POST /orders] auto-cancelled stale (>3min) order #${s.id} for driver ${locationId}`);
-    }
-    // Also ensure driver is not stuck as busy before new order
+    // Ensure driver is not stuck as busy before new order
     await setDriverBusy(locationId, false);
 
     // ── Insert order ──────────────────────────────────────────────────────────

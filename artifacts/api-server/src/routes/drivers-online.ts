@@ -188,12 +188,21 @@ router.delete("/drivers-online/:locationId", async (req, res) => {
   }
 
   try {
-    await db
+    const [offlined] = await db
       .update(driversOnlineTable)
       .set({ isOnline: false, isBusy: false, updatedAt: new Date() })
-      .where(eq(driversOnlineTable.locationId, locationId));
+      .where(eq(driversOnlineTable.locationId, locationId))
+      .returning();
 
-    broadcastDriverUpdate({ locationId, isOnline: false, isBusy: false });
+    // Include phone + driverName so the frontend SSE listener can remove
+    // the correct marker from onlineDrivers state by phone key.
+    broadcastDriverUpdate({
+      locationId,
+      isOnline:   false,
+      isBusy:     false,
+      phone:      offlined?.phone      ?? '',
+      driverName: offlined?.driverName ?? '',
+    });
     res.json({ ok: true });
   } catch (err: any) {
     console.error("[DELETE /drivers-online/:locationId] error:", err);

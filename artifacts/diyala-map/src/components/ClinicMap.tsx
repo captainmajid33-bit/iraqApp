@@ -2785,9 +2785,9 @@ export function ClinicMap({
     //    old order's stale 'rejected' snapshot during the customer-cancel window.
     if (data.status === 'rejected') {
       if (!redirectLockRef.current) {
-        // Kill the poll immediately by clearing the order from state/ref.
-        setActiveOrderId(null);
-        activeOrderIdRef.current = null;
+        // Keep activeOrderId — reassign-driver PATCH reuses same orderId.
+        // No setActiveOrderId(null) here: Firestore listener stays alive
+        // on the same document; reassign-driver will reset it to 'pending'.
         redirectToNextRef.current();
       }
       return;
@@ -3131,63 +3131,49 @@ export function ClinicMap({
 
   // ── Redirect to next available driver (loop core) ────────────────────────
   const redirectToNextDriver = useCallback(async ()=>{
-    // ── Concurrency lock: bail if a redirect is already in-flight ────────────
-    // The 3-second poll can fire a second 'rejected' response WHILE customer-cancel
-    // is still awaiting, causing a duplicate execution and accidental cancellation.
+    // ── Concurrency lock ─────────────────────────────────────────────────────
     if (redirectLockRef.current) return;
-    redirectLockRef.current = true;
-
-    // 1. Cancel current pending order on server (non-fatal if it fails).
-    //    Guard isRedirectingRef so that the resulting 'cancelled' SSE echo
-    //    does NOT trigger stopOrderTracking() — the loop must stay alive.
-    const curOrderId = activeOrderIdRef.current;
+    redirectLockRef.current  = true;
     isRedirectingRef.current = true;
-    if (curOrderId) {
-      try { await fetch(`/api/orders/${curOrderId}/customer-cancel`, { method:'PATCH' }); } catch { /* non-fatal */ }
-    }
-    // 2. Clear active order state (keep loop refs/context — loop stays active)
-    setActiveOrderId(null); setActiveOrderStatus('pending');
-    activeOrderIdRef.current = null; activeOrderStatusRef.current = 'pending';
-    localStorage.removeItem('diyala_active_order');
 
-    // 3. Find next uncontacted driver
+    // curOrderId stays set — we PATCH reassign-driver to the next driver.
+    // No customer-cancel, no setActiveOrderId(null): the customer NEVER receives
+    // a 'cancelled' SSE. The Firestore listener keeps watching the same doc.
+    const curOrderId = activeOrderIdRef.current;
+
+    // Find next uncontacted driver
     const loc = loopFromPtRef.current;
-    if (!loc) { redirectLockRef.current = false; stopOrderTracking(); return; }
+    if (!loc) { redirectLockRef.current = false; isRedirectingRef.current = false; stopOrderTracking(); return; }
 
     try {
       // API filters isOnline=true & isBusy=false & category=taxi at DB level.
-      // Firestore cross-check further removes drivers marked offline/on_trip.
       const res     = await fetch('/api/drivers-online?category=taxi');
       const drivers: OnlineDriver[] = await res.json();
 
       const SEARCH_RADIUS_KM = 10; // ⚠ TESTING: temporarily 10 km (was 2 km)
 
-      // DEBUG ── log loop redirect search ────────────────────────────────────
-      console.log(`[redirectToNext] API returned ${drivers.length} driver(s), ignored: [${[...loopIgnoredRef.current].join(',')}]`,
+      console.log(`[redirectToNext] API ${drivers.length} driver(s), ignored:[${[...loopIgnoredRef.current].join(',')}]`,
         drivers.map(d => ({
           name: d.driverName, locationId: d.locationId,
           distKm: +haversineDist(loc.lat, loc.lng, d.lat, d.lng).toFixed(3),
           ignored: loopIgnoredRef.current.has(d.locationId),
         })));
 
-      // ── Live dual-gate cross-check (approved_agents ∩ drivers) ─────────
       const { phones: filteredPhones2, source: filterSource2 } = getLiveFilteredPhones();
       const fsFiltered = filteredPhones2 !== null
         ? drivers.filter(d => filteredPhones2.has((d.phone ?? '').trim()))
         : drivers; // both gates null → trust REST only
-      console.log(`[redirectToNext] live dual-gate (${filterSource2}): ${fsFiltered.length}/${drivers.length} pass`);
+      console.log(`[redirectToNext] dual-gate (${filterSource2}): ${fsFiltered.length}/${drivers.length} pass`);
 
-      // Exclude already-tried drivers, filter to radius, sort nearest-first
       const available = fsFiltered
         .filter(d => !loopIgnoredRef.current.has(d.locationId))
         .map(d => ({ ...d, distKm: haversineDist(loc.lat, loc.lng, d.lat, d.lng) }))
         .filter(d => d.distKm <= SEARCH_RADIUS_KM)
         .sort((a, b) => a.distKm - b.distKm);
-      console.log(`[redirectToNext] available after filter: ${available.length}`, available.map(d=>({name:d.driverName, distKm:+d.distKm.toFixed(3)})));
+      console.log(`[redirectToNext] available: ${available.length}`, available.map(d=>({name:d.driverName, distKm:+d.distKm.toFixed(3)})));
 
       if (available.length === 0) {
-        // All available drivers tried — give up
-        redirectLockRef.current = false;
+        redirectLockRef.current = false; isRedirectingRef.current = false;
         setLoopActive(false); setLoopCountdown(null); setLoopCurrentDriver(''); setLoopCurrentDriverDist(null);
         setTaxiNoDriverSnack(true);
         setTimeout(()=> setTaxiNoDriverSnack(false), 7000);
@@ -3195,69 +3181,94 @@ export function ClinicMap({
         return;
       }
 
-      const next = available[0]; // nearest uncontacted driver
+      const next = available[0];
       setLoopCurrentDriver(next.driverName);
       setLoopCurrentDriverDist(next.distKm);
 
-      // 4. POST new order to next driver
-      const fromPt = loopFromPtRef.current!;
-      const toPt   = loopToPtRef.current;
-      const orderRes = await fetch('/api/orders', {
-        method: 'POST',
-        headers: { 'Content-Type':'application/json' },
-        body: JSON.stringify({
-          locationId:     next.locationId,
-          userName:       loopUserNameRef.current,
-          phone:          loopUserPhoneRef.current,
-          destination:    toPt
-            ? `من (${fromPt.lat.toFixed(4)},${fromPt.lng.toFixed(4)}) إلى (${toPt.lat.toFixed(4)},${toPt.lng.toFixed(4)})`
-            : `(${fromPt.lat.toFixed(4)},${fromPt.lng.toFixed(4)})`,
-          fromLat: fromPt.lat, fromLng: fromPt.lng,
-          toLat:   toPt?.lat ?? fromPt.lat, toLng: toPt?.lng ?? fromPt.lng,
-          estimatedPrice: loopEstPriceRef.current,
-          lat: fromPt.lat, lng: fromPt.lng,
-        }),
-      });
+      if (curOrderId) {
+        // ── Reassign same order to next driver ─────────────────────────────
+        // PATCH updates locationId + resets status to 'pending' server-side.
+        // No 'cancelled' event is broadcast to the customer SSE stream.
+        const patchRes = await fetch(`/api/orders/${curOrderId}/reassign-driver`, {
+          method:  'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ locationId: next.locationId }),
+        });
 
-      if (orderRes.ok) {
-        const { orderId: newId } = await orderRes.json();
-        setActiveOrderId(newId); setActiveOrderStatus('pending');
-        activeOrderIdRef.current = newId; activeOrderStatusRef.current = 'pending';
-        setActiveDriverPhone(next.phone);
-        setActiveDriverId(next.locationId);
-        localStorage.setItem('diyala_active_order', JSON.stringify({ orderId:newId, driverPhone:next.phone, driverId:next.locationId }));
-        // ── Mirror new order to Firestore (same pickup/dest as original order) ─
-        const uid2 = auth.currentUser?.uid;
-        if (uid2 && newId) {
-          setDoc(doc(db, 'orders', String(newId)), {
-            customer_id:  uid2,
-            type:         'taxi',
-            status:       'pending',
-            customer_lat: fromPt.lat,
-            customer_lng: fromPt.lng,
-            from_lat:     fromPt.lat,
-            from_lng:     fromPt.lng,
-            to_lat:       toPt?.lat ?? fromPt.lat,
-            to_lng:       toPt?.lng ?? fromPt.lng,
-            created_at:   serverTimestamp(),
-          }).catch(() => {});
+        if (patchRes.ok) {
+          // Mirror the status reset to Firestore (same doc, back to pending)
+          updateDoc(doc(db, 'orders', String(curOrderId)), { status: 'pending' }).catch(()=>{});
+          setActiveDriverPhone(next.phone);
+          setActiveDriverId(next.locationId);
+          activeDriverPhoneRef.current = next.phone;
+          setActiveOrderStatus('pending');
+          activeOrderStatusRef.current = 'pending';
+          localStorage.setItem('diyala_active_order',
+            JSON.stringify({ orderId: curOrderId, driverPhone: next.phone, driverId: next.locationId }));
+          loopIgnoredRef.current.add(next.locationId);
+          setLoopActive(true);
+          setLoopCountdown(120);
+          isRedirectingRef.current = false;
+          redirectLockRef.current  = false;
+        } else {
+          // Reassign failed (driver busy/gone) — skip and try the next one
+          isRedirectingRef.current = false;
+          redirectLockRef.current  = false;
+          loopIgnoredRef.current.add(next.locationId);
+          redirectToNextRef.current();
         }
-        // Mark this driver as tried and restart 120 s countdown
-        loopIgnoredRef.current.add(next.locationId);
-        setLoopActive(true);
-        setLoopCountdown(120);
-        // New order is live — release both guards
-        isRedirectingRef.current = false;
-        redirectLockRef.current  = false;
       } else {
-        // Driver already busy / error — skip to next immediately
-        isRedirectingRef.current = false;
-        redirectLockRef.current  = false;
-        loopIgnoredRef.current.add(next.locationId);
-        redirectToNextRef.current();
+        // ── Fallback: no existing order (first attempt) — create via POST ──
+        const fromPt = loopFromPtRef.current!;
+        const toPt   = loopToPtRef.current;
+        const orderRes = await fetch('/api/orders', {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            locationId:     next.locationId,
+            userName:       loopUserNameRef.current,
+            phone:          loopUserPhoneRef.current,
+            destination:    toPt
+              ? `من (${fromPt.lat.toFixed(4)},${fromPt.lng.toFixed(4)}) إلى (${toPt.lat.toFixed(4)},${toPt.lng.toFixed(4)})`
+              : `(${fromPt.lat.toFixed(4)},${fromPt.lng.toFixed(4)})`,
+            fromLat: fromPt.lat, fromLng: fromPt.lng,
+            toLat:   toPt?.lat ?? fromPt.lat, toLng: toPt?.lng ?? fromPt.lng,
+            estimatedPrice: loopEstPriceRef.current,
+            lat: fromPt.lat, lng: fromPt.lng,
+          }),
+        });
+        if (orderRes.ok) {
+          const { orderId: newId } = await orderRes.json();
+          setActiveOrderId(newId); setActiveOrderStatus('pending');
+          activeOrderIdRef.current = newId; activeOrderStatusRef.current = 'pending';
+          setActiveDriverPhone(next.phone);
+          setActiveDriverId(next.locationId);
+          activeDriverPhoneRef.current = next.phone;
+          localStorage.setItem('diyala_active_order',
+            JSON.stringify({ orderId: newId, driverPhone: next.phone, driverId: next.locationId }));
+          const uid2 = auth.currentUser?.uid;
+          if (uid2 && newId) {
+            setDoc(doc(db, 'orders', String(newId)), {
+              customer_id: uid2, type: 'taxi', status: 'pending',
+              customer_lat: fromPt.lat, customer_lng: fromPt.lng,
+              from_lat: fromPt.lat, from_lng: fromPt.lng,
+              to_lat: toPt?.lat ?? fromPt.lat, to_lng: toPt?.lng ?? fromPt.lng,
+              created_at: serverTimestamp(),
+            }).catch(()=>{});
+          }
+          loopIgnoredRef.current.add(next.locationId);
+          setLoopActive(true);
+          setLoopCountdown(120);
+          isRedirectingRef.current = false;
+          redirectLockRef.current  = false;
+        } else {
+          isRedirectingRef.current = false;
+          redirectLockRef.current  = false;
+          loopIgnoredRef.current.add(next.locationId);
+          redirectToNextRef.current();
+        }
       }
     } catch {
-      // Network error — release guards and stop gracefully
       isRedirectingRef.current = false;
       redirectLockRef.current  = false;
       stopOrderTracking();
