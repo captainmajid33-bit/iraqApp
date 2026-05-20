@@ -119,6 +119,12 @@ async function getFilteredDriverPhones(): Promise<{
 }
 
 // ── Haversine distance (km) between two lat/lng points ────────────────────
+/** Taxi fare formula: ≤5 km → 750 IQD/km, >5 km → 500 IQD/km. Rounded to nearest 250. */
+function calculateTaxiFare(distKm: number): number {
+  const raw = distKm <= 5 ? distKm * 750 : distKm * 500;
+  return Math.round(raw / 250) * 250;
+}
+
 function haversineDist(lat1:number,lng1:number,lat2:number,lng2:number):number {
   const R=6371, toRad=(d:number)=>d*Math.PI/180;
   const dLat=toRad(lat2-lat1), dLng=toRad(lng2-lng1);
@@ -597,7 +603,7 @@ export function ClinicMap({
             taxiRouteLineRef.current = L.polyline(coords,{color:'#7b2ff7',weight:3.5,opacity:1,lineCap:'round',lineJoin:'round',dashArray:'10 6'}).addTo(mapRef.current);
             const distKm = route.distance / 1000;
             setTaxiDistKm(distKm);
-            setTaxiEstPrice(Math.round(distKm * 750));
+            setTaxiEstPrice(calculateTaxiFare(distKm));
             mapRef.current.fitBounds(L.latLngBounds(coords),{padding:[70,70]});
           } catch {
             clearTimeout(tId);
@@ -2196,7 +2202,7 @@ export function ClinicMap({
           if (data.routes?.length > 0) {
             const route  = data.routes[0];
             const distKm = route.distance / 1000;
-            const price  = Math.round(distKm * 750 / 250) * 250;
+            const price  = calculateTaxiFare(distKm);
             setTaxiQuickDistKm(distKm);
             setTaxiQuickPrice(price);
             // Draw road-following polyline
@@ -2808,16 +2814,18 @@ export function ClinicMap({
           const uid = auth.currentUser?.uid;
           if (uid) {
             setDoc(doc(db, 'orders', String(orderId)), {
-              customer_id:  uid,
-              type:         'taxi',
-              status:       'pending',
-              customer_lat: taxiFromPt?.lat ?? null,
-              customer_lng: taxiFromPt?.lng ?? null,
-              from_lat:     taxiFromPt?.lat ?? null,
-              from_lng:     taxiFromPt?.lng ?? null,
-              to_lat:       taxiToPt?.lat   ?? null,
-              to_lng:       taxiToPt?.lng   ?? null,
-              created_at:   serverTimestamp(),
+              customer_id:     uid,
+              type:            'taxi',
+              status:          'pending',
+              customer_lat:    taxiFromPt?.lat ?? null,
+              customer_lng:    taxiFromPt?.lng ?? null,
+              from_lat:        taxiFromPt?.lat ?? null,
+              from_lng:        taxiFromPt?.lng ?? null,
+              to_lat:          taxiToPt?.lat   ?? null,
+              to_lng:          taxiToPt?.lng   ?? null,
+              estimated_fare:  taxiEstPrice    ?? 0,
+              route_dist_km:   taxiDistKm      ?? null,
+              created_at:      serverTimestamp(),
             }).catch(() => { /* non-fatal */ });
           }
           // ── Start the search loop countdown ─────────────────────────────
@@ -3976,7 +3984,7 @@ export function ClinicMap({
                               const route  = data.routes[0];
                               const distKm = route.distance / 1000;
                               setTaxiQuickDistKm(distKm);
-                              setTaxiQuickPrice(Math.round(distKm*750/250)*250);
+                              setTaxiQuickPrice(calculateTaxiFare(distKm));
                               taxiQuickPolyRef.current?.remove();
                               if (mapRef.current) {
                                 const ll = (route.geometry.coordinates as [number,number][])
@@ -3988,7 +3996,7 @@ export function ClinicMap({
                           } catch {
                             const distKm = haversineDist(fromPt.lat, fromPt.lng, s.lat, s.lng);
                             setTaxiQuickDistKm(distKm);
-                            setTaxiQuickPrice(Math.round(distKm*750/250)*250);
+                            setTaxiQuickPrice(calculateTaxiFare(distKm));
                             taxiQuickPolyRef.current?.remove();
                             if (mapRef.current) {
                               taxiQuickPolyRef.current = L.polyline(
@@ -4560,7 +4568,7 @@ export function ClinicMap({
                     )}
                     <div style={{fontFamily:'Rajdhani,sans-serif',fontSize:'10px',color:'rgba(245,197,24,0.55)'}}>
                       {taxiDistKm !== null && !taxiRouteLoading
-                        ? `${taxiDistKm.toFixed(2)} كم × 750 = د.ع`
+                        ? `${taxiDistKm.toFixed(2)} كم × ${taxiDistKm <= 5 ? '750' : '500'} = د.ع`
                         : 'دينار عراقي'}
                     </div>
                   </div>
