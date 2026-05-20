@@ -801,6 +801,10 @@ export function ClinicMap({
   const redirectToNextRef  = useRef<()=>Promise<void>>(async()=>{});   // stable pointer, updated after def
   const [loopCurrentDriverDist, setLoopCurrentDriverDist] = useState<number|null>(null); // km to the driver currently being tried
   const loopInitDistRef    = useRef<number|null>(null);   // distance to first auto-found driver
+  // ── Redirect guard ────────────────────────────────────────────────────────
+  // true while redirectToNextDriver is mid-flight (between cancel-old & create-new).
+  // Prevents the 'cancelled' SSE/poll echo from triggering stopOrderTracking().
+  const isRedirectingRef   = useRef(false);
 
   // ── Live Firestore Sets for real-time driver availability ─────────────────
   // Updated by onSnapshot listeners (started when loopActive=true).
@@ -2677,6 +2681,12 @@ export function ClinicMap({
     }
     // 'done' or 'finished' → hide chat and show rating dialog before clearing
     if (data.status === 'done' || data.status === 'finished' || data.status === 'cancelled') {
+      // ── 'cancelled' echo after redirect: the old order was intentionally
+      //    cancelled by redirectToNextDriver to free the driver — the loop is
+      //    still alive and a new order has been (or is being) created.
+      //    Ignore this echo completely; do NOT stop the search.
+      if (data.status === 'cancelled' && isRedirectingRef.current) return;
+
       setShowChat(false);
       localStorage.removeItem('diyala_active_order');
 
@@ -2948,12 +2958,15 @@ export function ClinicMap({
 
   // ── Redirect to next available driver (loop core) ────────────────────────
   const redirectToNextDriver = useCallback(async ()=>{
-    // 1. Cancel current pending order on server (non-fatal if it fails)
+    // 1. Cancel current pending order on server (non-fatal if it fails).
+    //    Guard isRedirectingRef so that the resulting 'cancelled' SSE echo
+    //    does NOT trigger stopOrderTracking() — the loop must stay alive.
     const curOrderId = activeOrderIdRef.current;
+    isRedirectingRef.current = true;
     if (curOrderId) {
       try { await fetch(`/api/orders/${curOrderId}/customer-cancel`, { method:'PATCH' }); } catch { /* non-fatal */ }
     }
-    // 2. Clear active order state (keep loop refs/context)
+    // 2. Clear active order state (keep loop refs/context — loop stays active)
     setActiveOrderId(null); setActiveOrderStatus('pending');
     activeOrderIdRef.current = null; activeOrderStatusRef.current = 'pending';
     localStorage.removeItem('diyala_active_order');
@@ -3053,12 +3066,17 @@ export function ClinicMap({
         loopIgnoredRef.current.add(next.locationId);
         setLoopActive(true);
         setLoopCountdown(120);
+        // New order is live — safe to clear redirect guard
+        isRedirectingRef.current = false;
       } else {
-        // Driver already busy / error — skip immediately
+        // Driver already busy / error — skip to next immediately
+        isRedirectingRef.current = false;
         loopIgnoredRef.current.add(next.locationId);
         redirectToNextRef.current();
       }
     } catch {
+      // Network error — clear guard and stop gracefully
+      isRedirectingRef.current = false;
       stopOrderTracking();
     }
   },[stopOrderTracking]);
