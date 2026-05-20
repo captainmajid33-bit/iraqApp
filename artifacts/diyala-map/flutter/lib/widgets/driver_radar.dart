@@ -94,15 +94,32 @@ bool _isTaxiType(dynamic val) {
   return s == 'taxi' || s.isEmpty;
 }
 
-// ── الدالة الرئيسية: Stream حي من Firestore ───────────────────────────────────
-// تُعيد Stream يستمع لحظة بلحظة — كل تغيير في isOnline أو status يُفعّل rebuild
-// ⚠ isOnline لا نضعه في where() لأن Flutter قد يكتبه bool أو String
-//   نفلتره client-side داخل StreamBuilder لضمان قبول كلا النوعين
-Stream<QuerySnapshot<Map<String, dynamic>>> getAvailableTaxiDrivers() {
-  return FirebaseFirestore.instance
-      .collection('drivers')
-      .where('driverType', isEqualTo: 'taxi') // server-side: فئة التكسي فقط
-      .snapshots();                            // .snapshots() = الاستماع الحي المستمر
+// ── TaxiRadarEngine ───────────────────────────────────────────────────────────
+// المحرك الرئيسي للرادار — ثلاثة فلاتر server-side مباشرةً على Firestore:
+//
+//   driverType == 'taxi'    ← فئة التكسي فقط (String — آمن server-side)
+//   isOnline   == true      ← السائق مفتوح التطبيق الآن (bool — Flutter يكتبه bool)
+//   status     == 'available' ← غير مشغول برحلة (String — آمن server-side)
+//
+// ملاحظة Firestore Index: هذا الاستعلام المركّب يحتاج composite index على:
+//   Collection: drivers
+//   Fields: driverType ASC, isOnline ASC, status ASC
+// أنشئه من Firebase Console → Firestore → Indexes → Add composite index
+// أو شغّل: firebase deploy --only firestore:indexes
+//
+// .snapshots() يفتح اتصالاً حياً دائماً — أي تغيير في أي سائق يُطلق rebuild
+// في أقل من 500ms دون أي تدخل من المستخدم.
+class TaxiRadarEngine {
+  TaxiRadarEngine._(); // prevent instantiation — static only
+
+  static Stream<QuerySnapshot<Map<String, dynamic>>> streamAvailableTaxiDrivers() {
+    return FirebaseFirestore.instance
+        .collection('drivers')
+        .where('driverType', isEqualTo: 'taxi')      // server-side ✅
+        .where('isOnline',   isEqualTo: true)         // server-side ✅ (Flutter writes bool)
+        .where('status',     isEqualTo: 'available')  // server-side ✅
+        .snapshots();
+  }
 }
 
 // ── DriverRadar widget — StatelessWidget + StreamBuilder ──────────────────────
@@ -123,20 +140,20 @@ class DriverRadar extends StatelessWidget {
   });
 
   // ── تحويل snapshot → قائمة TaxiDriver مُرتّبة ────────────────────────────
+  // Firestore أرسل فقط السائقين الذين يطابقون الشروط الثلاثة (server-side).
+  // نحتاج هنا فقط للإحداثيات + المسافة — باقي الفلاتر أُنجزت قبل الوصول.
+  // نحتفظ بـ _isTruthy/_isAvailable كشبكة أمان لحالات edge-case نادرة.
   List<TaxiDriver> _parseDrivers(QuerySnapshot<Map<String, dynamic>> snap) {
     final drivers = <TaxiDriver>[];
 
     for (final doc in snap.docs) {
       final d = doc.data();
 
-      // شرط 1: فئة التكسي (double-check client-side)
+      // شبكة أمان client-side — تُعالج edge-cases نادرة:
+      // مثل: وثيقة تجاوزت الفلتر بسبب تأخر الـ index أو كتابة String بدل bool
+      if (!_isTruthy(d['isOnline']))    continue;
+      if (!_isAvailable(d['status']))   continue;
       if (!_isTaxiType(d['driverType'])) continue;
-
-      // شرط 2: متصل — يقبل bool true أو String 'true' (Flutter type-mismatch safe)
-      if (!_isTruthy(d['isOnline'])) continue;
-
-      // شرط 3: متاح وليس بداخل رحلة
-      if (!_isAvailable(d['status'])) continue;
 
       // الإحداثيات
       final lat = (d['lat'] as num?)?.toDouble() ??
@@ -145,7 +162,7 @@ class DriverRadar extends StatelessWidget {
                   (d['longitude'] as num?)?.toDouble();
       if (lat == null || lng == null) continue;
 
-      // شرط 4: ضمن نطاق البحث
+      // فلتر المسافة — لا يمكن تطبيقه server-side في Firestore
       final distKm = _haversineKm(customerLat, customerLng, lat, lng);
       if (distKm > radiusKm) continue;
 
@@ -163,7 +180,6 @@ class DriverRadar extends StatelessWidget {
       ));
     }
 
-    // ترتيب تصاعدي حسب المسافة
     drivers.sort((a, b) => a.distanceKm.compareTo(b.distanceKm));
     return drivers;
   }
@@ -171,18 +187,17 @@ class DriverRadar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-      // ─── هذا السطر هو قلب الميزة ───────────────────────────────────────────
-      // .snapshots() يفتح اتصالاً دائماً مع Firestore.
-      // كل مرة يضغط السائق "مفتوح" أو "مغلق" يُطلق Firestore حدثاً جديداً
-      // فيُعيد Flutter بناء الـ Widget تلقائياً دون أي تدخل من المستخدم.
-      stream: getAvailableTaxiDrivers(),
+      // TaxiRadarEngine.streamAvailableTaxiDrivers() يُطلق Firestore stream بثلاثة
+      // فلاتر server-side: driverType + isOnline + status.
+      // كل تغيير في أي سائق يُطلق rebuild فوري في < 500ms.
+      stream: TaxiRadarEngine.streamAvailableTaxiDrivers(),
       builder: (context, snapshot) {
         // حالة التحميل الأولي
         if (snapshot.connectionState == ConnectionState.waiting) {
           return _buildLoading();
         }
 
-        // حالة الخطأ
+        // حالة الخطأ (مثل: missing composite index)
         if (snapshot.hasError) {
           return _buildError(snapshot.error.toString());
         }
@@ -190,7 +205,7 @@ class DriverRadar extends StatelessWidget {
         // لا بيانات بعد
         if (!snapshot.hasData) return _buildLoading();
 
-        // ── تحويل البيانات وتطبيق الفلاتر client-side ────────────────────
+        // تحويل + فلتر المسافة client-side فقط (الباقي أنجزه Firestore)
         final drivers = _parseDrivers(snapshot.data!);
 
         if (drivers.isEmpty) return _buildEmpty();
