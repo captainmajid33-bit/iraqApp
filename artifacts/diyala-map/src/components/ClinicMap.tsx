@@ -2107,7 +2107,11 @@ export function ClinicMap({
       // their phone is NOT in the Set → they are excluded here before any order is placed.
       const { phones: dispatchFilterPhones, source: dispatchFilterSrc } = getLiveFilteredPhones();
       const fsFilteredDrivers = dispatchFilterPhones !== null
-        ? drivers.filter(d => dispatchFilterPhones.has((d.phone ?? '').trim()))
+        ? drivers.filter(d => {
+            const p = (d.phone ?? '').trim();
+            if (!p) return true; // empty-phone drivers can't be in any Firestore Set — don't block them
+            return dispatchFilterPhones.has(p);
+          })
         : drivers; // both gates still null (very first mount, no internet) → trust REST
       console.log(`[dispatchTaxiNow] live dual-gate (${dispatchFilterSrc}): ${fsFilteredDrivers.length}/${drivers.length} pass`);
 
