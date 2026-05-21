@@ -1710,6 +1710,7 @@ export function ClinicMap({
     setTaxiError(null);      setTaxiSuccess(false);
     setTaxiDestName('');     setTaxiFromPlaced(false);
     setTaxiAutoConnect(false);
+    setTaxiAutoSearching(false);
     taxiStepRef.current   = 'idle';
     poiMarkersRef.current.forEach(m=>m.remove());
     poiMarkersRef.current = [];
@@ -1722,6 +1723,7 @@ export function ClinicMap({
     setLoopActive(false);
     setLoopCountdown(null);
     setLoopCurrentDriver('');
+    setTaxiAutoSearching(false);
     loopIgnoredRef.current.clear();
     loopFromPtRef.current  = null;
     loopToPtRef.current    = null;
@@ -1878,7 +1880,9 @@ export function ClinicMap({
     } else {
       // GPS not yet available — start locating, then search on first fix
       setTaxiAutoSearching(true);
-      locateUserRef.current?.((newLoc)=> doSearch(newLoc));
+      // Safety: if GPS never arrives within 15 s, stop spinner to avoid infinite lock
+      const gpsTimeout = setTimeout(() => setTaxiAutoSearching(false), 15000);
+      locateUserRef.current?.((newLoc)=> { clearTimeout(gpsTimeout); doSearch(newLoc); });
     }
   },[taxiCategory, onFilterChange]);
 
@@ -2434,6 +2438,7 @@ export function ClinicMap({
     localStorage.removeItem('diyala_active_order');
     // Clear the search loop
     setLoopActive(false); setLoopCountdown(null); setLoopCurrentDriver(''); setLoopCurrentDriverDist(null);
+    setTaxiAutoSearching(false);
     loopIgnoredRef.current.clear();
     loopFromPtRef.current = null; loopToPtRef.current = null;
   },[]);
@@ -2780,6 +2785,7 @@ export function ClinicMap({
       // Chat is NOT auto-opened — user must tap 💬 or status-bar button
       // Driver accepted → stop the search loop
       setLoopActive(false); setLoopCountdown(null);
+      setTaxiAutoSearching(false);
     }
     // Driver rejected → redirect to next available driver immediately.
     // ① redirectLockRef blocks duplicate calls (poll + SSE race).
@@ -3195,6 +3201,7 @@ export function ClinicMap({
       if (available.length === 0) {
         redirectLockRef.current = false; isRedirectingRef.current = false;
         setLoopActive(false); setLoopCountdown(null); setLoopCurrentDriver(''); setLoopCurrentDriverDist(null);
+        setTaxiAutoSearching(false);
         setTaxiNoDriverSnack(true);
         setTimeout(()=> setTaxiNoDriverSnack(false), 7000);
         stopOrderTracking();
@@ -5118,6 +5125,7 @@ export function ClinicMap({
                     setLoopCountdown(null);
                     setLoopCurrentDriver('');
                     setLoopCurrentDriverDist(null);
+                    setTaxiAutoSearching(false);
                     loopIgnoredRef.current.clear();
                     // 2. Mark order as cancelled in Firestore / backend
                     if (oid) {

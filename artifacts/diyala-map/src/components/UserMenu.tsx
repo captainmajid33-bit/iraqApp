@@ -94,19 +94,26 @@ function WalletDialog({ user, fbUser, onClose }: WalletDialogProps) {
   }
 
   // Live balance from Firestore users/{uid}
+  // Safety: if Firestore is slow, stop spinner after 2 s and show cached/zero balance.
   useEffect(() => {
     const uid = fbUser?.uid;
     if (!uid) { setBalance(0); setLoading(false); return; }
 
+    const fallback = setTimeout(() => {
+      setBalance(prev => prev ?? 0);
+      setLoading(false);
+    }, 2000);
+
     const unsub = onSnapshot(
       doc(db, 'users', uid),
       snap => {
+        clearTimeout(fallback);
         setBalance(snap.exists() ? Number(snap.data()?.balance ?? 0) : 0);
         setLoading(false);
       },
-      () => { setBalance(0); setLoading(false); }
+      () => { clearTimeout(fallback); setBalance(0); setLoading(false); }
     );
-    return () => unsub();
+    return () => { clearTimeout(fallback); unsub(); };
   }, [fbUser?.uid]);
 
   const waLink       = buildWALink(userId, balance ?? 0);
@@ -387,6 +394,9 @@ function MissionsDialog({ user, fbUser, onClose }: MissionsDialogProps) {
   useEffect(() => {
     if (!userId || userId === 'anonymous') { setLoading(false); return; }
 
+    // Safety: stop spinner after 2 s if Firestore is slow / offline.
+    const fallback = setTimeout(() => setLoading(false), 2000);
+
     const q = query(
       collection(db, 'bounty_missions'),
       where('status',    '==', 'claimed'),
@@ -394,6 +404,7 @@ function MissionsDialog({ user, fbUser, onClose }: MissionsDialogProps) {
     );
     const unsub = onSnapshot(q,
       snap => {
+        clearTimeout(fallback);
         const docs: WonMission[] = [];
         snap.forEach(d => {
           if (d.id === '_seed_check') return;
@@ -406,16 +417,15 @@ function MissionsDialog({ user, fbUser, onClose }: MissionsDialogProps) {
             claimedAt:   raw.claimedAt,
           });
         });
-        // Newest first (by claimedAt if available, else push order)
         docs.sort((a, b) =>
           (b.claimedAt?.seconds ?? 0) - (a.claimedAt?.seconds ?? 0)
         );
         setWon(docs);
         setLoading(false);
       },
-      () => { setLoading(false); }
+      () => { clearTimeout(fallback); setLoading(false); }
     );
-    return () => unsub();
+    return () => { clearTimeout(fallback); unsub(); };
   }, [userId]);
 
   const totalWon = won.reduce((s, m) => s + m.reward, 0);
