@@ -1788,7 +1788,7 @@ export function ClinicMap({
         console.log(`[autoFindDriver] live dual-gate (${filterSource}): ${fsFiltered.length}/${drivers.length} pass`);
 
         // ── Fixed radius, sorted nearest-first ───────────────────────────────
-        const SEARCH_RADIUS_KM = 10; // ⚠ TESTING: temporarily 10 km (was 2 km)
+        const SEARCH_RADIUS_KM = 2;
         const withDist = fsFiltered
           .map(d => ({ ...d, distKm: haversineDist(loc.lat, loc.lng, d.lat, d.lng) }));
         console.log(`[autoFindDriver] after distance calc — within ${SEARCH_RADIUS_KM} km:`,
@@ -2068,7 +2068,7 @@ export function ClinicMap({
 
       type DriverRow = { locationId:number; driverName:string; phone:string; lat:number; lng:number; };
       const drivers: DriverRow[] = Array.isArray(dRaw) ? (dRaw as DriverRow[]) : [];
-      const SEARCH_RADIUS_KM = 10;
+      const SEARCH_RADIUS_KM = 2;
 
       // ── Live dual-gate cross-check (approved_agents ∩ drivers) ──────────────
       // getLiveFilteredPhones() reads the pre-warmed onSnapshot Sets synchronously.
@@ -3170,7 +3170,7 @@ export function ClinicMap({
       const res     = await fetch('/api/drivers-online?category=taxi');
       const drivers: OnlineDriver[] = await res.json();
 
-      const SEARCH_RADIUS_KM = 10; // ⚠ TESTING: temporarily 10 km (was 2 km)
+      const SEARCH_RADIUS_KM = 2;
 
       console.log(`[redirectToNext] API ${drivers.length} driver(s), ignored:[${[...loopIgnoredRef.current].join(',')}]`,
         drivers.map(d => ({
@@ -5000,7 +5000,7 @@ export function ClinicMap({
               </div>
               <div style={{fontFamily:'Rajdhani,sans-serif',fontSize:'15px',fontWeight:700,color:'#e8f8f5',lineHeight:1.2}}>
                 {activeOrderStatus==='pending' && loopActive
-                  ? `نبحث عن أقرب تكسي لك ضمن منطقة 10 كم...`
+                  ? `نبحث عن أقرب تكسي لك ضمن منطقة 2 كم...`
                   : activeOrderStatus==='pending'   ? 'في انتظار قبول السائق...'
                   : activeOrderStatus==='accepted'  ? '🚕 السائق في الطريق إليك'
                   : activeOrderStatus==='driving'   ? '🚕 السائق في الطريق إليك'
@@ -5288,7 +5288,7 @@ export function ClinicMap({
               لا يوجد سائقون · NO DRIVERS
             </div>
             <div style={{fontFamily:'Rajdhani,sans-serif',fontSize:'14px',fontWeight:600,color:'#ffa0c0',lineHeight:1.35}}>
-              نعتذر، لا يوجد سائقون متاحون ضمن نطاق 10 كم حالياً، يرجى المحاولة بعد قليل
+              نعتذر، لا يوجد سائقون متاحون ضمن نطاق 2 كم حالياً، يرجى المحاولة بعد قليل
             </div>
           </div>
           <button onClick={()=> setTaxiNoDriverSnack(false)}
