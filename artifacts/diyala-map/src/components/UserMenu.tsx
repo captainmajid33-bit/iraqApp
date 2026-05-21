@@ -590,16 +590,31 @@ export function UserMenu() {
     return () => { clearTimeout(fallback); unsub(); };
   }, [fbUser?.uid]);
 
-  // ── Resolve user profile data ─────────────────────────────────────────────
+  // ── Resolve user profile data — reactive to auth state ───────────────────
+  // Runs immediately on mount AND again whenever Firebase UID resolves (fixes
+  // the race-condition where auth.currentUser was null at first mount).
   useEffect(() => {
+    // 1. Instant: show localStorage data with no delay
     const fromStorage = getUserFromStorage();
-    if (fromStorage?.name) { setUser(fromStorage); return; }
-    const fb = auth.currentUser;
-    if (!fb) return;
-    getDoc(doc(db, 'users', fb.uid))
-      .then(snap => { if (snap.exists()) setUser(snap.data() as DiyalaUser); })
+    if (fromStorage?.name) setUser(fromStorage);
+
+    // 2. Authoritative: fetch from Firestore using the resolved UID
+    const uid = fbUser?.uid ?? auth.currentUser?.uid;
+    if (!uid) return;
+    getDoc(doc(db, 'users', uid))
+      .then(snap => {
+        if (snap.exists()) {
+          const data = snap.data() as DiyalaUser;
+          setUser(data);
+          // Keep localStorage in sync so next mount is instant
+          try {
+            const cached = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '{}');
+            localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...cached, ...data }));
+          } catch { /* ignore */ }
+        }
+      })
       .catch(() => {});
-  }, []);
+  }, [fbUser?.uid]); // ← re-runs when Firebase UID becomes available
 
   // ── Sync editedName when dialog opens ────────────────────────────────────
   useEffect(() => {

@@ -1767,8 +1767,18 @@ export function ClinicMap({
     const doSearch = async (loc: {lat:number; lng:number}) => {
       setTaxiAutoSearching(true);
       try {
-        const res     = await fetch('/api/drivers-online?category=taxi');
-        const drivers: OnlineDriver[] = await res.json();
+        // cache-busting timestamp ensures we always read live DB coords, not a stale browser cache
+        const res     = await fetch(`/api/drivers-online?category=taxi&_t=${Date.now()}`, {
+          cache: 'no-store',
+          headers: { 'Cache-Control': 'no-cache' },
+        });
+        const raw: OnlineDriver[] = await res.json();
+        // Coerce lat/lng to Number to guard against string values from the DB in edge cases
+        const drivers = raw.map(d => ({
+          ...d,
+          lat: Number(d.lat),
+          lng: Number(d.lng),
+        })).filter(d => Number.isFinite(d.lat) && Number.isFinite(d.lng));
 
         // DEBUG ── log every driver returned by the API ──────────────────────
         console.log(`[autoFindDriver] API returned ${drivers.length} driver(s)`, drivers.map(d=>({
@@ -3172,9 +3182,18 @@ export function ClinicMap({
     if (!loc) { redirectLockRef.current = false; isRedirectingRef.current = false; stopOrderTracking(); return; }
 
     try {
-      // API filters isOnline=true & isBusy=false & category=taxi at DB level.
-      const res     = await fetch('/api/drivers-online?category=taxi');
-      const drivers: OnlineDriver[] = await res.json();
+      // cache-busting: always read live DB coords, never a stale browser cache
+      const res     = await fetch(`/api/drivers-online?category=taxi&_t=${Date.now()}`, {
+        cache: 'no-store',
+        headers: { 'Cache-Control': 'no-cache' },
+      });
+      const raw: OnlineDriver[] = await res.json();
+      // Coerce lat/lng to Number — guard against string values in edge cases
+      const drivers = raw.map(d => ({
+        ...d,
+        lat: Number(d.lat),
+        lng: Number(d.lng),
+      })).filter(d => Number.isFinite(d.lat) && Number.isFinite(d.lng));
 
       const SEARCH_RADIUS_KM = 2;
 
