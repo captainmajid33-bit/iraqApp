@@ -108,13 +108,12 @@ router.post("/orders", async (req, res) => {
     await setDriverBusy(locationId, false);
 
     // ── Insert order ──────────────────────────────────────────────────────────
-    // Use null for locationId if the driver is not in the locations table
-    // (e.g. Firebase UID-derived IDs like 936095) to avoid FK constraint violation.
-    const safeLocationId = loc ? locationId : null;
+    // Always use the real locationId — the schema has no FK constraint on this column,
+    // so Firebase UID-derived IDs (like 927734, 936095) are valid integer values.
     const [order] = await db
       .insert(ordersTable)
       .values({
-        locationId: safeLocationId,
+        locationId,
         userName:       userName ?? null,
         phone,
         destination,
