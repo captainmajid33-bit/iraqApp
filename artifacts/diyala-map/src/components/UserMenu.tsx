@@ -7,6 +7,7 @@ import {
 } from 'firebase/firestore';
 import { auth, db } from '@/lib/firebase';
 import { getUserFromStorage, type DiyalaUser } from './UserLoginOverlay';
+import { LeagueWidget } from './LeagueWidget';
 
 const STORAGE_KEY = 'diyala_user';
 
@@ -984,6 +985,9 @@ export function UserMenu() {
                   )}
                 </button>
               )}
+
+              {/* ── League Standings Widget ── */}
+              <LeagueWidget active={dialogOpen} />
 
               {/* Close */}
               <button className="um-close" onClick={() => setDialogOpen(false)}
