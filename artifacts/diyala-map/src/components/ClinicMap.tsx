@@ -2714,54 +2714,78 @@ export function ClinicMap({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // ← empty deps: start once on mount, stop on unmount
 
-  // ── Render / sync Leaflet markers for online taxi drivers ─────────────────
-  // Runs every time `onlineDrivers` state changes (set by Firestore snapshot).
-  // Uses a phone→marker Map to add new drivers, remove offline drivers, and
-  // update positions — all in < 1 ms, no page refresh needed.
+  // ── Driver markers: ONLY show the accepted driver for the current order ──────
+  // Drivers are NEVER shown on the public map.
+  // A marker appears only when:
+  //   1. The customer has an active order (activeOrderId set)
+  //   2. The order status is 'accepted' or 'driving'
+  //   3. The driver's phone matches activeDriverPhone
+  //   4. The driver has valid GPS coordinates
+  // On any other condition, all driver markers are removed from the map.
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
     const existing = onlineDriverMarkersRef.current;
-    const currentPhones = new Set(onlineDrivers.map(d => d.phone));
 
-    // Remove markers for drivers who went offline
+    // Determine whether a driver marker should be visible right now
+    const TRACKING_STATUSES = new Set(['accepted', 'driving', 'in_progress']);
+    const shouldShow =
+      !!activeDriverPhone &&
+      TRACKING_STATUSES.has(activeOrderStatus);
+
+    // Remove ALL markers that don't match the single allowed driver
     existing.forEach((marker, phone) => {
-      if (!currentPhones.has(phone)) {
+      if (!shouldShow || phone !== activeDriverPhone) {
         marker.remove();
         existing.delete(phone);
       }
     });
 
-    // Add or reposition markers for online drivers
-    onlineDrivers.forEach(driver => {
-      if (typeof driver.lat !== 'number' || typeof driver.lng !== 'number') return;
-      if (existing.has(driver.phone)) {
-        // Driver already has a marker — just move it
-        existing.get(driver.phone)!.setLatLng([driver.lat, driver.lng]);
-      } else {
-        // New driver came online — create a marker
-        const icon = L.divIcon({
-          className: '',
-          html: `<div style="
-            width:30px;height:30px;border-radius:50%;
-            background:rgba(0,245,212,0.18);
-            border:2px solid #00f5d4;
-            display:flex;align-items:center;justify-content:center;
-            font-size:16px;box-shadow:0 0 8px #00f5d4aa;">
-            🚕
-          </div>`,
-          iconSize: [30, 30],
-          iconAnchor: [15, 15],
-        });
-        const marker = L.marker([driver.lat, driver.lng], {
-          icon,
-          zIndexOffset: 400,
-          title: driver.name || 'سائق متاح',
-        }).addTo(map);
-        existing.set(driver.phone, marker);
+    if (!shouldShow) return;
+
+    // Find the accepted driver in the online list
+    const driver = onlineDrivers.find(d => d.phone === activeDriverPhone);
+    if (!driver || typeof driver.lat !== 'number' || typeof driver.lng !== 'number') return;
+
+    if (existing.has(driver.phone)) {
+      // Already on map — just update position
+      existing.get(driver.phone)!.setLatLng([driver.lat, driver.lng]);
+    } else {
+      // First time accepted driver appears — create marker
+      const icon = L.divIcon({
+        className: '',
+        html: `<div style="
+          width:36px;height:36px;border-radius:50%;
+          background:rgba(0,245,212,0.22);
+          border:2.5px solid #00f5d4;
+          display:flex;align-items:center;justify-content:center;
+          font-size:18px;
+          box-shadow:0 0 14px #00f5d4cc,0 0 4px #00f5d4;">
+          🚕
+        </div>`,
+        iconSize: [36, 36],
+        iconAnchor: [18, 18],
+      });
+      const marker = L.marker([driver.lat, driver.lng], {
+        icon,
+        zIndexOffset: 800,
+        title: driver.name || 'سائقك',
+      }).addTo(map);
+      existing.set(driver.phone, marker);
+
+      // Auto-fit map to show both driver and customer simultaneously
+      const userLoc = userLocationRef.current;
+      if (userLoc) {
+        try {
+          const bounds = L.latLngBounds(
+            [driver.lat, driver.lng],
+            [userLoc.lat, userLoc.lng],
+          );
+          map.fitBounds(bounds.pad(0.35), { animate: true, duration: 0.8 });
+        } catch { /* ignore if bounds invalid */ }
       }
-    });
-  }, [onlineDrivers]);
+    }
+  }, [onlineDrivers, activeDriverPhone, activeOrderStatus]);
 
   // ── Read live phone Sets synchronously (no await needed) ──────────────────
   // Returns intersection of both gates, or falls back gracefully if either is null.
