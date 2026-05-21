@@ -33,14 +33,16 @@ function buildRechargeLink(userId: string) {
 }
 
 // ── Sub-component: Wallet Dialog ──────────────────────────────────────────────
+// balance + balanceReady are fed from the persistent parent subscription —
+// the dialog itself never creates its own Firestore listener.
 interface WalletDialogProps {
-  user:     DiyalaUser | null;
-  fbUser:   FbUser    | null;
-  onClose:  () => void;
+  user:         DiyalaUser | null;
+  fbUser:       FbUser    | null;
+  balance:      number;
+  balanceReady: boolean;
+  onClose:      () => void;
 }
-function WalletDialog({ user, fbUser, onClose }: WalletDialogProps) {
-  const [balance,    setBalance]    = useState<number | null>(null);
-  const [loading,    setLoading]    = useState(true);
+function WalletDialog({ user, fbUser, balance, balanceReady, onClose }: WalletDialogProps) {
   const [cardCode,   setCardCode]   = useState('');
   const [redeeming,  setRedeeming]  = useState(false);
   const [redeemMsg,  setRedeemMsg]  = useState<{ text: string; ok: boolean } | null>(null);
@@ -93,32 +95,10 @@ function WalletDialog({ user, fbUser, onClose }: WalletDialogProps) {
     }
   }
 
-  // Live balance from Firestore users/{uid}
-  // Safety: if Firestore is slow, stop spinner after 2 s and show cached/zero balance.
-  useEffect(() => {
-    const uid = fbUser?.uid;
-    if (!uid) { setBalance(0); setLoading(false); return; }
-
-    const fallback = setTimeout(() => {
-      setBalance(prev => prev ?? 0);
-      setLoading(false);
-    }, 2000);
-
-    const unsub = onSnapshot(
-      doc(db, 'users', uid),
-      snap => {
-        clearTimeout(fallback);
-        setBalance(snap.exists() ? Number(snap.data()?.balance ?? 0) : 0);
-        setLoading(false);
-      },
-      () => { clearTimeout(fallback); setBalance(0); setLoading(false); }
-    );
-    return () => { clearTimeout(fallback); unsub(); };
-  }, [fbUser?.uid]);
-
-  const waLink       = buildWALink(userId, balance ?? 0);
+  const waLink       = buildWALink(userId, balance);
   const rechargeLink = buildRechargeLink(userId);
-  const hasBalance = (balance ?? 0) > 0;
+  const hasBalance   = balance > 0;
+  const loading      = !balanceReady;
 
   return (
     <div
@@ -559,6 +539,16 @@ export function UserMenu() {
   const [user,          setUser]          = useState<DiyalaUser | null>(null);
   const [fbUser,        setFbUser]        = useState<FbUser | null>(null);
 
+  // ── Persistent wallet balance — lives as long as UserMenu is mounted ──────
+  // Read localStorage cache instantly so dialogs never show a spinner on open.
+  const [balance,      setBalance]      = useState<number>(() => {
+    try {
+      const cached = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? 'null');
+      return typeof cached?.balance === 'number' ? cached.balance : 0;
+    } catch { return 0; }
+  });
+  const [balanceReady, setBalanceReady] = useState(false);
+
   const [editedName, setEditedName] = useState('');
   const [saving,     setSaving]     = useState(false);
   const [toast,      setToast]      = useState<string | null>(null);
@@ -571,7 +561,36 @@ export function UserMenu() {
     return () => unsub();
   }, []);
 
-  // ── Resolve user data ─────────────────────────────────────────────────────
+  // ── Persistent balance subscription — isolated from order/loop state ───────
+  // This subscription is NEVER cancelled by the order loop or radar state.
+  // It reconnects only when the Firebase UID changes (login/logout).
+  useEffect(() => {
+    const uid = fbUser?.uid;
+    if (!uid) { setBalance(0); setBalanceReady(true); return; }
+
+    // 3-second safety fallback: show cached/zero balance if Firestore is slow
+    const fallback = setTimeout(() => setBalanceReady(true), 3000);
+
+    const unsub = onSnapshot(
+      doc(db, 'users', uid),
+      snap => {
+        clearTimeout(fallback);
+        const bal = snap.exists() ? Number(snap.data()?.balance ?? 0) : 0;
+        setBalance(bal);
+        setBalanceReady(true);
+        // Write back to cache so next open is instant
+        try {
+          const cached = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '{}');
+          localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...cached, balance: bal }));
+        } catch { /* ignore */ }
+      },
+      () => { clearTimeout(fallback); setBalanceReady(true); }
+    );
+    // Only unsubscribe when UID changes — NOT on re-renders or state changes
+    return () => { clearTimeout(fallback); unsub(); };
+  }, [fbUser?.uid]);
+
+  // ── Resolve user profile data ─────────────────────────────────────────────
   useEffect(() => {
     const fromStorage = getUserFromStorage();
     if (fromStorage?.name) { setUser(fromStorage); return; }
@@ -612,6 +631,7 @@ export function UserMenu() {
       await signOut(auth);
     } catch (e) {
       console.error('[UserMenu] sign-out error:', e);
+    } finally {
       setSigningOut(false);
     }
   };
@@ -971,6 +991,8 @@ export function UserMenu() {
         <WalletDialog
           user={user}
           fbUser={fbUser}
+          balance={balance}
+          balanceReady={balanceReady}
           onClose={() => setShowWallet(false)}
         />
       )}
