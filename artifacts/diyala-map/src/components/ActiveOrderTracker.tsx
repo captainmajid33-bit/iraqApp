@@ -1,7 +1,7 @@
 /**
  * ActiveOrderTracker.tsx
  * ─────────────────────────────────────────────────────────────────────────────
- * Firestore-based real-time driver tracking — CUSTOMER view.
+ * Firestore real-time driver tracking — CUSTOMER view.
  *
  * Architecture (Order-Based Location Tracking):
  *  1. Watches Firebase Auth → gets current user UID
@@ -9,11 +9,13 @@
  *       • orders        (taxi trips)
  *       • trips         (alternative taxi collection used by partner app)
  *       • gas_bookings  (gas agent orders)
- *  3. On first accepted order found, extracts driver_id / agent_id
- *  4. Opens a DEDICATED channel to drivers/{driver_id} for live GPS
- *  5. Falls back to driver_lat/driver_lng inside the order doc if no driver_id
- *  6. Shows a single animated driver marker + OSRM route on the Leaflet map
- *  7. Shows a destination marker (to_lat/to_lng from order doc)
+ *  3. On first accepted order found, extracts driver_phone / driver_id
+ *  4. Primary channel : onSnapshot(query(drivers, where('phone','==',phone)))
+ *     — fires every time the partner app writes a new GPS coordinate
+ *  5. Secondary channel: onSnapshot(doc(drivers, driverId)) if UID is available
+ *  6. Fallback channel : driver_lat / driver_lng embedded in the order doc
+ *  7. Every position update is SMOOTHLY INTERPOLATED via requestAnimationFrame
+ *     (60 fps ease-out lerp over 1.5 s) — marker crawls along the street
  *  8. Cleans up automatically on terminal status (done/cancelled/completed)
  *
  * NO global driver stream. NO public driver markers.
@@ -35,9 +37,20 @@ interface Props {
 
 type OrderType = 'taxi' | 'gas';
 
+interface SmoothMove {
+  animFrame: number;
+  fromLat:   number;
+  fromLng:   number;
+  toLat:     number;
+  toLng:     number;
+  startTime: number;
+  duration:  number;
+}
+
 // ── Constants ─────────────────────────────────────────────────────────────────
 const ACTIVE_STATUSES   = ['accepted', 'in_progress', 'driving'] as const;
 const TERMINAL_STATUSES = new Set(['completed', 'cancelled', 'done', 'finished', 'rejected']);
+const LERP_DURATION_MS  = 1500;   // smooth move duration per GPS update
 
 // ── Icons ─────────────────────────────────────────────────────────────────────
 function makeTrackedDriverIcon(type: OrderType): L.DivIcon {
@@ -132,18 +145,25 @@ async function drawOsrmRoute(
   } catch { /* silent */ }
 }
 
+// ── Ease-out quad: fast start, smooth deceleration ────────────────────────────
+function easeOutQuad(t: number): number {
+  return 1 - (1 - t) * (1 - t);
+}
+
 // ── Component ──────────────────────────────────────────────────────────────────
 export function ActiveOrderTracker({ mapRef, userLocation }: Props) {
   const userLocRef        = useRef(userLocation);
   const markerRef         = useRef<L.Marker | null>(null);
-  const destMarkerRef     = useRef<L.Marker | null>(null);   // destination pin
+  const destMarkerRef     = useRef<L.Marker | null>(null);
   const routeGlowRef      = useRef<L.Polyline | null>(null);
   const routeLineRef      = useRef<L.Polyline | null>(null);
   const routeTimerRef     = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const smoothMoveRef     = useRef<SmoothMove | null>(null);  // active RAF lerp
 
   // Active tracking state
   const activeOrderDocId  = useRef<string | null>(null);
   const activeDriverId    = useRef<string | null>(null);
+  const activeDriverPhone = useRef<string | null>(null);
   const orderUnsubRef     = useRef<(() => void) | null>(null);
   const driverUnsubRef    = useRef<(() => void) | null>(null);
   const queryUnsubsRef    = useRef<Array<() => void>>([]);
@@ -151,24 +171,34 @@ export function ActiveOrderTracker({ mapRef, userLocation }: Props) {
   // Keep userLoc ref current
   useEffect(() => { userLocRef.current = userLocation; }, [userLocation]);
 
+  // ── Cancel any in-progress smooth animation ──────────────────────────────────
+  const cancelSmoothMove = useCallback(() => {
+    if (smoothMoveRef.current !== null) {
+      cancelAnimationFrame(smoothMoveRef.current.animFrame);
+      smoothMoveRef.current = null;
+    }
+  }, []);
+
   // ── Cleanup helpers ─────────────────────────────────────────────────────────
   const clearVisuals = useCallback(() => {
+    cancelSmoothMove();
     markerRef.current?.remove();      markerRef.current    = null;
     destMarkerRef.current?.remove();  destMarkerRef.current = null;
     routeGlowRef.current?.remove();   routeGlowRef.current = null;
     routeLineRef.current?.remove();   routeLineRef.current = null;
     if (routeTimerRef.current) { clearTimeout(routeTimerRef.current); routeTimerRef.current = null; }
-  }, []);
+  }, [cancelSmoothMove]);
 
   const stopDriverWatch = useCallback(() => {
     driverUnsubRef.current?.();
     driverUnsubRef.current = null;
     activeDriverId.current = null;
+    activeDriverPhone.current = null;
   }, []);
 
   const stopOrderWatch = useCallback(() => {
     orderUnsubRef.current?.();
-    orderUnsubRef.current  = null;
+    orderUnsubRef.current    = null;
     activeOrderDocId.current = null;
   }, []);
 
@@ -178,7 +208,7 @@ export function ActiveOrderTracker({ mapRef, userLocation }: Props) {
     stopOrderWatch();
   }, [clearVisuals, stopDriverWatch, stopOrderWatch]);
 
-  // ── Show / update destination marker ──────────────────────────────────────────
+  // ── Show / update destination marker ─────────────────────────────────────────
   const applyDestination = useCallback((toLat: number, toLng: number) => {
     const map = mapRef.current;
     if (!map) return;
@@ -186,58 +216,130 @@ export function ActiveOrderTracker({ mapRef, userLocation }: Props) {
       destMarkerRef.current.setLatLng([toLat, toLng]);
     } else {
       destMarkerRef.current = L.marker([toLat, toLng], {
-        icon:          makeDestinationIcon(),
-        zIndexOffset:  9200,
+        icon:         makeDestinationIcon(),
+        zIndexOffset: 9200,
       }).addTo(map);
     }
   }, [mapRef]);
 
-  // ── Apply driver GPS position ───────────────────────────────────────────────
+  // ── Schedule OSRM route redraw (debounced, only after marker stops) ───────────
+  const scheduleRouteRedraw = useCallback((lat: number, lng: number) => {
+    if (routeTimerRef.current) { clearTimeout(routeTimerRef.current); routeTimerRef.current = null; }
+    routeTimerRef.current = setTimeout(() => {
+      routeTimerRef.current = null;
+      const userLoc = userLocRef.current;
+      if (mapRef.current && userLoc) {
+        drawOsrmRoute(mapRef.current, lat, lng, userLoc.lat, userLoc.lng, routeGlowRef, routeLineRef);
+      }
+    }, 1200);
+  }, [mapRef]);
+
+  // ── Apply driver GPS position with smooth requestAnimationFrame lerp ──────────
+  // Every time Firestore fires a new lat/lng this function is called.
+  // It cancels any previous animation and starts a new one from the marker's
+  // CURRENT interpolated position, so motion is always fluid and never jumps.
   const applyDriverPosition = useCallback((lat: number, lng: number, type: OrderType) => {
     const map = mapRef.current;
     if (!map) return;
 
-    if (markerRef.current) {
-      markerRef.current.setLatLng([lat, lng]);
-      const el = markerRef.current.getElement();
-      if (el) el.style.transition = 'transform 0.9s linear';
-    } else {
+    // First placement — add marker and skip animation
+    if (!markerRef.current) {
       markerRef.current = L.marker([lat, lng], {
-        icon: makeTrackedDriverIcon(type),
+        icon:         makeTrackedDriverIcon(type),
         zIndexOffset: 9500,
       }).addTo(map);
-      const el = markerRef.current.getElement();
-      if (el) el.style.transition = 'transform 0.9s linear';
+      scheduleRouteRedraw(lat, lng);
+      console.log(`[ActiveOrderTracker] 🚖 first fix: ${lat.toFixed(5)}, ${lng.toFixed(5)}`);
+      return;
     }
 
-    // Redraw OSRM route (debounced 1 s) every time driver moves
-    const userLoc = userLocRef.current;
-    if (userLoc && routeTimerRef.current === null) {
-      routeTimerRef.current = setTimeout(() => {
-        routeTimerRef.current = null;
-        if (mapRef.current) {
-          drawOsrmRoute(mapRef.current, lat, lng, userLoc.lat, userLoc.lng, routeGlowRef, routeLineRef);
+    // Subsequent updates — smoothly interpolate from current rendered position
+    cancelSmoothMove();
+    const { lat: fromLat, lng: fromLng } = markerRef.current.getLatLng();
+
+    // Skip micro-jitter (< 0.5 m)
+    const dlat = lat - fromLat, dlng = lng - fromLng;
+    if (Math.abs(dlat) < 0.000005 && Math.abs(dlng) < 0.000005) return;
+
+    console.log(`[ActiveOrderTracker] 📡 new GPS: ${lat.toFixed(5)},${lng.toFixed(5)} Δ≈${(Math.hypot(dlat,dlng)*111000).toFixed(0)}m`);
+
+    const startTime = performance.now();
+
+    const tick = (now: number) => {
+      const raw = Math.min((now - startTime) / LERP_DURATION_MS, 1);
+      const t   = easeOutQuad(raw);
+      const iLat = fromLat + dlat * t;
+      const iLng = fromLng + dlng * t;
+
+      markerRef.current?.setLatLng([iLat, iLng]);
+
+      if (raw < 1) {
+        smoothMoveRef.current = {
+          ...smoothMoveRef.current!,
+          animFrame: requestAnimationFrame(tick),
+        };
+      } else {
+        // Animation complete
+        smoothMoveRef.current = null;
+        scheduleRouteRedraw(lat, lng);
+      }
+    };
+
+    smoothMoveRef.current = {
+      animFrame: requestAnimationFrame(tick),
+      fromLat, fromLng, toLat: lat, toLng: lng,
+      startTime, duration: LERP_DURATION_MS,
+    };
+  }, [mapRef, cancelSmoothMove, scheduleRouteRedraw]);
+
+  // ── PRIMARY: Watch drivers by phone (partner-app's authoritative GPS source) ──
+  // Queries the Firestore `drivers` collection with where('phone','==',phone).
+  // Fires within < 1 s of every GPS write from the Flutter partner app.
+  const watchDriverByPhone = useCallback((phone: string, type: OrderType) => {
+    if (activeDriverPhone.current === phone) return;
+    stopDriverWatch();
+    activeDriverPhone.current = phone;
+
+    console.log(`[ActiveOrderTracker] 📱 subscribing to drivers where phone=${phone}`);
+
+    const q = query(collection(db, 'drivers'), where('phone', '==', phone));
+    driverUnsubRef.current = onSnapshot(
+      q,
+      (snap) => {
+        const driverDoc = snap.docs[0];
+        if (!driverDoc) return;
+        const data = driverDoc.data();
+        const lat  = typeof data.lat === 'number' ? data.lat : Number(data.lat ?? data.latitude ?? data.driver_lat);
+        const lng  = typeof data.lng === 'number' ? data.lng : Number(data.lng ?? data.longitude ?? data.driver_lng);
+        if (Number.isFinite(lat) && Number.isFinite(lng)) {
+          applyDriverPosition(lat, lng, type);
         }
-      }, 1000);
-    }
-  }, [mapRef]);
+      },
+      (err) => {
+        console.warn(`[ActiveOrderTracker] phone query error:`, err?.code);
+        // Firestore permission denied — fall back to order-doc polling
+      },
+    );
+  }, [applyDriverPosition, stopDriverWatch]);
 
-  // ── Watch drivers/{driverId} for live GPS ────────────────────────────────────
-  const watchDriverLocation = useCallback((driverId: string, type: OrderType) => {
+  // ── SECONDARY: Watch drivers/{driverId} (for Firebase-UID keyed documents) ───
+  const watchDriverById = useCallback((driverId: string, type: OrderType) => {
     if (activeDriverId.current === driverId) return;
+    // Only open if phone-based channel isn't already active
+    if (activeDriverPhone.current) return;
     stopDriverWatch();
     activeDriverId.current = driverId;
 
-    console.log(`[ActiveOrderTracker] 📍 subscribing to drivers/${driverId}`);
+    console.log(`[ActiveOrderTracker] 🔑 subscribing to drivers/${driverId}`);
 
     driverUnsubRef.current = onSnapshot(
       doc(db, 'drivers', driverId),
       (snap) => {
         const data = snap.data();
         if (!data) return;
-        const lat = data.lat ?? data.latitude  ?? data.driver_lat;
-        const lng = data.lng ?? data.longitude ?? data.driver_lng;
-        if (typeof lat === 'number' && typeof lng === 'number') {
+        const lat = typeof data.lat === 'number' ? data.lat : Number(data.lat ?? data.latitude ?? data.driver_lat);
+        const lng = typeof data.lng === 'number' ? data.lng : Number(data.lng ?? data.longitude ?? data.driver_lng);
+        if (Number.isFinite(lat) && Number.isFinite(lng)) {
           applyDriverPosition(lat, lng, type);
         }
       },
@@ -247,17 +349,17 @@ export function ActiveOrderTracker({ mapRef, userLocation }: Props) {
     );
   }, [applyDriverPosition, stopDriverWatch]);
 
-  // ── Watch a single order doc for status + fallback position ─────────────────
+  // ── Watch a single order doc for status + driver info + fallback position ─────
   const watchOrderDoc = useCallback((
     collection_: string,
-    docId: string,
-    type: OrderType,
+    docId:       string,
+    type:        OrderType,
   ) => {
     if (activeOrderDocId.current === docId) return;
     stopOrderWatch();
     activeOrderDocId.current = docId;
 
-    console.log(`[ActiveOrderTracker] watching ${collection_}/${docId}`);
+    console.log(`[ActiveOrderTracker] 📋 watching ${collection_}/${docId}`);
 
     orderUnsubRef.current = onSnapshot(
       doc(db, collection_, docId),
@@ -272,38 +374,42 @@ export function ActiveOrderTracker({ mapRef, userLocation }: Props) {
           return;
         }
 
-        // ── Show destination marker (to_lat/to_lng stored at order creation) ──
+        // ── Destination marker ─────────────────────────────────────────────
         const toLat = data.to_lat ?? data.toLat ?? data.dropoff_lat ?? null;
         const toLng = data.to_lng ?? data.toLng ?? data.dropoff_lng ?? null;
         if (typeof toLat === 'number' && typeof toLng === 'number') {
           applyDestination(toLat, toLng);
         }
 
-        // ── Extract driver UID from various field names ─────────────────────
-        const driverId: string | null =
-          data.driver_id   ??
-          data.agent_id    ??
-          data.agentId     ??
-          data.driverId    ??
-          null;
-
-        // ── Subscribe to drivers/{driverId} for primary live location ────────
-        if (driverId) {
-          watchDriverLocation(driverId, type);
+        // ── PRIMARY: phone-based Firestore channel (most reliable) ────────
+        const phone: string | null = data.driver_phone ?? null;
+        if (phone) {
+          watchDriverByPhone(phone, type);
         }
 
-        // ── Fallback: read driver_lat/driver_lng embedded in order doc ───────
-        const lat = data.driver_lat ?? data.driverLat;
-        const lng = data.driver_lng ?? data.driverLng;
-        if (typeof lat === 'number' && typeof lng === 'number') {
-          applyDriverPosition(lat, lng, type);
+        // ── SECONDARY: UID-based Firestore channel ────────────────────────
+        const driverId: string | null =
+          data.driver_id ?? data.agent_id ?? data.agentId ?? data.driverId ?? null;
+        if (driverId && !phone) {
+          watchDriverById(driverId, type);
+        }
+
+        // ── FALLBACK: driver_lat/driver_lng in the order doc itself ───────
+        // Written by syncOrderToFirestore() in ClinicMap when SSE fires.
+        // Used when the partner app doesn't write to drivers/ collection.
+        if (!phone && !driverId) {
+          const lat = data.driver_lat ?? data.driverLat;
+          const lng = data.driver_lng ?? data.driverLng;
+          if (typeof lat === 'number' && typeof lng === 'number') {
+            applyDriverPosition(lat, lng, type);
+          }
         }
       },
       (err) => {
         console.warn(`[ActiveOrderTracker] ${collection_}/${docId} error:`, err?.code);
       },
     );
-  }, [applyDestination, applyDriverPosition, fullCleanup, stopOrderWatch, watchDriverLocation]);
+  }, [applyDestination, applyDriverPosition, fullCleanup, stopOrderWatch, watchDriverByPhone, watchDriverById]);
 
   // ── Main effect: auth → query THREE collections ────────────────────────────
   useEffect(() => {
@@ -315,7 +421,7 @@ export function ActiveOrderTracker({ mapRef, userLocation }: Props) {
       if (!fbUser) return;
 
       const uid = fbUser.uid;
-      console.log(`[ActiveOrderTracker] user ${uid} — subscribing to accepted orders`);
+      console.log(`[ActiveOrderTracker] 👤 user ${uid} — subscribing to active orders`);
 
       const subscribeCol = (colName: string, type: OrderType) => {
         const q = query(
@@ -327,28 +433,38 @@ export function ActiveOrderTracker({ mapRef, userLocation }: Props) {
         const unsub = onSnapshot(q, (snap) => {
           if (snap.empty) return;
 
-          const docSnap   = snap.docs[0];
-          const data      = docSnap.data();
+          const docSnap    = snap.docs[0];
+          const data       = docSnap.data();
           const orderType: OrderType = colName === 'gas_bookings' ? 'gas' : type;
 
+          // Open order doc watcher (idempotent)
           watchOrderDoc(colName, docSnap.id, orderType);
 
-          // Apply destination immediately if already in the query snapshot
+          // Apply destination immediately from the query snapshot
           const toLat = data.to_lat ?? data.toLat ?? null;
           const toLng = data.to_lng ?? data.toLng ?? null;
           if (typeof toLat === 'number' && typeof toLng === 'number') {
             applyDestination(toLat, toLng);
           }
 
-          const driverId: string | null =
-            data.driver_id ?? data.agent_id ?? data.agentId ?? data.driverId ?? null;
-          if (driverId) {
-            watchDriverLocation(driverId, orderType);
-          }
-          const lat = data.driver_lat ?? data.driverLat;
-          const lng = data.driver_lng ?? data.driverLng;
-          if (typeof lat === 'number' && typeof lng === 'number') {
-            applyDriverPosition(lat, lng, orderType);
+          // Immediately open the driver channel if phone is known
+          const phone: string | null = data.driver_phone ?? null;
+          if (phone) {
+            watchDriverByPhone(phone, orderType);
+          } else {
+            // Try UID channel
+            const driverId: string | null =
+              data.driver_id ?? data.agent_id ?? data.agentId ?? data.driverId ?? null;
+            if (driverId) {
+              watchDriverById(driverId, orderType);
+            } else {
+              // Fallback: embedded coords
+              const lat = data.driver_lat ?? data.driverLat;
+              const lng = data.driver_lng ?? data.driverLng;
+              if (typeof lat === 'number' && typeof lng === 'number') {
+                applyDriverPosition(lat, lng, orderType);
+              }
+            }
           }
         }, (err) => {
           console.warn(`[ActiveOrderTracker] ${colName} query error:`, err?.code);
@@ -357,9 +473,9 @@ export function ActiveOrderTracker({ mapRef, userLocation }: Props) {
         queryUnsubsRef.current.push(unsub);
       };
 
-      subscribeCol('orders',        'taxi');
-      subscribeCol('trips',         'taxi');
-      subscribeCol('gas_bookings',  'gas');
+      subscribeCol('orders',       'taxi');
+      subscribeCol('trips',        'taxi');
+      subscribeCol('gas_bookings', 'gas');
     });
 
     return () => {
@@ -368,7 +484,7 @@ export function ActiveOrderTracker({ mapRef, userLocation }: Props) {
       queryUnsubsRef.current = [];
       fullCleanup();
     };
-  }, [applyDestination, applyDriverPosition, fullCleanup, watchOrderDoc, watchDriverLocation]);
+  }, [applyDestination, applyDriverPosition, fullCleanup, watchOrderDoc, watchDriverByPhone, watchDriverById]);
 
   return null;
 }

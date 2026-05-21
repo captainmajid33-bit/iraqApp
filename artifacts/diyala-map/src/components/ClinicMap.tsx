@@ -2740,6 +2740,10 @@ export function ClinicMap({
     const payload: Record<string, unknown> = { status };
     if (typeof driverLat === 'number') payload.driver_lat = driverLat;
     if (typeof driverLng === 'number') payload.driver_lng = driverLng;
+    // Write driver_phone so ActiveOrderTracker can subscribe to the exact
+    // Firestore drivers/{doc} via phone query for real-time GPS streaming
+    const currentPhone = activeDriverPhoneRef.current;
+    if (currentPhone) payload.driver_phone = currentPhone;
     updateDoc(doc(db, 'orders', String(orderId)), payload).catch(() => {
       // Doc might not exist yet (race condition on first call) — ignore silently
     });
