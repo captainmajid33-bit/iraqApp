@@ -2212,6 +2212,28 @@ export function ClinicMap({
         localStorage.setItem('diyala_active_order', JSON.stringify({ orderId, driverPhone: first.phone, driverId: first.locationId }));
         setLoopActive(true);
         setLoopCountdown(120);
+        // ── Mirror to Firestore so partner hub gets customer GPS + status ─────
+        // dispatchTaxiNow skips the routing dialog so we must create the doc here.
+        // setDoc with merge=true also handles the case where a prior doc exists.
+        if (orderId) {
+          void setDoc(doc(db, 'orders', String(orderId)), {
+            type:        'taxi',
+            status:      'pending',
+            driver_id:   first.locationId,
+            driver_name: first.driverName,
+            driver_phone: first.phone,
+            user_name:   name,
+            user_phone:  phone,
+            from_lat:    fromPt.lat,
+            from_lng:    fromPt.lng,
+            to_lat:      toPt.lat,
+            to_lng:      toPt.lng,
+            estimated_fare: estPrice,
+            driver_lat:  null,
+            driver_lng:  null,
+            created_at:  serverTimestamp(),
+          }, { merge: true }).catch(() => { /* non-fatal */ });
+        }
       } else if (oStatus === 400) {
         // Validation error — don't loop, show the actual error
         const errMsg = (oData as any)?.error ?? 'بيانات الطلب غير صحيحة';
@@ -2827,9 +2849,9 @@ export function ClinicMap({
     // Firestore drivers/{doc} via phone query for real-time GPS streaming
     const currentPhone = activeDriverPhoneRef.current;
     if (currentPhone) payload.driver_phone = currentPhone;
-    updateDoc(doc(db, 'orders', String(orderId)), payload).catch(() => {
-      // Doc might not exist yet (race condition on first call) — ignore silently
-    });
+    // Use setDoc+merge so we CREATE the doc if it doesn't exist yet
+    // (dispatchTaxiNow path skips the routing dialog Firestore write).
+    setDoc(doc(db, 'orders', String(orderId)), payload, { merge: true }).catch(() => { /* non-fatal */ });
     // ── Mark driver busy/free in Firestore approved_agents ─────────────────
     // This blocks the Firestore cross-check from routing new customers to a
     // busy driver when the REST isBusy state hasn't propagated yet.
@@ -2862,6 +2884,7 @@ export function ClinicMap({
     driverLat?: number|null; driverLng?: number|null;
     fromLat?: number|null; fromLng?: number|null;
     locationId?: number|null; userName?: string|null;
+    driverName?: string|null;
   }, source: 'firestore' | 'sse' | 'rest' = 'rest')=>{
     setActiveOrderStatus(data.status);
     activeOrderStatusRef.current = data.status;
@@ -2880,9 +2903,11 @@ export function ClinicMap({
 
     if (data.status === 'accepted' || data.status === 'driving') {
       // Chat is NOT auto-opened — user must tap 💬 or status-bar button
-      // Driver accepted → stop the search loop
+      // Driver accepted → stop the search loop + show driver name
       setLoopActive(false); setLoopCountdown(null);
       setTaxiAutoSearching(false);
+      // If the SSE or Firestore snapshot includes driverName, persist it
+      if (data.driverName) setLoopCurrentDriver(data.driverName);
     }
     // Driver rejected → redirect to next available driver immediately.
     // ① redirectLockRef blocks duplicate calls (poll + SSE race).
@@ -5125,8 +5150,8 @@ export function ClinicMap({
                 {activeOrderStatus==='pending' && loopActive
                   ? `نبحث عن أقرب تكسي لك ضمن منطقة 2 كم...`
                   : activeOrderStatus==='pending'   ? 'في انتظار قبول السائق...'
-                  : activeOrderStatus==='accepted'  ? '🚕 السائق في الطريق إليك'
-                  : activeOrderStatus==='driving'   ? '🚕 السائق في الطريق إليك'
+                  : activeOrderStatus==='accepted'  ? `🚕 الكابتن ${loopCurrentDriver || 'التكسي'} في الطريق إليك`
+                  : activeOrderStatus==='driving'   ? `🚕 الكابتن ${loopCurrentDriver || 'التكسي'} في الطريق إليك`
                   : activeOrderStatus==='done'      ? '✅ وصل السائق — شكراً!'
                   : activeOrderStatus==='cancelled' ? '❌ تم إلغاء الطلب'
                   : null}

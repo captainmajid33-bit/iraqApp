@@ -342,6 +342,19 @@ async function applyStatusChange(id: number, status: string, res: any) {
     .where(eq(ordersTable.id, id)).returning();
   if (!updated) { res.status(404).json({ error: "الطلب غير موجود" }); return false; }
 
+  // ── Fetch driver name when accepted so customer app can display it ─────────
+  let driverName: string | null = null;
+  if (status === "accepted" || status === "driving") {
+    try {
+      const [drvRow] = await db
+        .select({ driverName: driversOnlineTable.driverName })
+        .from(driversOnlineTable)
+        .where(eq(driversOnlineTable.locationId, updated.locationId));
+      driverName = drvRow?.driverName ?? null;
+      if (driverName) console.log(`[applyStatusChange] driver name for order #${id}: ${driverName}`);
+    } catch { /* non-fatal */ }
+  }
+
   // ── Broadcast status change via SSE ───────────────────────────────────────
   broadcastOrderUpdate({
     id:         updated.id,
@@ -349,6 +362,7 @@ async function applyStatusChange(id: number, status: string, res: any) {
     locationId: updated.locationId,
     driverLat:  updated.driverLat,
     driverLng:  updated.driverLng,
+    ...(driverName ? { driverName } : {}),
   });
 
   // ── Auto-insert system message if this is a new status ─────────────────────
