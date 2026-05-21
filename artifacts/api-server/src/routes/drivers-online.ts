@@ -227,46 +227,66 @@ router.put("/drivers-online", async (req, res) => {
 });
 
 // ── PUT /api/drivers-online/:locationId — partner app: go online / update GPS ─
+// Handles both numeric locationIds AND Firebase UIDs (non-numeric strings).
+// Firebase UIDs are resolved the same way as the no-ID route: phone lookup → IP hash.
 router.put("/drivers-online/:locationId", async (req, res) => {
   if (!isAuthorised(req)) { res.status(403).json({ error: "غير مصرح" }); return; }
 
-  const locationId = Number(req.params.locationId);
-  if (!Number.isFinite(locationId)) {
-    res.status(400).json({ error: "locationId غير صالح" }); return;
-  }
-
+  const rawParam  = req.params.locationId;
+  const numericId = Number(rawParam);
   const { lat, lng, driverName: bodyName, phone: bodyPhone, category: bodyCategory } = req.body ?? {};
+
+  console.log(`[PUT /drivers-online/:id] rawParam=${rawParam} | lat=${lat} | lng=${lng} | phone=${bodyPhone}`);
+
   if (typeof lat !== "number" || typeof lng !== "number") {
     res.status(400).json({ error: "lat و lng مطلوبان" }); return;
   }
 
+  // ── Case 1: Non-numeric ID (Firebase UID) → resolve via phone / IP hash ──
+  if (!Number.isFinite(numericId)) {
+    try {
+      const ip = (req.headers["x-forwarded-for"] as string || req.socket?.remoteAddress || "").split(",")[0].trim();
+      const result = await resolveAndUpsertDriver(rawParam, lat, lng,
+        typeof bodyPhone === "string" ? bodyPhone : "",
+        typeof bodyName  === "string" ? bodyName  : "",
+        typeof bodyCategory === "string" && bodyCategory.trim() ? bodyCategory.trim() : "taxi",
+        ip);
+      if (!result.ok) { res.status(400).json({ error: result.error }); return; }
+      console.log(`[PUT /drivers-online] ✅ uid=${rawParam} resolved→locId=${result.driver?.locationId}`);
+      broadcastDriverUpdate(result.driver as Record<string, unknown>);
+      res.json({ ok: true, driver: result.driver });
+    } catch (err: any) {
+      console.error("[PUT /drivers-online/:locationId] uid-path error:", err);
+      res.status(500).json({ error: "فشل تحديث موقع السائق" });
+    }
+    return;
+  }
+
+  // ── Case 2: Numeric locationId → standard upsert ──────────────────────────
   try {
     const [loc] = await db
       .select({ name: locationsTable.name, phone: locationsTable.phone })
       .from(locationsTable)
-      .where(eq(locationsTable.id, locationId));
+      .where(eq(locationsTable.id, numericId));
 
-    // Use DB location name/phone first; fall back to body-provided values
     const driverName = loc?.name ?? (typeof bodyName === "string" ? bodyName : "") ?? "";
     const phone      = loc?.phone ?? (typeof bodyPhone === "string" ? bodyPhone : "") ?? "";
     const category   = typeof bodyCategory === "string" && bodyCategory.trim() ? bodyCategory.trim() : "taxi";
 
     const [row] = await db
       .insert(driversOnlineTable)
-      .values({ locationId, driverName, phone, lat, lng, isOnline: true, isBusy: false, category, updatedAt: new Date() })
+      .values({ locationId: numericId, driverName, phone, lat, lng, isOnline: true, isBusy: false, category, updatedAt: new Date() })
       .onConflictDoUpdate({
         target: driversOnlineTable.locationId,
-        // Update name/phone/category too in case they were empty on first insert
         set:    { lat, lng, isOnline: true, updatedAt: new Date(),
                   ...(driverName ? { driverName } : {}),
                   ...(phone      ? { phone }      : {}),
                   ...(category   ? { category }   : {}) },
-        // NOTE: isBusy is NOT reset on location update — preserve current busy state
       })
       .returning();
 
     const origin = req.headers["origin"] || req.headers["referer"] || "unknown";
-    console.log(`[PUT /drivers-online] ✅ driver ${locationId} (${driverName}) online | origin=${origin} | lat=${lat} lng=${lng}`);
+    console.log(`[PUT /drivers-online] ✅ driver ${numericId} (${driverName}) online | origin=${origin} | lat=${lat} lng=${lng}`);
     broadcastDriverUpdate(row as Record<string, unknown>);
     res.json({ ok: true, driver: row });
   } catch (err: any) {
