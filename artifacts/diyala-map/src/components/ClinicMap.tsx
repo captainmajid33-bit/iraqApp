@@ -834,6 +834,8 @@ export function ClinicMap({
   // Set   = phones currently passing that gate
   const liveOnlineDriverPhonesRef   = useRef<Set<string> | null>(null);  // drivers col
   const liveAvailableAgentPhonesRef = useRef<Set<string> | null>(null);  // approved_agents col
+  // Fresh Firestore lat/lng per phone — overlays stale PostgreSQL coords in haversine calc
+  const liveDriverCoordsRef = useRef<Map<string, {lat:number; lng:number}>>(new Map());
   // ── Live-radar helpers ────────────────────────────────────────────────────
   const loopActiveRef          = useRef(false);                          // mirrors loopActive for snapshot callbacks
   const autoFindDriverRef      = useRef<()=>Promise<void>>(async()=>{}); // stable ptr → updated after definition
@@ -1773,12 +1775,20 @@ export function ClinicMap({
           headers: { 'Cache-Control': 'no-cache' },
         });
         const raw: OnlineDriver[] = await res.json();
-        // Coerce lat/lng to Number to guard against string values from the DB in edge cases
-        const drivers = raw.map(d => ({
-          ...d,
-          lat: Number(d.lat),
-          lng: Number(d.lng),
-        })).filter(d => Number.isFinite(d.lat) && Number.isFinite(d.lng));
+        // Coerce lat/lng to Number — guard against string values in edge cases.
+        // Overlay with fresh Firestore coords for drivers that have a phone match:
+        // the partner app writes GPS to Firestore far more often than to PostgreSQL,
+        // so Firestore coordinates are always more up-to-date.
+        const liveCoords = liveDriverCoordsRef.current;
+        const drivers = raw.map(d => {
+          const phone = (d.phone ?? '').trim();
+          const fresh = phone ? liveCoords.get(phone) : undefined;
+          return {
+            ...d,
+            lat: fresh?.lat ?? Number(d.lat),
+            lng: fresh?.lng ?? Number(d.lng),
+          };
+        }).filter(d => Number.isFinite(d.lat) && Number.isFinite(d.lng));
 
         // DEBUG ── log every driver returned by the API ──────────────────────
         console.log(`[autoFindDriver] API returned ${drivers.length} driver(s)`, drivers.map(d=>({
@@ -1787,15 +1797,22 @@ export function ClinicMap({
           updatedAt: d.updatedAt,
           distKm: +haversineDist(loc.lat, loc.lng, d.lat, d.lng).toFixed(3),
           userLat: loc.lat, userLng: loc.lng, driverLat: d.lat, driverLng: d.lng,
+          coordSource: (d.phone ?? '').trim() && liveCoords.has((d.phone ?? '').trim()) ? 'firestore' : 'postgres',
         })));
 
         // ── Live dual-gate cross-check (approved_agents ∩ drivers) ─────────
-        // getLiveFilteredPhones() reads the two onSnapshot Sets synchronously —
-        // they are kept current in real-time, so an offline driver disappears
-        // from the Set within milliseconds of closing the partner app.
+        // getLiveFilteredPhones() reads the two onSnapshot Sets synchronously.
+        // Drivers with an empty phone field are EXCLUDED from phone-based filtering
+        // (they have no phone to match) and treated as REST-only trust.
         const { phones: filteredPhones, source: filterSource } = getLiveFilteredPhones();
         const fsFiltered = filteredPhones !== null
-          ? drivers.filter(d => filteredPhones.has((d.phone ?? '').trim()))
+          ? drivers.filter(d => {
+              const p = (d.phone ?? '').trim();
+              // Empty-phone drivers can't be in any Firestore phone set —
+              // don't block them just because their phone is missing
+              if (!p) return true;
+              return filteredPhones.has(p);
+            })
           : drivers; // both gates null → trust REST only
         console.log(`[autoFindDriver] live dual-gate (${filterSource}): ${fsFiltered.length}/${drivers.length} pass`);
 
@@ -2595,6 +2612,15 @@ export function ClinicMap({
         // Update live-filter ref (sync, for getLiveFilteredPhones cross-check)
         liveOnlineDriverPhonesRef.current = (!snap.empty || phones.size > 0) ? phones : null;
 
+        // Update live-coords ref — overlays stale PostgreSQL coords in haversine calc
+        const coordsMap = new Map<string, {lat:number; lng:number}>();
+        activeDocs.forEach(d => {
+          if (d.phone && d.lat !== null && d.lng !== null) {
+            coordsMap.set(d.phone, { lat: d.lat, lng: d.lng });
+          }
+        });
+        liveDriverCoordsRef.current = coordsMap;
+
         // Update React state → triggers immediate re-render + marker redraw
         setOnlineDrivers(activeDocs);
 
@@ -3192,12 +3218,17 @@ export function ClinicMap({
         headers: { 'Cache-Control': 'no-cache' },
       });
       const raw: OnlineDriver[] = await res.json();
-      // Coerce lat/lng to Number — guard against string values in edge cases
-      const drivers = raw.map(d => ({
-        ...d,
-        lat: Number(d.lat),
-        lng: Number(d.lng),
-      })).filter(d => Number.isFinite(d.lat) && Number.isFinite(d.lng));
+      // Coerce lat/lng + overlay fresh Firestore coords (same as autoFindDriver)
+      const liveCoords2 = liveDriverCoordsRef.current;
+      const drivers = raw.map(d => {
+        const phone = (d.phone ?? '').trim();
+        const fresh = phone ? liveCoords2.get(phone) : undefined;
+        return {
+          ...d,
+          lat: fresh?.lat ?? Number(d.lat),
+          lng: fresh?.lng ?? Number(d.lng),
+        };
+      }).filter(d => Number.isFinite(d.lat) && Number.isFinite(d.lng));
 
       const SEARCH_RADIUS_KM = 2;
 
@@ -3206,11 +3237,16 @@ export function ClinicMap({
           name: d.driverName, locationId: d.locationId,
           distKm: +haversineDist(loc.lat, loc.lng, d.lat, d.lng).toFixed(3),
           ignored: loopIgnoredRef.current.has(d.locationId),
+          coordSource: (d.phone ?? '').trim() && liveCoords2.has((d.phone ?? '').trim()) ? 'firestore' : 'postgres',
         })));
 
       const { phones: filteredPhones2, source: filterSource2 } = getLiveFilteredPhones();
       const fsFiltered = filteredPhones2 !== null
-        ? drivers.filter(d => filteredPhones2.has((d.phone ?? '').trim()))
+        ? drivers.filter(d => {
+            const p = (d.phone ?? '').trim();
+            if (!p) return true; // empty-phone drivers are filter-exempt
+            return filteredPhones2.has(p);
+          })
         : drivers; // both gates null → trust REST only
       console.log(`[redirectToNext] dual-gate (${filterSource2}): ${fsFiltered.length}/${drivers.length} pass`);
 
