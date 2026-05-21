@@ -62,6 +62,15 @@ router.post("/locations", requireAdmin, async (req, res) => {
   }
 });
 
+// ── PATCH /api/locations (no ID) — partner hub sends empty ID gracefully ───────
+// The partner hub sometimes sends PATCH /api/locations/ (trailing slash, no ID)
+// because it doesn't know its integer locationId. Return 200 silently so the
+// partner app doesn't treat it as a fatal error.
+router.patch("/locations", (req, res) => {
+  console.warn("[PATCH /locations no-id] body:", JSON.stringify(req.body ?? {}).slice(0, 120));
+  res.json({ ok: true, note: "no locationId — ignored" });
+});
+
 // ── PATCH update ───────────────────────────────────────────────────────────────
 // Auth priority (stateless — survives server restarts):
 //   1. x-admin-password == ADMIN_PASSWORD              → full update

@@ -383,6 +383,40 @@ router.patch("/orders/:id", requireAdmin, async (req, res) => {
   }
 });
 
+// ── PATCH /api/orders/:id/status — open alias used by partner hub ─────────────
+// The partner hub (diyala-partner-hub.replit.app) calls PATCH /api/orders/:id/status
+// when the driver accepts, arrives, or finishes a trip. No auth header required
+// so the Flutter app does not need to manage credentials — just the orderId.
+router.patch("/orders/:id/status", async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) { res.status(400).json({ error: "id غير صالح" }); return; }
+
+    const { status, driverLat, driverLng } = req.body ?? {};
+    if (!status) { res.status(400).json({ error: "status مطلوب" }); return; }
+
+    const updated = await applyStatusChange(id, status, res);
+    if (updated) {
+      // If partner hub also sends GPS in same payload, persist it immediately
+      if (typeof driverLat === "number" && typeof driverLng === "number") {
+        await db
+          .update(ordersTable)
+          .set({ driverLat, driverLng })
+          .where(eq(ordersTable.id, id));
+        broadcastOrderUpdate({
+          id: updated.id, status: updated.status,
+          driverLat, driverLng, locationId: updated.locationId,
+        });
+      }
+      console.log(`[PATCH /orders/${id}/status] → ${status}`);
+      res.json({ ok: true, order: updated });
+    }
+  } catch (err: any) {
+    console.error("[PATCH /orders/:id/status] error:", err);
+    res.status(500).json({ error: "فشل تحديث حالة الطلب" });
+  }
+});
+
 // ── PATCH /api/orders/:id/partner-status — partner hub (driver app) ───────────
 // Called by the partner hub when the driver changes order status (accepted,
 // arrived, done, etc.). Requires x-partner-key header.
