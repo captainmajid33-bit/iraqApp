@@ -140,6 +140,82 @@ router.put("/drivers-online/:locationId", async (req, res) => {
   }
 });
 
+// ── PATCH /api/drivers-online/:id — partner app: GPS location update ──────────
+// Partner app sends PATCH with Firebase UID (non-numeric) + body {lat,lng,phone,driverName,category}
+// We resolve the correct locationId by: numeric id → direct, Firebase UID → lookup by phone in locations table.
+// This is the "تحديد موقعي الحالي" call from the partner app.
+router.patch("/drivers-online/:id", async (req, res) => {
+  if (!isAuthorised(req)) { res.status(403).json({ error: "غير مصرح" }); return; }
+
+  const rawId = req.params.id;
+  const { lat, lng, phone: bodyPhone, driverName: bodyName, category: bodyCategory } = req.body ?? {};
+
+  // Must have valid coordinates
+  if (typeof lat !== "number" || typeof lng !== "number") {
+    // Could be a busy/status sub-route that Express didn't match — ignore silently
+    res.status(400).json({ error: "lat و lng مطلوبان لتحديث الموقع" }); return;
+  }
+
+  try {
+    let locationId: number | null = null;
+    let resolvedName = typeof bodyName === "string" ? bodyName.trim() : "";
+    let resolvedPhone = typeof bodyPhone === "string" ? bodyPhone.trim() : "";
+    const category = typeof bodyCategory === "string" && bodyCategory.trim() ? bodyCategory.trim() : "taxi";
+
+    // ── Try numeric locationId first ──────────────────────────────────────────
+    const numericId = Number(rawId);
+    if (Number.isFinite(numericId)) {
+      locationId = numericId;
+    } else {
+      // ── Firebase UID: look up driver by phone in locations table ─────────────
+      if (resolvedPhone) {
+        const [loc] = await db
+          .select({ id: locationsTable.id, name: locationsTable.name })
+          .from(locationsTable)
+          .where(eq(locationsTable.phone, resolvedPhone));
+        if (loc) { locationId = loc.id; resolvedName = resolvedName || loc.name; }
+      }
+
+      // ── Fallback: look up in drivers_online by phone ──────────────────────────
+      if (!locationId && resolvedPhone) {
+        const [existing] = await db
+          .select({ locationId: driversOnlineTable.locationId, driverName: driversOnlineTable.driverName })
+          .from(driversOnlineTable)
+          .where(eq(driversOnlineTable.phone, resolvedPhone));
+        if (existing) { locationId = existing.locationId; resolvedName = resolvedName || existing.driverName || ""; }
+      }
+
+      // ── Last resort: derive stable numeric id from Firebase UID hash ──────────
+      if (!locationId) {
+        let hash = 0;
+        for (let i = 0; i < rawId.length; i++) { hash = ((hash << 5) - hash + rawId.charCodeAt(i)) | 0; }
+        locationId = 900000 + Math.abs(hash) % 99999; // range 900000-999999 to avoid clashing
+        console.log(`[PATCH GPS] Firebase UID ${rawId} → derived locationId=${locationId}`);
+      }
+    }
+
+    const [row] = await db
+      .insert(driversOnlineTable)
+      .values({ locationId, driverName: resolvedName, phone: resolvedPhone, lat, lng,
+                isOnline: true, isBusy: false, category, updatedAt: new Date() })
+      .onConflictDoUpdate({
+        target: driversOnlineTable.locationId,
+        set: { lat, lng, isOnline: true, updatedAt: new Date(),
+               ...(resolvedName  ? { driverName: resolvedName } : {}),
+               ...(resolvedPhone ? { phone: resolvedPhone }     : {}),
+               ...(category      ? { category }                 : {}) },
+      })
+      .returning();
+
+    console.log(`[PATCH GPS] ✅ driver locationId=${locationId} (${resolvedName || rawId}) → lat=${lat} lng=${lng}`);
+    broadcastDriverUpdate(row as Record<string, unknown>);
+    res.json({ ok: true, driver: row });
+  } catch (err: any) {
+    console.error("[PATCH /drivers-online/:id] error:", err);
+    res.status(500).json({ error: "فشل تحديث موقع السائق" });
+  }
+});
+
 // ── PATCH /api/drivers-online/:locationId/busy — set / clear busy flag ────────
 // Called by partner app when driver accepts an order (busy=true)
 // or when ride is done / cancelled (busy=false).
