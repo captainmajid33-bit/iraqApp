@@ -43,7 +43,7 @@ async function insertTaxiSystemMsg(orderId: number, content: string) {
 
 const router: IRouter = Router();
 
-// ── Helper: update isBusy for a driver and broadcast ─────────────────────────
+// ── Helper: mark driver busy (during a trip) ─────────────────────────────────
 async function setDriverBusy(locationId: number, busy: boolean) {
   try {
     const [updated] = await db
@@ -56,8 +56,26 @@ async function setDriverBusy(locationId: number, busy: boolean) {
       console.log(`[BUSY-AUTO] driver ${locationId} → isBusy=${busy}`);
     }
   } catch (err) {
-    // Non-fatal — driver may not be in drivers_online table yet
     console.warn(`[BUSY-AUTO] could not update isBusy for driver ${locationId}:`, err);
+  }
+}
+
+// ── Helper: fully restore driver to available after trip ends ─────────────────
+// Sets isBusy=false AND isOnline=true so the driver immediately reappears
+// on the 2 km radar for new customers — no need to log out and back in.
+async function setDriverAvailable(locationId: number) {
+  try {
+    const [updated] = await db
+      .update(driversOnlineTable)
+      .set({ isBusy: false, isOnline: true, updatedAt: new Date() })
+      .where(eq(driversOnlineTable.locationId, locationId))
+      .returning();
+    if (updated) {
+      broadcastDriverUpdate(updated as Record<string, unknown>);
+      console.log(`[FREE-AUTO] driver ${locationId} → isOnline=true isBusy=false (available for new trips)`);
+    }
+  } catch (err) {
+    console.warn(`[FREE-AUTO] could not restore driver ${locationId}:`, err);
   }
 }
 
@@ -104,8 +122,8 @@ router.post("/orders", async (req, res) => {
 
     const driverLabel = loc?.name ?? onlineRow?.driverName ?? `driver#${locationId}`;
 
-    // Ensure driver is not stuck as busy before new order
-    await setDriverBusy(locationId, false);
+    // Ensure driver is fully available before new order (isOnline=true, isBusy=false)
+    await setDriverAvailable(locationId);
 
     // ── Insert order ──────────────────────────────────────────────────────────
     // Always use the real locationId — the schema has no FK constraint on this column,
@@ -202,9 +220,9 @@ router.patch("/orders/:id/reassign-driver", async (req, res) => {
 
     if (!current) { res.status(404).json({ error: "الطلب غير موجود" }); return; }
 
-    // Free old driver (non-fatal)
+    // Restore old driver to fully available (isOnline=true, isBusy=false)
     if (current.locationId !== locationId) {
-      await setDriverBusy(current.locationId, false);
+      await setDriverAvailable(current.locationId);
     }
 
     // Reassign — reset status to pending for new driver
@@ -216,8 +234,8 @@ router.patch("/orders/:id/reassign-driver", async (req, res) => {
 
     if (!updated) { res.status(404).json({ error: "الطلب غير موجود" }); return; }
 
-    // Ensure new driver is not stuck as busy
-    await setDriverBusy(locationId, false);
+    // Ensure new driver is fully available before assigning
+    await setDriverAvailable(locationId);
 
     // Notify new driver's app (partner app polls by locationId)
     // NOTE: no 'cancelled' event — customer keeps same orderId, loop stays alive.
@@ -293,7 +311,7 @@ router.patch("/orders/:id/customer-cancel", async (req, res) => {
       .where(eq(ordersTable.id, id)).returning();
 
     broadcastOrderUpdate({ id: updated.id, status: updated.status, locationId: updated.locationId });
-    await setDriverBusy(updated.locationId, false);
+    await setDriverAvailable(updated.locationId);
 
     console.log(`[customer-cancel] order #${id} cancelled by customer`);
     res.json({ ok: true });
@@ -371,13 +389,16 @@ async function applyStatusChange(id: number, status: string, res: any) {
     void insertTaxiSystemMsg(updated.id, sysMsg);
   }
 
-  // ── Auto-update driver busy state ─────────────────────────────────────────
+  // ── Auto-update driver state ───────────────────────────────────────────────
+  // BUSY: mark driver unavailable during an active trip.
+  // FREE: fully restore driver (isOnline=true, isBusy=false) so they
+  //       reappear instantly on the 2 km radar without needing to re-login.
   const BUSY_STATUSES = new Set(["accepted", "driving"]);
-  const FREE_STATUSES = new Set(["done", "finished", "completed", "cancelled", "rejected"]);
+  const FREE_STATUSES = new Set(["done", "finished", "completed", "arrived", "cancelled", "rejected"]);
   if (BUSY_STATUSES.has(updated.status)) {
     await setDriverBusy(updated.locationId, true);
   } else if (FREE_STATUSES.has(updated.status)) {
-    await setDriverBusy(updated.locationId, false);
+    await setDriverAvailable(updated.locationId);
   }
 
   return updated;
