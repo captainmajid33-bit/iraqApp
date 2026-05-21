@@ -40,26 +40,17 @@ router.get("/drivers-online/all", async (req, res) => {
   }
 });
 
-// ── DRIVER_TTL_MS: how long a driver can be silent before treated as offline ──
-// The Flutter partner app sends a PUT (location ping) while online.
-// When the driver presses "مغلق" the app stops pinging — so updatedAt goes
-// stale. Any driver whose last ping is older than this value is excluded from
-// search results, acting as an automatic offline fallback.
-const DRIVER_TTL_MS = 3 * 60 * 1000; // 3 minutes
-
 // ── GET /api/drivers-online ───────────────────────────────────────────────────
 // Public — returns only drivers that are:
 //   • isOnline  = true
 //   • isBusy    = false
 //   • category  = ?category query param (optional, e.g. 'taxi')
 //   • location.status = 'مفتوح' (not disabled / closed)
-//   • updatedAt > NOW() - DRIVER_TTL_MS  (TTL: driver pinged recently)
 router.get("/drivers-online", async (req, res) => {
   const categoryFilter = typeof req.query.category === "string" && req.query.category.trim()
     ? req.query.category.trim()
     : null;
   try {
-    const cutoff = new Date(Date.now() - DRIVER_TTL_MS);
     const rows = await db
       .select({
         id:         driversOnlineTable.id,
@@ -79,8 +70,6 @@ router.get("/drivers-online", async (req, res) => {
         and(
           eq(driversOnlineTable.isOnline, true),
           eq(driversOnlineTable.isBusy,   false),
-          // TTL: exclude drivers that haven't pinged recently (e.g. pressed مغلق)
-          gt(driversOnlineTable.updatedAt, cutoff),
           // Filter by category when provided
           categoryFilter ? eq(driversOnlineTable.category, categoryFilter) : undefined,
           // Show driver only if: location is open, OR driver has no location row at all
