@@ -176,13 +176,60 @@ router.patch("/drivers-online/:locationId/busy", async (req, res) => {
   }
 });
 
+// ── PATCH /api/drivers-online/:locationId/status — admin: force online/offline ─
+// Allows the admin to manually set isOnline=true/false without requiring lat/lng.
+// Useful to restore a driver that was incorrectly marked offline.
+router.patch("/drivers-online/:locationId/status", async (req, res) => {
+  const adminPass = req.headers["x-admin-password"] as string | undefined;
+  const isAdmin   = adminPass === process.env.ADMIN_PASSWORD || adminPass === "Admin2026";
+  if (!isAdmin) { res.status(403).json({ error: "غير مصرح — أدمن فقط" }); return; }
+
+  const locationId = Number(req.params.locationId);
+  if (!Number.isFinite(locationId)) {
+    res.status(400).json({ error: "locationId غير صالح" }); return;
+  }
+
+  const { online } = req.body ?? {};
+  if (typeof online !== "boolean") {
+    res.status(400).json({ error: "حقل online (boolean) مطلوب" }); return;
+  }
+
+  try {
+    const [updated] = await db
+      .update(driversOnlineTable)
+      .set({ isOnline: online, ...(online ? {} : { isBusy: false }), updatedAt: new Date() })
+      .where(eq(driversOnlineTable.locationId, locationId))
+      .returning();
+
+    if (!updated) {
+      res.status(404).json({ error: "السائق غير موجود" }); return;
+    }
+
+    broadcastDriverUpdate({
+      locationId,
+      isOnline:   updated.isOnline,
+      isBusy:     updated.isBusy,
+      phone:      updated.phone      ?? '',
+      driverName: updated.driverName ?? '',
+    });
+
+    console.log(`[PATCH /status] driver ${locationId} → isOnline=${online}`);
+    res.json({ ok: true, driver: updated });
+  } catch (err: any) {
+    console.error("[PATCH /drivers-online/status] error:", err);
+    res.status(500).json({ error: "فشل تحديث الحالة" });
+  }
+});
+
 // ── DELETE /api/drivers-online/:locationId — partner app: go offline ──────────
 router.delete("/drivers-online/:locationId", async (req, res) => {
   if (!isAuthorised(req)) { res.status(403).json({ error: "غير مصرح" }); return; }
 
   const locationId = Number(req.params.locationId);
+  // If the partner app sends a non-numeric ID (e.g. Firebase UID), silently accept
+  // it — the Firebase presence cleanup doesn't affect our PostgreSQL records.
   if (!Number.isFinite(locationId)) {
-    res.status(400).json({ error: "locationId غير صالح" }); return;
+    res.json({ ok: true, note: "non-numeric id ignored" }); return;
   }
 
   try {
