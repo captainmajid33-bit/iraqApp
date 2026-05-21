@@ -91,6 +91,141 @@ router.get("/drivers-online", async (req, res) => {
   }
 });
 
+// ── Shared GPS upsert logic — reused by no-ID and with-ID routes ─────────────
+// Resolves locationId from: (1) explicit numeric id, (2) phone → locations,
+// (3) phone → drivers_online, (4) Firebase-UID/IP hash (last resort).
+async function resolveAndUpsertDriver(
+  rawId:        string | null,    // from URL param or null when not provided
+  lat:          number,
+  lng:          number,
+  bodyPhone:    string,
+  bodyName:     string,
+  bodyCategory: string,
+  fallbackKey?: string,           // IP or user-agent for last-resort hash
+): Promise<{ ok: boolean; driver?: unknown; error?: string }> {
+  let locationId: number | null = null;
+  let resolvedName  = bodyName.trim();
+  let resolvedPhone = bodyPhone.trim();
+  const category    = bodyCategory.trim() || "taxi";
+
+  function strHash(s: string): number {
+    let h = 0;
+    for (let i = 0; i < s.length; i++) { h = ((h << 5) - h + s.charCodeAt(i)) | 0; }
+    return 900000 + Math.abs(h) % 99999;
+  }
+
+  if (rawId) {
+    const numericId = Number(rawId);
+    if (Number.isFinite(numericId)) {
+      locationId = numericId;
+    } else {
+      // Firebase UID path — look up by phone first
+      if (resolvedPhone) {
+        const [loc] = await db
+          .select({ id: locationsTable.id, name: locationsTable.name })
+          .from(locationsTable)
+          .where(eq(locationsTable.phone, resolvedPhone));
+        if (loc) { locationId = loc.id; resolvedName = resolvedName || loc.name; }
+      }
+      if (!locationId && resolvedPhone) {
+        const [existing] = await db
+          .select({ locationId: driversOnlineTable.locationId, driverName: driversOnlineTable.driverName })
+          .from(driversOnlineTable)
+          .where(eq(driversOnlineTable.phone, resolvedPhone));
+        if (existing) { locationId = existing.locationId; resolvedName = resolvedName || existing.driverName || ""; }
+      }
+      if (!locationId) {
+        locationId = strHash(rawId);
+        console.log(`[GPS upsert] Firebase UID ${rawId} → derived locationId=${locationId}`);
+      }
+    }
+  } else {
+    // No URL id — identify by phone first
+    if (resolvedPhone) {
+      const [loc] = await db
+        .select({ id: locationsTable.id, name: locationsTable.name })
+        .from(locationsTable)
+        .where(eq(locationsTable.phone, resolvedPhone));
+      if (loc) { locationId = loc.id; resolvedName = resolvedName || loc.name; }
+    }
+    if (!locationId && resolvedPhone) {
+      const [existing] = await db
+        .select({ locationId: driversOnlineTable.locationId, driverName: driversOnlineTable.driverName })
+        .from(driversOnlineTable)
+        .where(eq(driversOnlineTable.phone, resolvedPhone));
+      if (existing) { locationId = existing.locationId; resolvedName = resolvedName || existing.driverName || ""; }
+    }
+    // Last resort: stable hash from phone or fallbackKey (IP/UA)
+    if (!locationId) {
+      const seed = resolvedPhone || fallbackKey || "unknown";
+      locationId = strHash(seed);
+      console.log(`[GPS upsert] no-id fallback key="${seed}" → derived locationId=${locationId}`);
+    }
+  }
+
+  const [row] = await db
+    .insert(driversOnlineTable)
+    .values({ locationId: locationId!, driverName: resolvedName, phone: resolvedPhone,
+              lat, lng, isOnline: true, isBusy: false, category, updatedAt: new Date() })
+    .onConflictDoUpdate({
+      target: driversOnlineTable.locationId,
+      set: { lat, lng, isOnline: true, updatedAt: new Date(),
+             ...(resolvedName  ? { driverName: resolvedName } : {}),
+             ...(resolvedPhone ? { phone: resolvedPhone }     : {}),
+             ...(category      ? { category }                 : {}) },
+    })
+    .returning();
+
+  console.log(`[GPS upsert] ✅ driver locationId=${locationId} (${resolvedName || rawId || resolvedPhone}) → lat=${lat} lng=${lng}`);
+  broadcastDriverUpdate(row as Record<string, unknown>);
+  return { ok: true, driver: row };
+}
+
+// ── PATCH /api/drivers-online  ← NO ID in URL (partner-hub sends this form) ──
+// Partner app sends PATCH /api/drivers-online/ with body {lat,lng,phone,...}
+// — the locationId is missing from the URL. We resolve it from the body.
+router.patch("/drivers-online", async (req, res) => {
+  if (!isAuthorised(req)) { res.status(403).json({ error: "غير مصرح" }); return; }
+  const body = req.body ?? {};
+  const { lat, lng, phone: bodyPhone = "", driverName: bodyName = "", category: bodyCategory = "taxi", uid } = body;
+  // Log full body so we can see what the partner hub actually sends
+  console.log("[PATCH /drivers-online no-id] body keys:", Object.keys(body), "| phone:", bodyPhone, "| uid:", uid, "| lat:", lat, "| lng:", lng);
+  if (typeof lat !== "number" || typeof lng !== "number") {
+    res.status(400).json({ error: "lat و lng مطلوبان" }); return;
+  }
+  try {
+    const rawId = typeof uid === "string" && uid.trim() ? uid.trim() : null;
+    const ip = (req.headers["x-forwarded-for"] as string || req.socket?.remoteAddress || "").split(",")[0].trim();
+    const result = await resolveAndUpsertDriver(rawId, lat, lng, bodyPhone, bodyName, bodyCategory, ip);
+    if (!result.ok) { res.status(400).json({ error: result.error }); return; }
+    res.json({ ok: true, driver: result.driver });
+  } catch (err: any) {
+    console.error("[PATCH /drivers-online (no-id)] error:", err);
+    res.status(500).json({ error: "فشل تحديث موقع السائق" });
+  }
+});
+
+// ── PUT /api/drivers-online  ← NO ID in URL (same body-only form) ────────────
+router.put("/drivers-online", async (req, res) => {
+  if (!isAuthorised(req)) { res.status(403).json({ error: "غير مصرح" }); return; }
+  const body = req.body ?? {};
+  const { lat, lng, phone: bodyPhone = "", driverName: bodyName = "", category: bodyCategory = "taxi", uid } = body;
+  console.log("[PUT /drivers-online no-id] body keys:", Object.keys(body), "| phone:", bodyPhone, "| uid:", uid, "| lat:", lat, "| lng:", lng);
+  if (typeof lat !== "number" || typeof lng !== "number") {
+    res.status(400).json({ error: "lat و lng مطلوبان" }); return;
+  }
+  try {
+    const rawId = typeof uid === "string" && uid.trim() ? uid.trim() : null;
+    const ip = (req.headers["x-forwarded-for"] as string || req.socket?.remoteAddress || "").split(",")[0].trim();
+    const result = await resolveAndUpsertDriver(rawId, lat, lng, bodyPhone, bodyName, bodyCategory, ip);
+    if (!result.ok) { res.status(400).json({ error: result.error }); return; }
+    res.json({ ok: true, driver: result.driver });
+  } catch (err: any) {
+    console.error("[PUT /drivers-online (no-id)] error:", err);
+    res.status(500).json({ error: "فشل تحديث موقع السائق" });
+  }
+});
+
 // ── PUT /api/drivers-online/:locationId — partner app: go online / update GPS ─
 router.put("/drivers-online/:locationId", async (req, res) => {
   if (!isAuthorised(req)) { res.status(403).json({ error: "غير مصرح" }); return; }
@@ -366,6 +501,7 @@ export default router;
 
 // ── Stale-driver cleanup job ──────────────────────────────────────────────────
 // Runs every 60 s. Finds drivers whose updatedAt is older than DRIVER_TTL_MS
+const DRIVER_TTL_MS = 5 * 60 * 1000; // 5 minutes — if no ping in 5 min, mark offline
 // (meaning the Flutter partner app stopped pinging — driver pressed "مغلق"
 // without calling the DELETE endpoint). Marks them isOnline=false and
 // auto-rejects any pending taxi orders assigned to them so the customer
