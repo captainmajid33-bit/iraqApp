@@ -1774,7 +1774,34 @@ export function ClinicMap({
           cache: 'no-store',
           headers: { 'Cache-Control': 'no-cache' },
         });
-        const raw: OnlineDriver[] = await res.json();
+        let raw: OnlineDriver[] = await res.json();
+
+        // ── Firestore-sync fallback ───────────────────────────────────────────
+        // The partner app writes GPS to Firestore (not REST API).
+        // If REST returned empty but Firestore has live drivers, push them into
+        // PostgreSQL via /sync so the haversine calc and order flow can proceed.
+        if (raw.length === 0 && onlineDrivers.length > 0) {
+          const fsValid = onlineDrivers.filter(d => d.lat !== null && d.lng !== null);
+          if (fsValid.length > 0) {
+            try {
+              const syncRes = await fetch('/api/drivers-online/sync', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ drivers: fsValid }),
+              });
+              if (syncRes.ok) {
+                const { drivers: synced } = await syncRes.json();
+                if (Array.isArray(synced) && synced.length > 0) {
+                  raw = synced as OnlineDriver[];
+                  console.log(`[autoFindDriver] Firestore-sync: ${synced.length} driver(s) pushed to PostgreSQL`);
+                }
+              }
+            } catch (e) {
+              console.warn('[autoFindDriver] Firestore-sync call failed:', e);
+            }
+          }
+        }
+
         // Coerce lat/lng to Number — guard against string values in edge cases.
         // Overlay with fresh Firestore coords for drivers that have a phone match:
         // the partner app writes GPS to Firestore far more often than to PostgreSQL,

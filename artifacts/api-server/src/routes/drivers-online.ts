@@ -452,15 +452,65 @@ router.patch("/drivers-online/:locationId/status", async (req, res) => {
   }
 });
 
+// ── POST /api/drivers-online/sync — customer app syncs Firestore drivers → PostgreSQL ─
+// Called by the customer app when the REST /drivers-online returns empty but Firestore
+// has online drivers. No auth header required — resolves by phone from locations table.
+router.post("/drivers-online/sync", async (req, res) => {
+  const { drivers: items } = req.body ?? {};
+  if (!Array.isArray(items) || items.length === 0) {
+    res.json({ ok: true, drivers: [] }); return;
+  }
+
+  const results: unknown[] = [];
+  for (const item of items.slice(0, 20)) {
+    const { phone, lat, lng, name: driverName = "", category = "taxi" } = item;
+    if (typeof lat !== "number" || typeof lng !== "number" || !phone) continue;
+    try {
+      const ip = (req.headers["x-forwarded-for"] as string || req.socket?.remoteAddress || "").split(",")[0].trim();
+      const result = await resolveAndUpsertDriver(null, lat, lng, String(phone), String(driverName), String(category), ip);
+      if (result.ok && result.driver) {
+        results.push(result.driver);
+        broadcastDriverUpdate(result.driver as Record<string, unknown>);
+      }
+    } catch (err) {
+      console.warn(`[sync] failed for phone=${phone}:`, err);
+    }
+  }
+
+  console.log(`[POST /drivers-online/sync] synced ${results.length}/${items.length} driver(s) from Firestore`);
+  res.json({ ok: true, drivers: results });
+});
+
 // ── DELETE /api/drivers-online/:locationId — partner app: go offline ──────────
 router.delete("/drivers-online/:locationId", async (req, res) => {
   if (!isAuthorised(req)) { res.status(403).json({ error: "غير مصرح" }); return; }
 
   const locationId = Number(req.params.locationId);
-  // If the partner app sends a non-numeric ID (e.g. Firebase UID), silently accept
-  // it — the Firebase presence cleanup doesn't affect our PostgreSQL records.
+  // If the partner app sends a non-numeric ID (e.g. Firebase UID):
+  // — If body has {lat, lng} treat it as a heartbeat (DELETE+re-register cycle).
+  //   The partner hub deletes the old presence then immediately re-registers via Firestore;
+  //   we intercept the GPS from the DELETE body to keep the driver visible in PostgreSQL.
+  // — If no GPS data, it is a genuine "go offline" signal; ignore for PostgreSQL since
+  //   we have no locationId to match.
   if (!Number.isFinite(locationId)) {
-    res.json({ ok: true, note: "non-numeric id ignored" }); return;
+    const body = req.body ?? {};
+    const { lat, lng, phone: bodyPhone = "", driverName: bodyName = "", category: bodyCategory = "taxi" } = body;
+    console.log(`[DELETE /drivers-online] uid=${req.params.locationId} body keys=[${Object.keys(body).join(",")||"none"}] lat=${lat} lng=${lng} phone=${bodyPhone}`);
+
+    if (typeof lat === "number" && typeof lng === "number") {
+      // Has GPS → heartbeat: keep driver online in PostgreSQL
+      try {
+        const ip = (req.headers["x-forwarded-for"] as string || req.socket?.remoteAddress || "").split(",")[0].trim();
+        const result = await resolveAndUpsertDriver(req.params.locationId, lat, lng, String(bodyPhone), String(bodyName), String(bodyCategory), ip);
+        if (result.ok && result.driver) {
+          broadcastDriverUpdate(result.driver as Record<string, unknown>);
+          console.log(`[DELETE→HEARTBEAT] uid=${req.params.locationId} → driver kept online locId=${(result.driver as any).locationId}`);
+        }
+      } catch (err) {
+        console.warn(`[DELETE→HEARTBEAT] resolveAndUpsert failed:`, err);
+      }
+    }
+    res.json({ ok: true }); return;
   }
 
   try {
