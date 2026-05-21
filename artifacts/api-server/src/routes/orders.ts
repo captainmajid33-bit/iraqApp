@@ -146,7 +146,7 @@ router.post("/orders", async (req, res) => {
       .returning();
 
     console.log(
-      `[POST /orders] #${order.id} → ${driverLabel} (locId=${locationId}) | user:${userName ?? '?'} | phone:${phone} | dest:${destination} | price:${estimatedPrice ?? '?'} IQD`
+      `[POST /orders] #${order.id} → ${driverLabel || `driver#${locationId}`} (locId=${locationId}) | user:${userName ?? '?'} | phone:${phone} | dest:${destination} | price:${estimatedPrice ?? '?'} IQD | gps:(${order.fromLat ?? order.lat ?? 'null'},${order.fromLng ?? order.lng ?? 'null'})`
     );
     res.status(201).json({ ok: true, orderId: order.id, status: order.status });
   } catch (err: any) {
@@ -180,17 +180,29 @@ router.get("/orders/:id", async (req, res) => {
     if (!Number.isFinite(id)) { res.status(400).json({ error: "id غير صالح" }); return; }
     const [order] = await db.select().from(ordersTable).where(eq(ordersTable.id, id));
     if (!order) { res.status(404).json({ error: "الطلب غير موجود" }); return; }
+    // Coalesce: use fromLat/fromLng first; fall back to lat/lng if null
+    // (older orders and some code paths only populate lat/lng).
+    const customerLat = order.fromLat ?? order.lat ?? null;
+    const customerLng = order.fromLng ?? order.lng ?? null;
     res.json({
-      id:          order.id,
-      status:      order.status,
-      driverLat:   order.driverLat,
-      driverLng:   order.driverLng,
-      fromLat:     order.fromLat,
-      fromLng:     order.fromLng,
-      toLat:       order.toLat,
-      toLng:       order.toLng,
+      id:             order.id,
+      status:         order.status,
+      locationId:     order.locationId,
+      userName:       order.userName,
+      phone:          order.phone,
+      destination:    order.destination,
+      driverLat:      order.driverLat,
+      driverLng:      order.driverLng,
+      fromLat:        customerLat,
+      fromLng:        customerLng,
+      customerLat:    customerLat,
+      customerLng:    customerLng,
+      lat:            customerLat,
+      lng:            customerLng,
+      toLat:          order.toLat,
+      toLng:          order.toLng,
       estimatedPrice: order.estimatedPrice,
-      createdAt:   order.createdAt,
+      createdAt:      order.createdAt,
     });
   } catch (err: any) {
     console.error("[GET /orders/:id] error:", err);
@@ -339,9 +351,19 @@ router.get("/orders", async (req, res) => {
   try {
     const locationId = req.query.locationId ? Number(req.query.locationId) : null;
 
-    const rows = locationId
+    const raw = locationId
       ? await db.select().from(ordersTable).where(eq(ordersTable.locationId, locationId)).orderBy(desc(ordersTable.createdAt))
       : await db.select().from(ordersTable).orderBy(desc(ordersTable.createdAt));
+
+    // Normalise: coalesce fromLat/fromLng ← lat/lng so partner hub always
+    // gets valid customer coordinates regardless of which code path created the order.
+    const rows = raw.map(o => ({
+      ...o,
+      fromLat:     o.fromLat ?? o.lat ?? null,
+      fromLng:     o.fromLng ?? o.lng ?? null,
+      customerLat: o.fromLat ?? o.lat ?? null,
+      customerLng: o.fromLng ?? o.lng ?? null,
+    }));
 
     res.json(rows);
   } catch (err: any) {
@@ -361,6 +383,9 @@ async function applyStatusChange(id: number, status: string, res: any) {
   if (!updated) { res.status(404).json({ error: "الطلب غير موجود" }); return false; }
 
   // ── Fetch driver name when accepted so customer app can display it ─────────
+  // Priority: driversOnline.driverName → locationsTable.name → null
+  // (driversOnline.driverName is often "" for Firestore-registered drivers
+  //  whose name is stored in locationsTable instead).
   let driverName: string | null = null;
   if (status === "accepted" || status === "driving") {
     try {
@@ -368,8 +393,16 @@ async function applyStatusChange(id: number, status: string, res: any) {
         .select({ driverName: driversOnlineTable.driverName })
         .from(driversOnlineTable)
         .where(eq(driversOnlineTable.locationId, updated.locationId));
-      driverName = drvRow?.driverName ?? null;
-      if (driverName) console.log(`[applyStatusChange] driver name for order #${id}: ${driverName}`);
+      const fromOnline = drvRow?.driverName?.trim() || null;
+
+      const [locRow] = await db
+        .select({ name: locationsTable.name })
+        .from(locationsTable)
+        .where(eq(locationsTable.id, updated.locationId));
+      const fromLoc = locRow?.name?.trim() || null;
+
+      driverName = fromOnline || fromLoc || null;
+      console.log(`[applyStatusChange] order #${id} accepted | driverName="${driverName}" (online="${fromOnline}" loc="${fromLoc}")`);
     } catch { /* non-fatal */ }
   }
 
