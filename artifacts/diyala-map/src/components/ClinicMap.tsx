@@ -5000,7 +5000,7 @@ export function ClinicMap({
               </div>
               <div style={{fontFamily:'Rajdhani,sans-serif',fontSize:'15px',fontWeight:700,color:'#e8f8f5',lineHeight:1.2}}>
                 {activeOrderStatus==='pending' && loopActive
-                  ? `نبحث عن أقرب تكسي لك ضمن منطقة 2 كم...`
+                  ? `نبحث عن أقرب تكسي لك ضمن منطقة 10 كم...`
                   : activeOrderStatus==='pending'   ? 'في انتظار قبول السائق...'
                   : activeOrderStatus==='accepted'  ? '🚕 السائق في الطريق إليك'
                   : activeOrderStatus==='driving'   ? '🚕 السائق في الطريق إليك'
@@ -5288,7 +5288,7 @@ export function ClinicMap({
               لا يوجد سائقون · NO DRIVERS
             </div>
             <div style={{fontFamily:'Rajdhani,sans-serif',fontSize:'14px',fontWeight:600,color:'#ffa0c0',lineHeight:1.35}}>
-              نعتذر، لا يوجد سائقون متاحون ضمن نطاق 2 كم حالياً، يرجى المحاولة بعد قليل
+              نعتذر، لا يوجد سائقون متاحون ضمن نطاق 10 كم حالياً، يرجى المحاولة بعد قليل
             </div>
           </div>
           <button onClick={()=> setTaxiNoDriverSnack(false)}
