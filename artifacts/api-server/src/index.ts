@@ -4,6 +4,7 @@ import { db } from "@workspace/db";
 import { driversOnlineTable, ordersTable } from "@workspace/db";
 import { eq, and, inArray } from "drizzle-orm";
 import { broadcastDriverUpdate } from "./lib/sse";
+import { startStaleDriverCleanup } from "./routes/drivers-online";
 
 // ── Auto-release stuck isBusy drivers every 10 minutes ────────────────────────
 // A driver is considered "stuck busy" if isBusy=true but has NO order currently
@@ -49,6 +50,9 @@ async function autoReleaseBusyDrivers() {
 // Run immediately on startup, then every 10 minutes
 autoReleaseBusyDrivers();
 setInterval(autoReleaseBusyDrivers, 10 * 60 * 1000);
+
+// ── Stale-driver cleanup: mark offline drivers whose partner app stopped pinging ─
+startStaleDriverCleanup();
 
 
 const rawPort = process.env["PORT"];
