@@ -2629,11 +2629,12 @@ export function ClinicMap({
           // ── Live status gates (direct field read, no prev comparison) ─────
           if (!isOnlineTruthy(data.isOnline)) return;   // bool true OR string 'true'
           if (!isAvailable(data.status))      return;   // must be 'available'
-          const p = data.phone as string | undefined;
+          // phone is stored as a field OR as the document ID (partner hub uses doc ID = phone)
+          const p = ((data.phone as string | undefined) || d.id || '').trim();
           if (!p) return;
-          phones.add(p.trim());
+          phones.add(p);
           activeDocs.push({
-            phone: p.trim(),
+            phone: p,
             lat:   typeof data.lat === 'number' ? data.lat : null,
             lng:   typeof data.lng === 'number' ? data.lng : null,
             name:  (data.driverName ?? data.name ?? '') as string,
@@ -2696,8 +2697,9 @@ export function ClinicMap({
         snap.forEach(d => {
           const data = d.data();
           if (!isOnlineTruthy(data.isOnline)) return;  // skip offline
-          const p = data.phone as string | undefined;
-          if (p) phones.add(p.trim());
+          // phone stored as field OR as doc ID (partner hub uses doc ID = phone number)
+          const p = ((data.phone as string | undefined) || d.id || '').trim();
+          if (p) phones.add(p);
         });
         liveAvailableAgentPhonesRef.current = phones;
         console.log(`[LiveFilter/approved_agents] available+online phones: ${phones.size}`, [...phones]);

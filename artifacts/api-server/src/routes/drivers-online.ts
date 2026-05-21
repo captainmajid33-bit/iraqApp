@@ -452,9 +452,21 @@ router.patch("/drivers-online/:locationId/status", async (req, res) => {
   }
 });
 
+// ── normalisePhone: +9647742533658 → 07742533658 (Iraqi format) ──────────────
+function normalisePhone(raw: string): string {
+  const s = raw.trim();
+  // +9647... → 07...
+  if (s.startsWith("+964")) return "0" + s.slice(4);
+  // 9647... → 07...
+  if (s.startsWith("964") && s.length >= 12) return "0" + s.slice(3);
+  return s;
+}
+
 // ── POST /api/drivers-online/sync — customer app syncs Firestore drivers → PostgreSQL ─
 // Called by the customer app when the REST /drivers-online returns empty but Firestore
 // has online drivers. No auth header required — resolves by phone from locations table.
+// Phone IDs from Firestore may be in +9647... format; we normalise to 07... to match
+// the locations table.
 router.post("/drivers-online/sync", async (req, res) => {
   const { drivers: items } = req.body ?? {};
   if (!Array.isArray(items) || items.length === 0) {
@@ -465,15 +477,17 @@ router.post("/drivers-online/sync", async (req, res) => {
   for (const item of items.slice(0, 20)) {
     const { phone, lat, lng, name: driverName = "", category = "taxi" } = item;
     if (typeof lat !== "number" || typeof lng !== "number" || !phone) continue;
+    const normPhone = normalisePhone(String(phone));
     try {
       const ip = (req.headers["x-forwarded-for"] as string || req.socket?.remoteAddress || "").split(",")[0].trim();
-      const result = await resolveAndUpsertDriver(null, lat, lng, String(phone), String(driverName), String(category), ip);
+      const result = await resolveAndUpsertDriver(null, lat, lng, normPhone, String(driverName), String(category), ip);
       if (result.ok && result.driver) {
         results.push(result.driver);
         broadcastDriverUpdate(result.driver as Record<string, unknown>);
+        console.log(`[sync] phone=${normPhone} (raw=${phone}) → locId=${(result.driver as any).locationId}`);
       }
     } catch (err) {
-      console.warn(`[sync] failed for phone=${phone}:`, err);
+      console.warn(`[sync] failed for phone=${normPhone}:`, err);
     }
   }
 
