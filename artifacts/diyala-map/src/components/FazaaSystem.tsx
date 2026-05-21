@@ -304,14 +304,13 @@ export function FazaaSystem({ mapRef, userLocation, clearMapForRescue, buttonBot
   // ── Submit fazaa request ──────────────────────────────────────────────────
   const handleSubmit = useCallback(async () => {
     if (!selectedIssue || !userLocation) return;
-    const user = getUser();
-    if (!user) return;
+    const user = getUser(); // may be null — fallbacks below handle it
     setSubmitting(true);
     try {
       const ref = await addDoc(collection(db, 'fazaa_requests'), {
-        userId:    user.uid ?? user.phone ?? 'anon',
-        userName:  user.name ?? 'مستخدم',
-        userPhone: user.phone ?? '',
+        userId:    user?.uid ?? user?.phone ?? 'anon',
+        userName:  user?.name ?? 'مستخدم',
+        userPhone: user?.phone ?? '',
         issueType: selectedIssue,
         latitude:  userLocation.lat,   // stored as number
         longitude: userLocation.lng,
@@ -343,14 +342,13 @@ export function FazaaSystem({ mapRef, userLocation, clearMapForRescue, buttonBot
   // ── Accept fazaa (helper side) ────────────────────────────────────────────
   const handleAccept = useCallback(async () => {
     if (!selected || !userLocation) return;
-    const user = getUser();
-    if (!user) return;
+    const user = getUser(); // may be null — fallbacks below handle it
 
     try {
       await updateDoc(doc(db, 'fazaa_requests', selected.id), {
         status:     'accepted',
-        helperId:   user.uid ?? user.phone ?? 'anon',
-        helperName: user.name ?? 'نشمي',
+        helperId:   user?.uid ?? user?.phone ?? 'anon',
+        helperName: user?.name ?? 'نشمي',
       });
       console.log('[Fazaa] accepted request:', selected.id);
     } catch (e) {
@@ -406,7 +404,9 @@ export function FazaaSystem({ mapRef, userLocation, clearMapForRescue, buttonBot
     setPhase('idle'); setSelected(null); setLiveInfo(null);
   }, []);
 
-  const canRequest = Boolean(getUser() && userLocation);
+  // Only GPS is required to open the sheet — user identity is optional
+  // (handleSubmit falls back to 'مستخدم' / 'anon' when localStorage is empty)
+  const canRequest = Boolean(userLocation);
 
   // ── JSX ───────────────────────────────────────────────────────────────────
   return (
