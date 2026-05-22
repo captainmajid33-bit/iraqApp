@@ -98,11 +98,11 @@ router.patch("/game/config", async (req: Request, res: Response) => {
 router.get("/game/wallet/:firebaseUid", async (req: Request, res: Response) => {
   const { firebaseUid } = req.params;
   try {
-    const [user] = await db
-      .select({ balance: usersTable.balance, id: usersTable.id })
-      .from(usersTable)
-      .where(eq(usersTable.firebaseUid, firebaseUid));
-    res.json({ balance: user?.balance ?? 0, linked: !!user });
+    const [profile] = await db
+      .select({ gameCash: gameProfilesTable.gameCash })
+      .from(gameProfilesTable)
+      .where(eq(gameProfilesTable.firebaseUid, firebaseUid));
+    res.json({ balance: profile?.gameCash ?? 0, linked: !!profile });
   } catch (err) {
     req.log.error({ err }, "wallet fetch error");
     res.status(500).json({ error: "internal" });
@@ -743,12 +743,10 @@ router.post("/game/shop/upgrade", async (req: Request, res: Response) => {
   }
 });
 
-// ── Friendly Duels — wallet-locked matchmaking ───────────────────────────────
+// ── Friendly Duels — gameCash-locked matchmaking ─────────────────────────────
 interface DuelRoom {
-  creatorId:     string;
-  creatorDbId:   number;
-  joinerId?:     string;
-  joinerDbId?:   number;
+  creatorId:     string;  // Firebase UID
+  joinerId?:     string;  // Firebase UID
   bet:           number;
   createdAt:     number;
   status:        'waiting' | 'active' | 'done';
@@ -757,38 +755,40 @@ interface DuelRoom {
 }
 const duelRooms = new Map<string, DuelRoom>();
 
-// Helper: look up DB user by Firebase UID
-async function getDuelWalletUser(firebaseUid: string) {
-  const [u] = await db
-    .select({ id: usersTable.id, balance: usersTable.balance })
-    .from(usersTable)
-    .where(eq(usersTable.firebaseUid, firebaseUid));
-  return u ?? null;
+// Helper: look up game profile by Firebase UID (gameCash is always linked)
+async function getDuelProfile(firebaseUid: string) {
+  const [p] = await db
+    .select({ gameCash: gameProfilesTable.gameCash })
+    .from(gameProfilesTable)
+    .where(eq(gameProfilesTable.firebaseUid, firebaseUid));
+  return p ?? null;
 }
 
-// POST /api/game/duel/create — deducts bet from creator, returns duelId
+// POST /api/game/duel/create — deducts bet from creator's gameCash, returns duelId
 router.post("/game/duel/create", async (req: Request, res: Response) => {
   const { firebaseUid, bet } = req.body as { firebaseUid?: string; bet?: number };
   if (!firebaseUid || typeof bet !== 'number' || bet < 100) {
     res.status(400).json({ error: "invalid_params" }); return;
   }
   try {
-    const walletUser = await getDuelWalletUser(firebaseUid);
-    if (!walletUser) {
-      res.status(400).json({ error: "wallet_not_linked", message: "المحفظة غير مربوطة — سجّل الدخول أولاً" }); return;
+    const profile = await getDuelProfile(firebaseUid);
+    if (!profile) {
+      res.status(400).json({ error: "profile_not_found", message: "الملف الشخصي غير موجود — سجّل الدخول أولاً" }); return;
     }
-    if (walletUser.balance < bet) {
-      res.status(400).json({ error: "insufficient_balance", walletBalance: walletUser.balance,
-        message: `رصيدك ${walletUser.balance.toLocaleString()} د.ع — المطلوب ${bet.toLocaleString()} د.ع` }); return;
+    if (profile.gameCash < bet) {
+      res.status(400).json({ error: "insufficient_balance", walletBalance: profile.gameCash,
+        message: `رصيدك ${profile.gameCash.toLocaleString()} د.ع — المطلوب ${bet.toLocaleString()} د.ع` }); return;
     }
-    await db.update(usersTable).set({ balance: walletUser.balance - bet }).where(eq(usersTable.id, walletUser.id));
+    await db.update(gameProfilesTable)
+      .set({ gameCash: profile.gameCash - bet })
+      .where(eq(gameProfilesTable.firebaseUid, firebaseUid));
     const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
     let duelId  = '';
     for (let i = 0; i < 6; i++) duelId += chars[Math.floor(Math.random() * chars.length)];
     const cutoff = Date.now() - 86_400_000;
     for (const [k, v] of duelRooms) if (v.createdAt < cutoff) duelRooms.delete(k);
-    duelRooms.set(duelId, { creatorId: firebaseUid, creatorDbId: walletUser.id, bet, createdAt: Date.now(), status: 'waiting' });
-    res.json({ duelId, bet, walletBalance: walletUser.balance - bet });
+    duelRooms.set(duelId, { creatorId: firebaseUid, bet, createdAt: Date.now(), status: 'waiting' });
+    res.json({ duelId, bet, walletBalance: profile.gameCash - bet });
   } catch (err) {
     req.log.error({ err }, "duel create error");
     res.status(500).json({ error: "internal" });
@@ -803,7 +803,7 @@ router.get("/game/duel/:duelId", async (req: Request, res: Response) => {
   res.json({ duelId, bet: room.bet, status: room.status, hasJoiner: !!room.joinerId });
 });
 
-// POST /api/game/duel/accept — joiner pays bet and activates room
+// POST /api/game/duel/accept — joiner pays bet (gameCash) and activates room
 router.post("/game/duel/accept", async (req: Request, res: Response) => {
   const { firebaseUid, duelId } = req.body as { firebaseUid?: string; duelId?: string };
   if (!firebaseUid || !duelId) { res.status(400).json({ error: "invalid_params" }); return; }
@@ -813,17 +813,18 @@ router.post("/game/duel/accept", async (req: Request, res: Response) => {
   if (room.status !== 'waiting')        { res.status(400).json({ error: "duel_not_waiting", message: "التحدي بدأ أو انتهى بالفعل" }); return; }
   if (room.creatorId === firebaseUid)   { res.status(400).json({ error: "cannot_join_own_duel", message: "لا يمكنك الانضمام لتحديك الخاص" }); return; }
   try {
-    const walletUser = await getDuelWalletUser(firebaseUid);
-    if (!walletUser) { res.status(400).json({ error: "wallet_not_linked", message: "المحفظة غير مربوطة" }); return; }
-    if (walletUser.balance < room.bet) {
-      res.status(400).json({ error: "insufficient_balance", walletBalance: walletUser.balance,
-        message: `رصيدك ${walletUser.balance.toLocaleString()} د.ع — المطلوب ${room.bet.toLocaleString()} د.ع` }); return;
+    const profile = await getDuelProfile(firebaseUid);
+    if (!profile) { res.status(400).json({ error: "profile_not_found", message: "الملف الشخصي غير موجود" }); return; }
+    if (profile.gameCash < room.bet) {
+      res.status(400).json({ error: "insufficient_balance", walletBalance: profile.gameCash,
+        message: `رصيدك ${profile.gameCash.toLocaleString()} د.ع — المطلوب ${room.bet.toLocaleString()} د.ع` }); return;
     }
-    await db.update(usersTable).set({ balance: walletUser.balance - room.bet }).where(eq(usersTable.id, walletUser.id));
-    room.joinerId   = firebaseUid;
-    room.joinerDbId = walletUser.id;
-    room.status     = 'active';
-    res.json({ duelId: roomKey, bet: room.bet, walletBalance: walletUser.balance - room.bet });
+    await db.update(gameProfilesTable)
+      .set({ gameCash: profile.gameCash - room.bet })
+      .where(eq(gameProfilesTable.firebaseUid, firebaseUid));
+    room.joinerId = firebaseUid;
+    room.status   = 'active';
+    res.json({ duelId: roomKey, bet: room.bet, walletBalance: profile.gameCash - room.bet });
   } catch (err) {
     req.log.error({ err }, "duel accept error");
     res.status(500).json({ error: "internal" });
@@ -848,12 +849,14 @@ router.post("/game/duel/score", async (req: Request, res: Response) => {
 
   if (room.creatorScore !== undefined && room.joinerScore !== undefined) {
     const creatorWon  = room.creatorScore >= room.joinerScore;
-    const winnerDbId  = creatorWon ? room.creatorDbId : room.joinerDbId!;
+    const winnerUid   = creatorWon ? room.creatorId : room.joinerId!;
     const winnerScore = Math.max(room.creatorScore, room.joinerScore);
     const loserScore  = Math.min(room.creatorScore, room.joinerScore);
     const prize       = room.bet * 2;
     try {
-      await db.update(usersTable).set({ balance: sql`balance + ${prize}` }).where(eq(usersTable.id, winnerDbId));
+      await db.update(gameProfilesTable)
+        .set({ gameCash: sql`game_cash + ${prize}` })
+        .where(eq(gameProfilesTable.firebaseUid, winnerUid));
       room.status = 'done';
       const youWon = (isCreator && creatorWon) || (!isCreator && !creatorWon);
       res.json({ done: true, youWon, winnerScore, loserScore, prize });

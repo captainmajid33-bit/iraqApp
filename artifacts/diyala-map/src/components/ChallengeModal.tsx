@@ -581,7 +581,7 @@ export function ChallengeModal({ onClose }: Props) {
     // ── Magnet attraction ─────────────────────────────────────────────────────
     if (g.magnetActive && Date.now() < g.magnetEnd) {
       for (const item of g.items) {
-        if (item.collected || item.type === 'magnet') continue;
+        if (item.collected || item.type === 'magnet' || item.type === 'obstacle') continue;
         const dx   = g.charX - item.x;
         const dy   = charDrawY - item.y;
         const dist = Math.sqrt(dx * dx + dy * dy);
