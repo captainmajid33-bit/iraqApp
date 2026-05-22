@@ -2657,7 +2657,8 @@ export function ClinicMap({
         });
 
         // Update live-filter ref (sync, for getLiveFilteredPhones cross-check)
-        liveOnlineDriverPhonesRef.current = (!snap.empty || phones.size > 0) ? phones : null;
+        // Use null when 0 phones so REST drivers aren't blocked by an empty gate
+        liveOnlineDriverPhonesRef.current = phones.size > 0 ? phones : null;
 
         // Update live-coords ref — overlays stale PostgreSQL coords in haversine calc
         const coordsMap = new Map<string, {lat:number; lng:number}>();
@@ -2716,7 +2717,8 @@ export function ClinicMap({
           const p = ((data.phone as string | undefined) || d.id || '').trim();
           if (p) phones.add(p);
         });
-        liveAvailableAgentPhonesRef.current = phones;
+        // Use null when 0 phones so REST drivers aren't blocked by an empty gate
+        liveAvailableAgentPhonesRef.current = phones.size > 0 ? phones : null;
         console.log(`[LiveFilter/approved_agents] available+online phones: ${phones.size}`, [...phones]);
       },
       (err) => {

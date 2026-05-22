@@ -633,14 +633,15 @@ router.post("/game/session/catch", async (req: Request, res: Response) => {
 
     const row = rows[0];
 
-    // Award 1 gamePoint to the player's profile (upsert)
+    // Award 1 gamePoint + 5 gameCash per catch
     await db
       .insert(gameProfilesTable)
-      .values({ firebaseUid, gamePoints: 1 })
+      .values({ firebaseUid, gamePoints: 1, gameCash: 5 })
       .onConflictDoUpdate({
         target: gameProfilesTable.firebaseUid,
         set: {
           gamePoints: sql`${gameProfilesTable.gamePoints} + 1`,
+          gameCash:   sql`${gameProfilesTable.gameCash} + 5`,
           updatedAt:  new Date(),
         },
       });
