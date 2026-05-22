@@ -97,10 +97,18 @@ router.patch("/locations/:id", async (req, res) => {
       const locId = Number(req.params.id);
       if (!isNaN(locId)) {
         const [loc] = await db
-          .select({ mKey: locationsTable.merchantKey })
+          .select({ mKey: locationsTable.merchantKey, subscriptionExpiry: locationsTable.subscriptionExpiry })
           .from(locationsTable)
           .where(eq(locationsTable.id, locId));
         if (loc?.mKey && loc.mKey === merchantKey) {
+          // ── Subscription expiry check ──────────────────────────────────────────
+          if (loc.subscriptionExpiry && loc.subscriptionExpiry < new Date()) {
+            res.status(403).json({
+              error: "عذراً، انتهى اشتراكك. يرجى التواصل مع الإدارة للتجديد",
+              expired: true,
+            });
+            return;
+          }
           isMerchant = true;
         }
       }
@@ -174,8 +182,13 @@ router.patch("/locations/:id", async (req, res) => {
     let data: Record<string, unknown>;
     if (isAdmin) {
       // Full update — parse with partial schema (all fields optional)
-      // Use loose schema to accept Arabic status values without strict enum checks
-      const parsed = insertLocationSchema.partial().safeParse(req.body);
+      // Pre-convert subscriptionExpiry string → Date before Zod validation
+      const bodyToValidate = { ...req.body };
+      if (bodyToValidate.subscriptionExpiry) {
+        const d = new Date(bodyToValidate.subscriptionExpiry);
+        bodyToValidate.subscriptionExpiry = isNaN(d.getTime()) ? null : d;
+      }
+      const parsed = insertLocationSchema.partial().safeParse(bodyToValidate);
       if (!parsed.success) {
         const msg = parsed.error?.message ?? "Validation error";
         console.error(`[PATCH /locations/${id}] Zod validation failed:`, parsed.error);
@@ -295,6 +308,38 @@ router.delete("/admin/locations/:id/merchant-key", requireAdmin, async (req, res
   } catch (err) {
     console.error("[DELETE merchant-key] error:", err);
     res.status(500).json({ error: "Failed to revoke merchant key" });
+  }
+});
+
+// ── POST /api/admin/locations/:id/subscription/extend — add days to expiry ────
+router.post("/admin/locations/:id/subscription/extend", requireAdmin, async (req, res) => {
+  try {
+    const id   = Number(req.params.id);
+    const days = Math.max(1, Math.min(3650, Number(req.body?.days ?? 30)));
+    if (isNaN(id)) { res.status(400).json({ error: "Invalid ID" }); return; }
+
+    const [loc] = await db
+      .select({ subscriptionExpiry: locationsTable.subscriptionExpiry })
+      .from(locationsTable)
+      .where(eq(locationsTable.id, id));
+    if (!loc) { res.status(404).json({ error: "Location not found" }); return; }
+
+    // Base: use existing expiry if it's in the future, otherwise start from today
+    const base = loc.subscriptionExpiry && loc.subscriptionExpiry > new Date()
+      ? new Date(loc.subscriptionExpiry)
+      : new Date();
+    base.setDate(base.getDate() + days);
+
+    const [updated] = await db
+      .update(locationsTable)
+      .set({ subscriptionExpiry: base })
+      .where(eq(locationsTable.id, id))
+      .returning({ id: locationsTable.id, subscriptionExpiry: locationsTable.subscriptionExpiry });
+
+    res.json({ ok: true, subscriptionExpiry: updated.subscriptionExpiry });
+  } catch (err: any) {
+    console.error("[POST subscription/extend] error:", err);
+    res.status(500).json({ error: "Failed to extend subscription" });
   }
 });
 

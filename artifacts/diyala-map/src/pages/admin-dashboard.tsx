@@ -56,7 +56,7 @@ const api = {
 };
 
 // ── Types ─────────────────────────────────────────────────────────────────────
-interface Loc { id: number; category: string; name: string; details: string; address: string; phone: string; hours: string; status: string; rating?: number | null; lat: number; lng: number; icon_url?: string | null; }
+interface Loc { id: number; category: string; name: string; details: string; address: string; phone: string; hours: string; status: string; rating?: number | null; lat: number; lng: number; icon_url?: string | null; subscriptionExpiry?: string | null; }
 interface Cat { id: number; slug: string; labelAr: string; labelEn: string; color: string; icon: string; }
 
 // ── Shared input styles ───────────────────────────────────────────────────────
@@ -92,7 +92,7 @@ function Btn({ label, color, onClick, full }: { label: string; color: string; on
 }
 
 // ── Location Form ─────────────────────────────────────────────────────────────
-const BLANK = { name: "", category: "clinic", details: "", address: "بعقوبة - ", phone: "077", password: "", firebaseUid: "", hours: "9:00 ص - 5:00 م", status: "مفتوح", lat: "33.7451", lng: "44.6488", rating: "" };
+const BLANK = { name: "", category: "clinic", details: "", address: "بعقوبة - ", phone: "077", password: "", firebaseUid: "", hours: "9:00 ص - 5:00 م", status: "مفتوح", lat: "33.7451", lng: "44.6488", rating: "", subscriptionExpiry: "" };
 type FormState = typeof BLANK;
 
 function LocForm({ init, cats, onSave, onCancel }: { init?: Partial<FormState & { id: number; icon_url?: string | null }>; cats: Cat[]; onSave: (d: any) => Promise<void>; onCancel: () => void }) {
@@ -142,6 +142,7 @@ function LocForm({ init, cats, onSave, onCancel }: { init?: Partial<FormState & 
       lat: parseFloat(f.lat as any),
       lng: parseFloat(f.lng as any),
       rating: f.rating ? parseInt(f.rating as any) : null,
+      subscriptionExpiry: f.subscriptionExpiry ? f.subscriptionExpiry : null,
       ...(icon_url !== undefined ? { icon_url } : {}),
     });
     setBusy(false);
@@ -208,7 +209,26 @@ function LocForm({ init, cats, onSave, onCancel }: { init?: Partial<FormState & 
         </div>
       </div>
       <div style={{ ...g2, marginBottom: "10px" }}>{row("خط العرض (lat)", "lat")} {row("خط الطول (lng)", "lng")}</div>
-      <div style={{ marginBottom: "14px" }}><label style={LBL}>التقييم (1–5)</label><input style={{ ...FLD, maxWidth: "110px" }} type="number" min="1" max="5" value={f.rating} onChange={s("rating")} onFocus={ff} onBlur={fb} /></div>
+      <div style={{ ...g2, marginBottom: "10px" }}>
+        <div>
+          <label style={LBL}>التقييم (1–5)</label>
+          <input style={{ ...FLD, maxWidth: "110px" }} type="number" min="1" max="5" value={f.rating} onChange={s("rating")} onFocus={ff} onBlur={fb} />
+        </div>
+        <div>
+          <label style={LBL}>📅 تاريخ انتهاء الاشتراك</label>
+          <input
+            style={{ ...FLD, colorScheme: "dark" }}
+            type="date"
+            value={f.subscriptionExpiry ? f.subscriptionExpiry.slice(0, 10) : ""}
+            onChange={e => setF(p => ({ ...p, subscriptionExpiry: e.target.value }))}
+            onFocus={ff}
+            onBlur={fb}
+          />
+          <div style={{ fontFamily: "Rajdhani, sans-serif", fontSize: "10px", color: C.dim, marginTop: "3px" }}>
+            اتركه فارغاً إذا لم يكن للحساب تاريخ انتهاء
+          </div>
+        </div>
+      </div>
 
       {/* ── Custom PNG Icon Upload ──────────────────────────────────────── */}
       <div style={{ marginBottom: "16px" }}>
@@ -286,6 +306,39 @@ function LocForm({ init, cats, onSave, onCancel }: { init?: Partial<FormState & 
 }
 
 // ── Merchants Tab ─────────────────────────────────────────────────────────────
+// ── Subscription helpers ──────────────────────────────────────────────────────
+function isExpired(expiry?: string | null) {
+  if (!expiry) return false;
+  return new Date(expiry) < new Date();
+}
+function daysLeft(expiry?: string | null): number | null {
+  if (!expiry) return null;
+  const diff = new Date(expiry).getTime() - Date.now();
+  return Math.ceil(diff / 86400000);
+}
+function ExpiryBadge({ expiry }: { expiry?: string | null }) {
+  if (!expiry) return <span style={{ color: C.dim, fontSize: "11px" }}>—</span>;
+  const days = daysLeft(expiry);
+  const expired = (days ?? 0) <= 0;
+  const warning = !expired && (days ?? 99) <= 7;
+  const color = expired ? C.red : warning ? C.yellow : C.green;
+  const label = expired
+    ? `منتهي (${new Date(expiry).toLocaleDateString("ar-IQ")})`
+    : warning
+    ? `${days} يوم متبقي`
+    : new Date(expiry).toLocaleDateString("ar-IQ");
+  return (
+    <span style={{
+      fontSize: "11px", fontFamily: "Rajdhani, sans-serif",
+      color, padding: "2px 6px", borderRadius: "3px",
+      background: `${color}14`, border: `1px solid ${color}44`,
+      whiteSpace: "nowrap",
+    }}>
+      {expired ? "⛔ " : warning ? "⚠️ " : "✓ "}{label}
+    </span>
+  );
+}
+
 function MerchantsTab({ cats, toast }: { cats: Cat[]; toast: ReturnType<typeof useToast> }) {
   const [locs, setLocs] = useState<Loc[]>([]);
   const [loading, setLoading] = useState(true);
@@ -293,6 +346,8 @@ function MerchantsTab({ cats, toast }: { cats: Cat[]; toast: ReturnType<typeof u
   const [editId, setEditId] = useState<number | null>(null);
   const [search, setSearch] = useState("");
   const [catFilter, setCatFilter] = useState("");
+  const [subFilter, setSubFilter] = useState<"all" | "active" | "expired">("all");
+  const [extending, setExtending] = useState<number | null>(null);
   const catMap = Object.fromEntries(cats.map(c => [c.slug, c]));
 
   const load = useCallback(async () => {
@@ -307,10 +362,10 @@ function MerchantsTab({ cats, toast }: { cats: Cat[]; toast: ReturnType<typeof u
   // ── Write merchant login doc to Firestore after PostgreSQL save ─────────
   const syncMerchantDoc = async (
     id: number,
-    d: { phone?: string; password?: string; category?: string; name?: string; firebaseUid?: string },
+    d: { phone?: string; password?: string; category?: string; name?: string; firebaseUid?: string; subscriptionExpiry?: string | null },
     overwritePassword: boolean,
   ) => {
-    const payload: Record<string, string> = {
+    const payload: Record<string, any> = {
       phone:    String(d.phone    ?? '').trim(),
       category: String(d.category ?? '').toLowerCase().trim(),
       name:     String(d.name     ?? '').trim(),
@@ -321,6 +376,14 @@ function MerchantsTab({ cats, toast }: { cats: Cat[]; toast: ReturnType<typeof u
     // Save doctor/merchant Firebase UID — used as merchantId in appointment docs
     const fbUid = String(d.firebaseUid ?? '').trim();
     if (fbUid) payload.uid = fbUid;
+    // Sync subscription expiry so merchant app can check it on login
+    if (d.subscriptionExpiry) {
+      payload.subscriptionExpiry = d.subscriptionExpiry;
+      payload.isBlocked = new Date(d.subscriptionExpiry) < new Date();
+    } else if (d.subscriptionExpiry === null) {
+      payload.subscriptionExpiry = null;
+      payload.isBlocked = false;
+    }
     await setDoc(doc(db, 'merchants', String(id)), payload, { merge: true });
   };
 
@@ -360,21 +423,74 @@ function MerchantsTab({ cats, toast }: { cats: Cat[]; toast: ReturnType<typeof u
     }
   };
 
-  const rows = locs.filter(l =>
-    (!catFilter || l.category === catFilter) &&
-    (!search || l.name.includes(search) || (l.address ?? "").includes(search))
-  );
+  const handleExtend = async (loc: Loc) => {
+    setExtending(loc.id);
+    try {
+      const r = await api.post(`/api/admin/locations/${loc.id}/subscription/extend`, { days: 30 });
+      if (r.ok) {
+        toast.show(`✓ تم تمديد اشتراك "${loc.name}" +30 يوم`);
+        load();
+      } else {
+        toast.show(r.error ?? "فشل التمديد", false);
+      }
+    } finally {
+      setExtending(null);
+    }
+  };
+
+  const rows = locs.filter(l => {
+    const matchSearch = !search ||
+      l.name.toLowerCase().includes(search.toLowerCase()) ||
+      (l.phone ?? "").includes(search) ||
+      (l.address ?? "").includes(search);
+    const matchCat = !catFilter || l.category === catFilter;
+    const matchSub =
+      subFilter === "all" ? true :
+      subFilter === "expired" ? isExpired(l.subscriptionExpiry) :
+      /* active */ !isExpired(l.subscriptionExpiry);
+    return matchSearch && matchCat && matchSub;
+  });
+
+  const expiredCount = locs.filter(l => isExpired(l.subscriptionExpiry)).length;
 
   return (
     <div>
-      <div style={{ display: "flex", gap: "10px", flexWrap: "wrap", marginBottom: "14px", alignItems: "center" }}>
+      {/* ── Toolbar ─────────────────────────────────────────────────────── */}
+      <div style={{ display: "flex", gap: "10px", flexWrap: "wrap", marginBottom: "10px", alignItems: "center" }}>
         <Btn label={showAdd ? "✕ إلغاء" : "+ إضافة تاجر"} color={C.purple} onClick={() => { setShowAdd(v => !v); setEditId(null); }} />
-        <input value={search} onChange={e => setSearch(e.target.value)} placeholder="بحث..." style={{ ...FLD, maxWidth: "200px", flex: 1 }} onFocus={ff} onBlur={fb} />
-        <select value={catFilter} onChange={e => setCatFilter(e.target.value)} style={{ ...FLD, maxWidth: "180px", cursor: "pointer" }}>
+        <input
+          value={search}
+          onChange={e => setSearch(e.target.value)}
+          placeholder="🔍 بحث باسم المحل أو رقم الهاتف..."
+          style={{ ...FLD, maxWidth: "240px", flex: 1 }}
+          onFocus={ff} onBlur={fb}
+        />
+        <select value={catFilter} onChange={e => setCatFilter(e.target.value)} style={{ ...FLD, maxWidth: "160px", cursor: "pointer" }}>
           <option value="">كل الفئات</option>
           {cats.map(c => <option key={c.slug} value={c.slug}>{c.icon} {c.labelAr}</option>)}
         </select>
         <span style={{ fontFamily: "Orbitron, sans-serif", fontSize: "10px", color: C.dim }}>{rows.length} سجل</span>
+      </div>
+
+      {/* ── Subscription filter pills ────────────────────────────────────── */}
+      <div style={{ display: "flex", gap: "6px", marginBottom: "14px", flexWrap: "wrap" }}>
+        {(["all", "active", "expired"] as const).map(f => {
+          const labels = { all: `الكل (${locs.length})`, active: `✅ نشط (${locs.length - expiredCount})`, expired: `⛔ منتهي الاشتراك (${expiredCount})` };
+          const colors = { all: C.blue, active: C.green, expired: C.red };
+          const active = subFilter === f;
+          return (
+            <button key={f} onClick={() => setSubFilter(f)} style={{
+              padding: "5px 14px",
+              background: active ? `${colors[f]}22` : "transparent",
+              border: `1px solid ${active ? colors[f] : C.border}`,
+              color: active ? colors[f] : C.dim,
+              fontFamily: "Orbitron, sans-serif", fontSize: "9px", letterSpacing: "0.08em",
+              cursor: "pointer", borderRadius: "3px", transition: "all 0.15s",
+            }}>
+              {labels[f]}
+            </button>
+          );
+        })}
       </div>
 
       {showAdd && <LocForm cats={cats} onSave={handleAdd} onCancel={() => setShowAdd(false)} />}
@@ -386,7 +502,7 @@ function MerchantsTab({ cats, toast }: { cats: Cat[]; toast: ReturnType<typeof u
           <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "Rajdhani, sans-serif" }}>
             <thead>
               <tr style={{ background: `${C.purple}10`, borderBottom: `1px solid ${C.border}` }}>
-                {["#", "الاسم", "الفئة", "الحالة", "الإحداثيات", "الإجراءات"].map(h => (
+                {["#", "الاسم", "الفئة", "الحالة", "📅 الاشتراك", "الإجراءات"].map(h => (
                   <th key={h} style={{ padding: "10px 12px", textAlign: "right", fontSize: "10px", color: C.blue, fontFamily: "Orbitron, sans-serif", letterSpacing: "0.08em", whiteSpace: "nowrap" }}>{h}</th>
                 ))}
               </tr>
@@ -394,27 +510,41 @@ function MerchantsTab({ cats, toast }: { cats: Cat[]; toast: ReturnType<typeof u
             <tbody>
               {rows.map((loc, i) => {
                 const cat = catMap[loc.category];
+                const expired = isExpired(loc.subscriptionExpiry);
                 return editId === loc.id ? (
                   <tr key={loc.id}>
                     <td colSpan={6} style={{ padding: "12px", background: C.surf2 }}>
                       <LocForm cats={cats}
-                        init={{ ...loc, lat: String(loc.lat), lng: String(loc.lng), rating: loc.rating ? String(loc.rating) : "" }}
+                        init={{
+                          ...loc,
+                          lat: String(loc.lat), lng: String(loc.lng),
+                          rating: loc.rating ? String(loc.rating) : "",
+                          subscriptionExpiry: loc.subscriptionExpiry
+                            ? new Date(loc.subscriptionExpiry).toISOString().slice(0, 10)
+                            : "",
+                        }}
                         onSave={d => handleEdit(loc.id, d)}
                         onCancel={() => setEditId(null)} />
                     </td>
                   </tr>
                 ) : (
                   <tr key={loc.id}
-                    style={{ borderBottom: `1px solid rgba(123,47,247,0.1)`, opacity: loc.status === "معطّل" ? 0.5 : 1, transition: "opacity 0.2s" }}
-                    onMouseEnter={e => (e.currentTarget.style.background = `${C.purple}08`)}
-                    onMouseLeave={e => (e.currentTarget.style.background = "transparent")}>
+                    style={{
+                      borderBottom: `1px solid rgba(123,47,247,0.1)`,
+                      opacity: loc.status === "معطّل" ? 0.5 : 1,
+                      background: expired ? "rgba(255,45,120,0.04)" : "transparent",
+                      transition: "opacity 0.2s, background 0.2s",
+                    }}
+                    onMouseEnter={e => (e.currentTarget.style.background = expired ? "rgba(255,45,120,0.08)" : `${C.purple}08`)}
+                    onMouseLeave={e => (e.currentTarget.style.background = expired ? "rgba(255,45,120,0.04)" : "transparent")}>
                     <td style={{ padding: "10px 12px", color: C.dim, fontSize: "12px" }}>{i + 1}</td>
                     <td style={{ padding: "10px 12px", maxWidth: "180px" }}>
                       <div style={{ color: C.text, fontSize: "14px", fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                         {loc.status === "معطّل" && <span style={{ fontSize: "10px", color: C.yellow, marginLeft: "6px", fontFamily: "Orbitron, sans-serif" }}>⏸</span>}
+                        {expired && <span style={{ fontSize: "10px", color: C.red, marginLeft: "6px", fontFamily: "Orbitron, sans-serif" }}>⛔</span>}
                         {loc.name}
                       </div>
-                      {loc.details && <div style={{ color: C.dim, fontSize: "11px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{loc.details}</div>}
+                      {loc.phone && <div style={{ color: C.dim, fontSize: "11px" }}>📞 {loc.phone}</div>}
                     </td>
                     <td style={{ padding: "10px 12px" }}>
                       <span style={{ display: "inline-flex", alignItems: "center", gap: "5px", padding: "3px 8px", background: `${cat?.color ?? C.purple}18`, border: `1px solid ${cat?.color ?? C.purple}44`, color: cat?.color ?? C.purple, fontSize: "12px", borderRadius: "2px", whiteSpace: "nowrap" }}>
@@ -427,13 +557,19 @@ function MerchantsTab({ cats, toast }: { cats: Cat[]; toast: ReturnType<typeof u
                         : <span style={{ color: loc.status === "مفتوح" ? C.green : C.red, fontSize: "13px" }}>● {loc.status}</span>
                       }
                     </td>
-                    <td style={{ padding: "10px 12px", fontFamily: "monospace", fontSize: "11px", color: C.dim, whiteSpace: "nowrap" }}>
-                      {loc.lat.toFixed(4)}, {loc.lng.toFixed(4)}
+                    <td style={{ padding: "10px 12px" }}>
+                      <ExpiryBadge expiry={loc.subscriptionExpiry} />
                     </td>
                     <td style={{ padding: "10px 12px" }}>
-                      <div style={{ display: "flex", gap: "5px", flexWrap: "nowrap" }}>
+                      <div style={{ display: "flex", gap: "5px", flexWrap: "wrap" }}>
                         <button onClick={() => { setEditId(loc.id); setShowAdd(false); }}
                           style={{ padding: "5px 10px", background: `${C.blue}12`, border: `1px solid ${C.blue}44`, color: C.blue, fontSize: "12px", cursor: "pointer", borderRadius: "2px", fontFamily: "Rajdhani, sans-serif", whiteSpace: "nowrap" }}>تعديل</button>
+                        <button
+                          onClick={() => handleExtend(loc)}
+                          disabled={extending === loc.id}
+                          style={{ padding: "5px 10px", background: `${C.green}12`, border: `1px solid ${C.green}44`, color: C.green, fontSize: "12px", cursor: "pointer", borderRadius: "2px", fontFamily: "Rajdhani, sans-serif", whiteSpace: "nowrap", opacity: extending === loc.id ? 0.5 : 1 }}>
+                          {extending === loc.id ? "..." : "+30 يوم"}
+                        </button>
                         <button onClick={() => handleToggleDisable(loc)}
                           style={{ padding: "5px 10px", background: loc.status === "معطّل" ? `${C.green}12` : `${C.yellow}12`, border: `1px solid ${loc.status === "معطّل" ? C.green : C.yellow}44`, color: loc.status === "معطّل" ? C.green : C.yellow, fontSize: "12px", cursor: "pointer", borderRadius: "2px", fontFamily: "Rajdhani, sans-serif", whiteSpace: "nowrap" }}>
                           {loc.status === "معطّل" ? "تفعيل" : "تعطيل"}

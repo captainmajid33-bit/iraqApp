@@ -3,20 +3,21 @@ import { createInsertSchema, createSelectSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 
 export const locationsTable = pgTable("locations", {
-  id:          serial("id").primaryKey(),
-  category:    text("category").notNull().default("clinic"),
-  name:        text("name").notNull(),
-  details:     text("details").notNull().default(""),
-  address:     text("address").notNull().default(""),
-  phone:       text("phone").notNull().default(""),
-  hours:       text("hours").notNull().default(""),
-  status:      text("status").notNull().default("مفتوح"),
-  rating:      integer("rating"),
-  merchantKey: text("merchant_key"),   // per-merchant auth key (admin-managed, never public)
-  iconUrl:     text("icon_url"),        // custom PNG icon URL from Firebase Storage
-  lat:         real("lat").notNull(),
-  lng:         real("lng").notNull(),
-  createdAt:   timestamp("created_at").defaultNow(),
+  id:                 serial("id").primaryKey(),
+  category:           text("category").notNull().default("clinic"),
+  name:               text("name").notNull(),
+  details:            text("details").notNull().default(""),
+  address:            text("address").notNull().default(""),
+  phone:              text("phone").notNull().default(""),
+  hours:              text("hours").notNull().default(""),
+  status:             text("status").notNull().default("مفتوح"),
+  rating:             integer("rating"),
+  merchantKey:        text("merchant_key"),          // per-merchant auth key (admin-managed, never public)
+  iconUrl:            text("icon_url"),               // custom PNG icon URL from Firebase Storage
+  subscriptionExpiry: timestamp("subscription_expiry"), // merchant subscription expiry date
+  lat:                real("lat").notNull(),
+  lng:                real("lng").notNull(),
+  createdAt:          timestamp("created_at").defaultNow(),
 });
 
 // Public insert schema — excludes merchantKey (admin sets it via dedicated endpoint)
