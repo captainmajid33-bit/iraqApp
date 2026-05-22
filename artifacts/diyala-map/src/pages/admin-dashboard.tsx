@@ -550,44 +550,34 @@ function MapEditorTab({ cats, toast }: { cats: Cat[]; toast: ReturnType<typeof u
         </div>`,
         iconSize: [30, 30], iconAnchor: [15, 15],
       });
-      // Taxi and gas driver positions MUST come exclusively from live Partner Hub GPS.
-      // Dragging their map marker and saving to the DB would pin a stale location that
-      // overrides live GPS and breaks the haversine radar.  Block drag-save for these two
-      // categories so the map marker is read-only (display only).
-      const isGpsOnlyCategory = loc.category === "taxi" || loc.category === "gas";
-      const marker = L.marker([loc.lat, loc.lng], {
-        icon,
-        draggable: !isGpsOnlyCategory,   // taxi & gas: non-draggable (GPS-only)
-      }).addTo(mapRef.current!);
+      // Taxi and gas driver locations come exclusively from live Firebase GPS —
+      // hide them from the admin map entirely so no one can set a stale pin.
+      if (loc.category === "taxi" || loc.category === "gas") return;
+
+      const marker = L.marker([loc.lat, loc.lng], { icon, draggable: true }).addTo(mapRef.current!);
 
       const mkPopup = (lat: number, lng: number, saved = false) =>
         `<div style="background:#0d1117;padding:10px 13px;direction:rtl;min-width:170px;font-family:Rajdhani,sans-serif">
           <div style="color:${color};font-size:13px;font-weight:700;margin-bottom:3px">${loc.name}</div>
           <div style="color:#888;font-size:11px">${cat?.labelAr ?? loc.category}</div>
           <div style="color:${saved ? "#00f5d4" : "#f5c518"};font-size:11px;margin-top:4px;font-family:monospace">${lat.toFixed(5)}, ${lng.toFixed(5)}</div>
-          ${isGpsOnlyCategory
-            ? `<div style="color:#ff2d78;font-size:10px;margin-top:3px;letter-spacing:0.04em">🛰 GPS حي فقط — التحريك معطّل</div>`
-            : `<div style="color:${saved ? "#00f5d4" : "#7b2ff7"};font-size:10px;margin-top:3px">${saved ? "✓ تم الحفظ" : "↕ اسحب لتغيير الموقع"}</div>`
-          }
+          <div style="color:${saved ? "#00f5d4" : "#7b2ff7"};font-size:10px;margin-top:3px">${saved ? "✓ تم الحفظ" : "↕ اسحب لتغيير الموقع"}</div>
         </div>`;
 
       marker.bindPopup(L.popup({ offset: [0, -8], closeButton: false }).setContent(mkPopup(loc.lat, loc.lng)));
       marker.on("click", () => marker.openPopup());
 
-      // Only wire up dragend for non-GPS-only categories
-      if (!isGpsOnlyCategory) {
-        marker.on("dragend", async () => {
-          const ll = marker.getLatLng();
-          setSaving(loc.id);
-          try {
-            await api.patch(`/api/locations/${loc.id}`, { lat: ll.lat, lng: ll.lng });
-            toast.show(`${loc.name} — تم حفظ الموقع`);
-            marker.getPopup()?.setContent(mkPopup(ll.lat, ll.lng, true));
-          } catch {
-            toast.show("فشل حفظ الموقع", false);
-          } finally { setSaving(null); }
-        });
-      }
+      marker.on("dragend", async () => {
+        const ll = marker.getLatLng();
+        setSaving(loc.id);
+        try {
+          await api.patch(`/api/locations/${loc.id}`, { lat: ll.lat, lng: ll.lng });
+          toast.show(`${loc.name} — تم حفظ الموقع`);
+          marker.getPopup()?.setContent(mkPopup(ll.lat, ll.lng, true));
+        } catch {
+          toast.show("فشل حفظ الموقع", false);
+        } finally { setSaving(null); }
+      });
 
       markers.current.set(loc.id, marker);
     });
