@@ -1834,7 +1834,7 @@ export function ClinicMap({
         console.log(`[autoFindDriver] live dual-gate (${filterSource}): ${fsFiltered.length}/${drivers.length} pass`);
 
         // ── Fixed radius, sorted nearest-first ───────────────────────────────
-        const SEARCH_RADIUS_KM = 2;
+        const SEARCH_RADIUS_KM = 10;
         const withDist = fsFiltered
           .map(d => ({ ...d, distKm: haversineDist(loc.lat, loc.lng, d.lat, d.lng) }));
         console.log(`[autoFindDriver] after distance calc — within ${SEARCH_RADIUS_KM} km:`,
@@ -2109,21 +2109,30 @@ export function ClinicMap({
       }
 
       type DriverRow = { locationId:number; driverName:string; phone:string; lat:number; lng:number; };
-      const drivers: DriverRow[] = Array.isArray(dRaw) ? (dRaw as DriverRow[]) : [];
-      const SEARCH_RADIUS_KM = 2;
+      const rawDrivers: DriverRow[] = Array.isArray(dRaw) ? (dRaw as DriverRow[]) : [];
+      const SEARCH_RADIUS_KM = 10;
+
+      // ── Overlay fresh Firestore GPS coords (same as autoFindDriver) ──────────
+      // Partner app pushes GPS to Firestore far more often than PostgreSQL,
+      // so Firestore coords are always more up-to-date.
+      const liveCoords = liveDriverCoordsRef.current;
+      const drivers = rawDrivers.map(d => {
+        const phone = (d.phone ?? '').trim();
+        const fresh = phone ? liveCoords.get(phone) : undefined;
+        return { ...d, lat: fresh?.lat ?? Number(d.lat), lng: fresh?.lng ?? Number(d.lng) };
+      }).filter(d => Number.isFinite(d.lat) && Number.isFinite(d.lng));
+      console.log(`[dispatchTaxiNow] API ${rawDrivers.length} driver(s), Firestore coords overlay: ${
+        drivers.filter(d => liveCoords.has((d.phone ?? '').trim())).length} matched`);
 
       // ── Live dual-gate cross-check (approved_agents ∩ drivers) ──────────────
-      // getLiveFilteredPhones() reads the pre-warmed onSnapshot Sets synchronously.
-      // If a driver is offline in Firestore (isOnline=false or status≠available),
-      // their phone is NOT in the Set → they are excluded here before any order is placed.
       const { phones: dispatchFilterPhones, source: dispatchFilterSrc } = getLiveFilteredPhones();
       const fsFilteredDrivers = dispatchFilterPhones !== null
         ? drivers.filter(d => {
             const p = (d.phone ?? '').trim();
-            if (!p) return true; // empty-phone drivers can't be in any Firestore Set — don't block them
+            if (!p) return true;
             return dispatchFilterPhones.has(p);
           })
-        : drivers; // both gates still null (very first mount, no internet) → trust REST
+        : drivers;
       console.log(`[dispatchTaxiNow] live dual-gate (${dispatchFilterSrc}): ${fsFilteredDrivers.length}/${drivers.length} pass`);
 
       const available = fsFilteredDrivers
@@ -2132,7 +2141,7 @@ export function ClinicMap({
         .sort((a,b)=>a.distKm - b.distKm);
 
       console.log(`[dispatchTaxiNow] ${available.length} driver(s) within ${SEARCH_RADIUS_KM} km`,
-        available.map(d=>({ name:d.driverName, distKm:+d.distKm.toFixed(3) })));
+        available.map(d=>({ name:d.driverName, distKm:+d.distKm.toFixed(3), coordSrc: liveCoords.has((d.phone??'').trim()) ? 'firestore' : 'postgres' })));
 
       if (available.length === 0) {
         setTaxiNoDriverSnack(true);
@@ -3296,7 +3305,7 @@ export function ClinicMap({
         };
       }).filter(d => Number.isFinite(d.lat) && Number.isFinite(d.lng));
 
-      const SEARCH_RADIUS_KM = 2;
+      const SEARCH_RADIUS_KM = 10;
 
       console.log(`[redirectToNext] API ${drivers.length} driver(s), ignored:[${[...loopIgnoredRef.current].join(',')}]`,
         drivers.map(d => ({
@@ -5421,7 +5430,7 @@ export function ClinicMap({
               لا يوجد سائقون · NO DRIVERS
             </div>
             <div style={{fontFamily:'Rajdhani,sans-serif',fontSize:'14px',fontWeight:600,color:'#ffa0c0',lineHeight:1.35}}>
-              نعتذر، لا يوجد سائقون متاحون ضمن نطاق 2 كم حالياً، يرجى المحاولة بعد قليل
+              نعتذر، لا يوجد سائقون متاحون ضمن نطاق 10 كم حالياً، يرجى المحاولة بعد قليل
             </div>
           </div>
           <button onClick={()=> setTaxiNoDriverSnack(false)}
