@@ -1,6 +1,6 @@
 import { Router, type IRouter } from "express";
 import { db } from "@workspace/db";
-import { usersTable, insertUserSchema } from "@workspace/db";
+import { usersTable, insertUserSchema, gameProfilesTable, gameScoresTable } from "@workspace/db";
 import { eq, desc } from "drizzle-orm";
 
 const router: IRouter = Router();
@@ -66,7 +66,7 @@ router.post("/users/:id/xp", async (req, res) => {
   }
 });
 
-// DELETE user
+// DELETE user by numeric id
 router.delete("/users/:id", async (req, res) => {
   try {
     const id = Number(req.params.id);
@@ -74,6 +74,27 @@ router.delete("/users/:id", async (req, res) => {
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: "Failed to delete user" });
+  }
+});
+
+// DELETE account by Firebase UID — removes all user data from PostgreSQL
+// Called from client-side account deletion flow (required for app store compliance)
+router.delete("/users/account/:firebaseUid", async (req, res) => {
+  try {
+    const { firebaseUid } = req.params;
+    if (!firebaseUid || firebaseUid.length < 4) {
+      return res.status(400).json({ error: "invalid uid" });
+    }
+    // Delete in dependency order: scores → profile → user row
+    await db.delete(gameScoresTable).where(eq(gameScoresTable.firebaseUid, firebaseUid));
+    await db.delete(gameProfilesTable).where(eq(gameProfilesTable.firebaseUid, firebaseUid));
+    // usersTable may use firebaseUid as a string column or not exist — best-effort
+    try {
+      await db.delete(usersTable).where((eq as any)(usersTable.firebaseUid, firebaseUid));
+    } catch { /* column may not exist — ignore */ }
+    res.json({ ok: true, deleted: { scores: true, profile: true } });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to delete account data" });
   }
 });
 

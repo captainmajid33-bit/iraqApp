@@ -1,9 +1,10 @@
 import { useState, useEffect, useRef } from 'react';
-import { signOut, onAuthStateChanged, type User as FbUser } from 'firebase/auth';
+import { signOut, onAuthStateChanged, deleteUser as fbDeleteUser, type User as FbUser } from 'firebase/auth';
 import {
   doc, getDoc, updateDoc,
   collection, query, where, onSnapshot,
   runTransaction, increment, serverTimestamp,
+  deleteDoc, writeBatch, getDocs,
 } from 'firebase/firestore';
 import { auth, db } from '@/lib/firebase';
 import { getUserFromStorage, type DiyalaUser } from './UserLoginOverlay';
@@ -550,9 +551,13 @@ export function UserMenu() {
   });
   const [balanceReady, setBalanceReady] = useState(false);
 
-  const [editedName, setEditedName] = useState('');
-  const [saving,     setSaving]     = useState(false);
-  const [toast,      setToast]      = useState<string | null>(null);
+  const [editedName,       setEditedName]       = useState('');
+  const [saving,           setSaving]           = useState(false);
+  const [toast,            setToast]            = useState<string | null>(null);
+  const [showDeleteConfirm,setShowDeleteConfirm]= useState(false);
+  const [deleting,         setDeleting]         = useState(false);
+  const [deleteError,      setDeleteError]      = useState('');
+  const [showPrivacy,      setShowPrivacy]      = useState(false);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const menuRef    = useRef<HTMLDivElement>(null);
 
@@ -663,11 +668,45 @@ export function UserMenu() {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
     showToast('تم تحديث الاسم بنجاح ✓');
     setSaving(false);
-    updateDoc(doc(db, 'users', fb.uid), { name: newName })
-      .catch(e => console.warn('[UserMenu] updateDoc failed:', e?.code));
+    updateDoc(doc(db, 'users', fb.uid), { name: newName }).catch(() => {});
   };
 
   const isDirty = editedName.trim() !== (user?.name ?? '');
+
+  // ── Account deletion — wipes all user data then deletes Firebase Auth account
+  const handleDeleteAccount = async () => {
+    const fb = auth.currentUser;
+    if (!fb) { setDeleteError('يجب تسجيل الدخول أولاً'); return; }
+    setDeleting(true);
+    setDeleteError('');
+    try {
+      const uid = fb.uid;
+      // 1. Delete SQL data (game scores + profile)
+      await fetch(`/api/users/account/${uid}`, { method: 'DELETE' });
+      // 2. Delete Firestore user document
+      await deleteDoc(doc(db, 'users', uid));
+      // 3. Delete any Firestore sub-collections best-effort
+      try {
+        const ordersSnap = await getDocs(query(collection(db, 'orders'), where('userId', '==', uid)));
+        const batch = writeBatch(db);
+        ordersSnap.forEach(d => batch.delete(d.ref));
+        if (!ordersSnap.empty) await batch.commit();
+      } catch { /* best-effort */ }
+      // 4. Clear local storage
+      localStorage.removeItem(STORAGE_KEY);
+      // 5. Delete Firebase Auth account
+      await fbDeleteUser(fb);
+      // Done — auth state change will unmount the menu automatically
+    } catch (e: any) {
+      // Firebase may require re-auth if account is old
+      if (e?.code === 'auth/requires-recent-login') {
+        setDeleteError('يجب إعادة تسجيل الدخول أولاً لتتمكن من حذف الحساب. أخرج وادخل مجدداً ثم حاول.');
+      } else {
+        setDeleteError('فشل حذف الحساب. حاول مجدداً أو تواصل مع الدعم.');
+      }
+      setDeleting(false);
+    }
+  };
 
   // ── Menu item helper style ────────────────────────────────────────────────
   const MI: React.CSSProperties = {
@@ -989,8 +1028,87 @@ export function UserMenu() {
               {/* ── League Standings Widget ── */}
               <LeagueWidget active={dialogOpen} />
 
+              {/* Privacy Policy link */}
+              <button
+                onClick={() => { setDialogOpen(false); setShowPrivacy(true); }}
+                style={{
+                  width:'100%', padding:'11px', marginBottom:'8px',
+                  background:'rgba(0,212,255,0.06)', border:'1px solid rgba(0,212,255,0.25)',
+                  color:'rgba(0,212,255,0.65)',
+                  fontFamily:'Orbitron, sans-serif', fontSize:'8px',
+                  letterSpacing:'0.12em', cursor:'pointer', transition:'all 0.18s',
+                  display:'flex', alignItems:'center', justifyContent:'center', gap:6,
+                }}>
+                🔒 سياسة الخصوصية
+              </button>
+
+              {/* Delete account — collapsible confirm */}
+              {!showDeleteConfirm ? (
+                <button
+                  onClick={() => { setShowDeleteConfirm(true); setDeleteError(''); }}
+                  style={{
+                    width:'100%', padding:'11px', marginBottom:'8px',
+                    background:'rgba(255,45,120,0.05)', border:'1px solid rgba(255,45,120,0.2)',
+                    color:'rgba(255,45,120,0.5)',
+                    fontFamily:'Orbitron, sans-serif', fontSize:'8px',
+                    letterSpacing:'0.12em', cursor:'pointer', transition:'all 0.18s',
+                  }}>
+                  🗑 حذف الحساب
+                </button>
+              ) : (
+                <div style={{
+                  padding:'14px', marginBottom:'8px',
+                  background:'rgba(255,45,120,0.08)',
+                  border:'1.5px solid rgba(255,45,120,0.5)',
+                  borderRadius:'4px',
+                }}>
+                  <div style={{
+                    fontFamily:'Rajdhani, sans-serif', fontSize:'13px',
+                    color:'#ff6b8a', textAlign:'center', marginBottom:'10px', lineHeight:1.5,
+                  }}>
+                    ⚠ هذا الإجراء نهائي ولا يمكن التراجع عنه.<br/>
+                    سيتم حذف بياناتك كاملاً من التطبيق.
+                  </div>
+                  {deleteError && (
+                    <div style={{
+                      fontSize:'11px', color:'#ff4466', textAlign:'center',
+                      marginBottom:'8px', fontFamily:'Rajdhani, sans-serif',
+                    }}>{deleteError}</div>
+                  )}
+                  <div style={{ display:'flex', gap:'8px' }}>
+                    <button
+                      onClick={() => { setShowDeleteConfirm(false); setDeleteError(''); }}
+                      style={{
+                        flex:1, padding:'10px',
+                        background:'rgba(0,245,212,0.1)', border:'1px solid rgba(0,245,212,0.35)',
+                        color:'#00f5d4', fontFamily:'Orbitron, sans-serif', fontSize:'8px',
+                        letterSpacing:'0.1em', cursor:'pointer',
+                      }}>
+                      إلغاء
+                    </button>
+                    <button
+                      onClick={handleDeleteAccount}
+                      disabled={deleting}
+                      style={{
+                        flex:1, padding:'10px',
+                        background: deleting ? 'rgba(255,45,120,0.08)' : 'rgba(255,45,120,0.25)',
+                        border:'1px solid rgba(255,45,120,0.6)',
+                        color: deleting ? 'rgba(255,45,120,0.4)' : '#ff2d78',
+                        fontFamily:'Orbitron, sans-serif', fontSize:'8px',
+                        letterSpacing:'0.1em',
+                        cursor: deleting ? 'not-allowed' : 'pointer',
+                        display:'flex', alignItems:'center', justifyContent:'center', gap:5,
+                      }}>
+                      {deleting ? (
+                        <><svg width="10" height="10" viewBox="0 0 28 28" fill="none" style={{ animation:'um-spin 0.85s linear infinite' }}><circle cx="14" cy="14" r="10" stroke="#ff2d78" strokeWidth="2.5" strokeDasharray="22 14" strokeLinecap="round"/></svg>جاري الحذف...</>
+                      ) : '🗑 تأكيد الحذف'}
+                    </button>
+                  </div>
+                </div>
+              )}
+
               {/* Close */}
-              <button className="um-close" onClick={() => setDialogOpen(false)}
+              <button className="um-close" onClick={() => { setDialogOpen(false); setShowDeleteConfirm(false); }}
                 style={{
                   width:'100%', padding:'12px',
                   background:'rgba(123,47,247,0.14)', border:'1px solid rgba(123,47,247,0.4)',
@@ -1023,6 +1141,78 @@ export function UserMenu() {
           fbUser={fbUser}
           onClose={() => setShowMissions(false)}
         />
+      )}
+
+      {/* ── Privacy Policy Modal ─────────────────────────────────────────── */}
+      {showPrivacy && (
+        <div style={{
+          position:'fixed', inset:0, zIndex:9900,
+          background:'rgba(5,8,15,0.92)',
+          display:'flex', alignItems:'center', justifyContent:'center',
+          padding:'20px',
+        }} onClick={() => setShowPrivacy(false)}>
+          <div
+            onClick={e => e.stopPropagation()}
+            style={{
+              width:'100%', maxWidth:'460px', maxHeight:'80vh', overflowY:'auto',
+              background:'rgba(10,14,25,0.98)',
+              border:'1.5px solid rgba(0,212,255,0.3)',
+              boxShadow:'0 0 40px rgba(0,212,255,0.1)',
+              padding:'24px 20px',
+              fontFamily:'Rajdhani, sans-serif', color:'rgba(220,235,255,0.85)',
+            }}>
+            {/* Header */}
+            <div style={{
+              fontFamily:'Orbitron, sans-serif', fontSize:'13px',
+              color:'#00d4ff', letterSpacing:'0.18em',
+              textShadow:'0 0 12px rgba(0,212,255,0.7)',
+              textAlign:'center', marginBottom:'20px',
+            }}>🔒 سياسة الخصوصية</div>
+
+            <div style={{ fontSize:'13px', lineHeight:1.85, textAlign:'right' }}>
+
+              <p style={{ color:'#00d4ff', fontWeight:700, marginBottom:'4px' }}>ما البيانات التي نجمعها؟</p>
+              <p style={{ marginBottom:'14px', color:'rgba(200,220,255,0.75)' }}>
+                نجمع رقم الهاتف لأغراض تسجيل الدخول وتنسيق الخدمات، والموقع الجغرافي لتوفير خدمات التوصيل والسيارات.
+                يتم تخزين بيانات اللعبة (النقاط والإنجازات) لحفظ تقدمك.
+              </p>
+
+              <p style={{ color:'#00d4ff', fontWeight:700, marginBottom:'4px' }}>كيف نستخدم بياناتك؟</p>
+              <p style={{ marginBottom:'14px', color:'rgba(200,220,255,0.75)' }}>
+                تُستخدم بياناتك <strong style={{ color:'#00f5d4' }}>حصراً</strong> لتشغيل خدمات التطبيق:
+                تسليم الطلبات، وخدمة تحديد موقع المركبات، وخدمات الرعاية الصحية، وتجربة اللعبة.
+              </p>
+
+              <p style={{ color:'#00d4ff', fontWeight:700, marginBottom:'4px' }}>هل نشارك بياناتك مع أطراف ثالثة؟</p>
+              <p style={{ marginBottom:'14px', color:'rgba(200,220,255,0.75)' }}>
+                <strong style={{ color:'#ff2d78' }}>لا.</strong> لا نبيع أو نشارك بياناتك الشخصية مع أي جهة خارجية.
+                لا نستخدم بياناتك لأغراض إعلانية.
+              </p>
+
+              <p style={{ color:'#00d4ff', fontWeight:700, marginBottom:'4px' }}>حقوق المستخدم</p>
+              <p style={{ marginBottom:'14px', color:'rgba(200,220,255,0.75)' }}>
+                يحق لك في أي وقت طلب حذف حسابك وجميع بياناتك المخزنة عبر خيار "حذف الحساب" في إعدادات حسابك.
+                يُعدّ الحذف فورياً وغير قابل للتراجع.
+              </p>
+
+              <p style={{ color:'#00d4ff', fontWeight:700, marginBottom:'4px' }}>التواصل</p>
+              <p style={{ marginBottom:'0', color:'rgba(200,220,255,0.75)' }}>
+                للاستفسارات المتعلقة بالخصوصية، تواصل مع فريق الدعم عبر الواتساب المتاح في التطبيق.
+              </p>
+            </div>
+
+            <button
+              onClick={() => setShowPrivacy(false)}
+              style={{
+                width:'100%', marginTop:'20px', padding:'12px',
+                background:'rgba(0,212,255,0.1)', border:'1px solid rgba(0,212,255,0.35)',
+                color:'#00d4ff', fontFamily:'Orbitron, sans-serif', fontSize:'9px',
+                letterSpacing:'0.14em', cursor:'pointer',
+              }}>
+              إغلاق
+            </button>
+          </div>
+        </div>
       )}
 
       {/* ── Toast ─────────────────────────────────────────────────────────── */}

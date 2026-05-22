@@ -249,7 +249,6 @@ export function ActiveOrderTracker({ mapRef, userLocation }: Props) {
         zIndexOffset: 9500,
       }).addTo(map);
       scheduleRouteRedraw(lat, lng);
-      console.log(`[ActiveOrderTracker] 🚖 first fix: ${lat.toFixed(5)}, ${lng.toFixed(5)}`);
       return;
     }
 
@@ -261,7 +260,6 @@ export function ActiveOrderTracker({ mapRef, userLocation }: Props) {
     const dlat = lat - fromLat, dlng = lng - fromLng;
     if (Math.abs(dlat) < 0.000005 && Math.abs(dlng) < 0.000005) return;
 
-    console.log(`[ActiveOrderTracker] 📡 new GPS: ${lat.toFixed(5)},${lng.toFixed(5)} Δ≈${(Math.hypot(dlat,dlng)*111000).toFixed(0)}m`);
 
     const startTime = performance.now();
 
@@ -300,7 +298,6 @@ export function ActiveOrderTracker({ mapRef, userLocation }: Props) {
     stopDriverWatch();
     activeDriverPhone.current = phone;
 
-    console.log(`[ActiveOrderTracker] 📱 subscribing to drivers where phone=${phone}`);
 
     const q = query(collection(db, 'drivers'), where('phone', '==', phone));
     driverUnsubRef.current = onSnapshot(
@@ -330,7 +327,6 @@ export function ActiveOrderTracker({ mapRef, userLocation }: Props) {
     stopDriverWatch();
     activeDriverId.current = driverId;
 
-    console.log(`[ActiveOrderTracker] 🔑 subscribing to drivers/${driverId}`);
 
     driverUnsubRef.current = onSnapshot(
       doc(db, 'drivers', driverId),
@@ -359,7 +355,6 @@ export function ActiveOrderTracker({ mapRef, userLocation }: Props) {
     stopOrderWatch();
     activeOrderDocId.current = docId;
 
-    console.log(`[ActiveOrderTracker] 📋 watching ${collection_}/${docId}`);
 
     orderUnsubRef.current = onSnapshot(
       doc(db, collection_, docId),
@@ -369,7 +364,6 @@ export function ActiveOrderTracker({ mapRef, userLocation }: Props) {
 
         // Terminal → full cleanup
         if (TERMINAL_STATUSES.has(data.status)) {
-          console.log(`[ActiveOrderTracker] order ${docId} terminal (${data.status}) — cleanup`);
           fullCleanup();
           return;
         }
@@ -421,7 +415,6 @@ export function ActiveOrderTracker({ mapRef, userLocation }: Props) {
       if (!fbUser) return;
 
       const uid = fbUser.uid;
-      console.log(`[ActiveOrderTracker] 👤 user ${uid} — subscribing to active orders`);
 
       const subscribeCol = (colName: string, type: OrderType) => {
         const q = query(

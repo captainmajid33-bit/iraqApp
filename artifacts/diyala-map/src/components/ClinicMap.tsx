@@ -51,7 +51,6 @@ async function getAvailableAgentPhones(): Promise<Set<string> | null> {
       const p = data.phone as string | undefined;
       if (p) phones.add(p.trim());
     });
-    console.log(`[DriverFilter/approved_agents] online+available: ${phones.size}`, [...phones]);
     return phones;
   } catch (e: any) {
     console.warn('[DriverFilter/approved_agents] unreachable:', e?.code);
@@ -83,7 +82,6 @@ async function getOnlineDriverPhones(): Promise<Set<string> | null> {
       console.warn('[DriverFilter/drivers] docs exist but none pass online+available filter — skipping gate');
       return null;
     }
-    console.log(`[DriverFilter/drivers] online+available with phone: ${phones.size}`, [...phones]);
     return phones;
   } catch (e: any) {
     console.warn('[DriverFilter/drivers] unreachable:', e?.code);
@@ -484,7 +482,6 @@ export function ClinicMap({
       });
 
       gasOfflineIdsRef.current = offline;
-      console.log(`[GasMerchants] offline IDs:`, [...offline]);
     }, (err) => {
       console.warn('[GasMerchants] Firestore listener error:', err?.code);
     });
@@ -1783,7 +1780,6 @@ export function ClinicMap({
                 const { drivers: synced } = await syncRes.json();
                 if (Array.isArray(synced) && synced.length > 0) {
                   raw = synced as OnlineDriver[];
-                  console.log(`[autoFindDriver] Firestore-sync: ${synced.length} driver(s) pushed to PostgreSQL`);
                 }
               }
             } catch (e) {
@@ -1808,14 +1804,6 @@ export function ClinicMap({
         }).filter(d => Number.isFinite(d.lat) && Number.isFinite(d.lng));
 
         // DEBUG ── log every driver returned by the API ──────────────────────
-        console.log(`[autoFindDriver] API returned ${drivers.length} driver(s)`, drivers.map(d=>({
-          name: d.driverName, locationId: d.locationId,
-          isOnline: d.isOnline, isBusy: d.isBusy,
-          updatedAt: d.updatedAt,
-          distKm: +haversineDist(loc.lat, loc.lng, d.lat, d.lng).toFixed(3),
-          userLat: loc.lat, userLng: loc.lng, driverLat: d.lat, driverLng: d.lng,
-          coordSource: (d.phone ?? '').trim() && liveCoords.has((d.phone ?? '').trim()) ? 'firestore' : 'postgres',
-        })));
 
         // ── Live dual-gate cross-check (approved_agents ∩ drivers) ─────────
         // getLiveFilteredPhones() reads the two onSnapshot Sets synchronously.
@@ -1831,14 +1819,11 @@ export function ClinicMap({
               return filteredPhones.has(p);
             })
           : drivers; // both gates null → trust REST only
-        console.log(`[autoFindDriver] live dual-gate (${filterSource}): ${fsFiltered.length}/${drivers.length} pass`);
 
         // ── Fixed radius, sorted nearest-first ───────────────────────────────
         const SEARCH_RADIUS_KM = 2;
         const withDist = fsFiltered
           .map(d => ({ ...d, distKm: haversineDist(loc.lat, loc.lng, d.lat, d.lng) }));
-        console.log(`[autoFindDriver] after distance calc — within ${SEARCH_RADIUS_KM} km:`,
-          withDist.filter(d => d.distKm <= SEARCH_RADIUS_KM).map(d=>({name:d.driverName, distKm:+d.distKm.toFixed(3)})));
         const nearby = withDist
           .filter(d => d.distKm <= SEARCH_RADIUS_KM)
           .sort((a, b) => a.distKm - b.distKm);
@@ -2134,7 +2119,6 @@ export function ClinicMap({
               const { drivers: synced } = await syncRes.json();
               if (Array.isArray(synced) && synced.length > 0) {
                 rawDrivers = synced as DriverRow[];
-                console.log(`[dispatchTaxiNow] Firestore-sync: ${synced.length} driver(s) pushed to PostgreSQL`);
               }
             }
           } catch (e) {
@@ -2152,8 +2136,6 @@ export function ClinicMap({
         const fresh = phone ? liveCoords.get(phone) : undefined;
         return { ...d, lat: fresh?.lat ?? Number(d.lat), lng: fresh?.lng ?? Number(d.lng) };
       }).filter(d => Number.isFinite(d.lat) && Number.isFinite(d.lng));
-      console.log(`[dispatchTaxiNow] API ${rawDrivers.length} driver(s), Firestore coords overlay: ${
-        drivers.filter(d => liveCoords.has((d.phone ?? '').trim())).length} matched`);
 
       // ── Live dual-gate cross-check (approved_agents ∩ drivers) ──────────────
       const { phones: dispatchFilterPhones, source: dispatchFilterSrc } = getLiveFilteredPhones();
@@ -2164,15 +2146,12 @@ export function ClinicMap({
             return dispatchFilterPhones.has(p);
           })
         : drivers;
-      console.log(`[dispatchTaxiNow] live dual-gate (${dispatchFilterSrc}): ${fsFilteredDrivers.length}/${drivers.length} pass`);
 
       const available = fsFilteredDrivers
         .map(d=>({ ...d, distKm: haversineDist(fromPt.lat, fromPt.lng, d.lat, d.lng) }))
         .filter(d=>d.distKm <= SEARCH_RADIUS_KM)
         .sort((a,b)=>a.distKm - b.distKm);
 
-      console.log(`[dispatchTaxiNow] ${available.length} driver(s) within ${SEARCH_RADIUS_KM} km`,
-        available.map(d=>({ name:d.driverName, distKm:+d.distKm.toFixed(3), coordSrc: liveCoords.has((d.phone??'').trim()) ? 'firestore' : 'postgres' })));
 
       if (available.length === 0) {
         setTaxiNoDriverSnack(true);
@@ -2216,7 +2195,6 @@ export function ClinicMap({
             method: 'POST', headers: {'Content-Type':'application/json'}, body: orderBody,
           });
           oOk = r.ok; oStatus = r.status; oData = r.json;
-          console.log(`[dispatchTaxiNow] POST attempt ${attempt+1} → status=${oStatus}`, oData);
           if (oOk || oStatus === 400 || oStatus === 409) break; // success or definitive error
         } catch (netErr) {
           console.warn(`[dispatchTaxiNow] POST attempt ${attempt+1} network error:`, netErr);
@@ -2712,7 +2690,6 @@ export function ClinicMap({
         prevDriverPhonesRef.current = new Set(phones);
 
         if (hasNewPhone && loopActiveRef.current) {
-          console.log(`[LiveFilter/drivers] new driver(s) detected while loop active — triggering search`);
           if (newDriverSearchTimer.current) clearTimeout(newDriverSearchTimer.current);
           newDriverSearchTimer.current = setTimeout(() => {
             if (loopActiveRef.current) autoFindDriverRef.current();
@@ -2725,12 +2702,10 @@ export function ClinicMap({
         if (loopActiveRef.current && !redirectLockRef.current) {
           const curPhone = activeDriverPhoneRef.current;
           if (curPhone && !phones.has(curPhone)) {
-            console.log(`[LiveFilter/drivers] current driver (${curPhone}) went offline — redirecting`);
             redirectToNextRef.current();
           }
         }
 
-        console.log(`[LiveFilter/drivers] online+available: ${phones.size}`, [...phones]);
       },
       (err) => {
         console.warn('[LiveFilter/drivers] snapshot error:', err?.code);
@@ -2753,7 +2728,6 @@ export function ClinicMap({
         });
         // Use null when 0 phones so REST drivers aren't blocked by an empty gate
         liveAvailableAgentPhonesRef.current = phones.size > 0 ? phones : null;
-        console.log(`[LiveFilter/approved_agents] available+online phones: ${phones.size}`, [...phones]);
       },
       (err) => {
         console.warn('[LiveFilter/approved_agents] snapshot error:', err?.code);
@@ -3096,7 +3070,6 @@ export function ClinicMap({
           const matchByPhone = phone && phone === activeDriverPhoneRef.current;
           const matchById    = driver.locationId && driver.locationId === activeDriverIdRef.current;
           if (matchByPhone || matchById) {
-            console.log(`[driver_update SSE] current driver (${phone || driver.locationId}) went offline — redirecting`);
             redirectToNextRef.current();
           }
         }
@@ -3350,13 +3323,6 @@ export function ClinicMap({
 
       const SEARCH_RADIUS_KM = 2;
 
-      console.log(`[redirectToNext] API ${drivers.length} driver(s), ignored:[${[...loopIgnoredRef.current].join(',')}]`,
-        drivers.map(d => ({
-          name: d.driverName, locationId: d.locationId,
-          distKm: +haversineDist(loc.lat, loc.lng, d.lat, d.lng).toFixed(3),
-          ignored: loopIgnoredRef.current.has(d.locationId),
-          coordSource: (d.phone ?? '').trim() && liveCoords2.has((d.phone ?? '').trim()) ? 'firestore' : 'postgres',
-        })));
 
       const { phones: filteredPhones2, source: filterSource2 } = getLiveFilteredPhones();
       const fsFiltered = filteredPhones2 !== null
@@ -3366,14 +3332,12 @@ export function ClinicMap({
             return filteredPhones2.has(p);
           })
         : drivers; // both gates null → trust REST only
-      console.log(`[redirectToNext] dual-gate (${filterSource2}): ${fsFiltered.length}/${drivers.length} pass`);
 
       const available = fsFiltered
         .filter(d => !loopIgnoredRef.current.has(d.locationId))
         .map(d => ({ ...d, distKm: haversineDist(loc.lat, loc.lng, d.lat, d.lng) }))
         .filter(d => d.distKm <= SEARCH_RADIUS_KM)
         .sort((a, b) => a.distKm - b.distKm);
-      console.log(`[redirectToNext] available: ${available.length}`, available.map(d=>({name:d.driverName, distKm:+d.distKm.toFixed(3)})));
 
       if (available.length === 0) {
         redirectLockRef.current = false; isRedirectingRef.current = false;

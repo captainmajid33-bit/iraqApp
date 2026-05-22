@@ -1862,7 +1862,7 @@ export function ChallengeModal({ onClose }: Props) {
               textShadow: neon(C.red, 10), marginBottom: '8px',
             }}>تحدي صديق</div>
             <div style={{ color: C.dim, fontSize: '12px', lineHeight: 1.7, maxWidth: '260px', margin: '0 auto' }}>
-              أنشئ رابط تحدي خاص وشاركه مع صديق — من يحصل على أعلى نقطة يفوز بالرهان!
+              أنشئ رابط تحدي خاص وشاركه مع صديق — من يحصل على أعلى نقطة يفوز برسوم التحدي!
             </div>
           </div>
 
@@ -1897,7 +1897,7 @@ export function ChallengeModal({ onClose }: Props) {
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
                 <label style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '11px', color: C.dim, letterSpacing: '0.08em' }}>
-                  مبلغ الرهان (دينار عراقي)
+                  رسوم التحدي (دينار عراقي)
                 </label>
                 <input
                   type="number" min={100} max={50000} step={100}
@@ -1925,7 +1925,7 @@ export function ChallengeModal({ onClose }: Props) {
               </div>
               {duelBet > walletBal && (
                 <div style={{ fontSize: '11px', color: C.red, textAlign: 'center', fontFamily: 'Rajdhani, sans-serif' }}>
-                  ⚠ الرهان أكبر من رصيدك ({walletBal.toLocaleString()} د.ع)
+                  ⚠ رسوم التحدي أكبر من رصيدك ({walletBal.toLocaleString()} د.ع)
                 </div>
               )}
               <button
@@ -1969,7 +1969,7 @@ export function ChallengeModal({ onClose }: Props) {
                   transition: 'all 0.2s', opacity: duelBet > walletBal ? 0.5 : 1,
                 }}
               >
-                {duelCreating ? '⏳ جاري الإنشاء...' : '🔗 أنشئ التحدي وادفع الرهان'}
+                {duelCreating ? '⏳ جاري الإنشاء...' : '🔗 أنشئ التحدي وادفع رسوم التحدي'}
               </button>
               {duelJoinErr && (
                 <div style={{ fontSize: '11px', color: C.red, textAlign: 'center', fontFamily: 'Rajdhani, sans-serif' }}>
@@ -2023,7 +2023,7 @@ export function ChallengeModal({ onClose }: Props) {
                   transition: 'all 0.2s',
                 }}
               >
-                {duelJoining ? '⏳ جاري الانضمام...' : '⚔ انضم وادفع الرهان'}
+                {duelJoining ? '⏳ جاري الانضمام...' : '⚔ انضم وادفع رسوم التحدي'}
               </button>
             </div>
           ) : duelCode ? (
@@ -2043,7 +2043,7 @@ export function ChallengeModal({ onClose }: Props) {
                 textShadow: neon(C.green, 12),
               }}>{duelCode}</div>
               <div style={{ fontSize: '11px', color: C.dim }}>
-                الرهان: <span style={{ color: C.yellow }}>{duelBet.toLocaleString()} د.ع</span>
+                رسوم التحدي: <span style={{ color: C.yellow }}>{duelBet.toLocaleString()} د.ع</span>
                 {'  '}<span style={{ color: C.dim, fontSize: '9px' }}>تم خصمه من رصيدك</span>
               </div>
               <button
