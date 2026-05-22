@@ -151,6 +151,26 @@ router.patch("/locations/:id", async (req, res) => {
     const id = Number(req.params.id);
     if (isNaN(id)) { res.status(400).json({ error: "Invalid location ID" }); return; }
 
+    // ── GPS-only guard: taxi & gas positions must ONLY come from live Partner Hub GPS.
+    // Blocking lat/lng writes for these categories prevents a manually-dragged marker
+    // from pinning a stale location that breaks the haversine radar.
+    const hasLatLng = req.body && ("lat" in req.body || "lng" in req.body);
+    if (hasLatLng) {
+      const [existingLoc] = await db
+        .select({ category: locationsTable.category })
+        .from(locationsTable)
+        .where(eq(locationsTable.id, id));
+      const cat = existingLoc?.category ?? "";
+      if (cat === "taxi" || cat === "gas") {
+        console.warn(`[PATCH /locations/${id}] BLOCKED lat/lng override for GPS-only category="${cat}"`);
+        res.status(403).json({
+          error: "تعذّر تغيير الموقع",
+          reason: `فئة "${cat}" تعتمد على GPS حي من تطبيق الوكيل فقط — لا يمكن تثبيت الإحداثيات يدوياً`,
+        });
+        return;
+      }
+    }
+
     let data: Record<string, unknown>;
     if (isAdmin) {
       // Full update — parse with partial schema (all fields optional)
