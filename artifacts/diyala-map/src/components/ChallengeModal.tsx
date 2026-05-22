@@ -17,7 +17,7 @@ interface Props {
   onClose: () => void;
 }
 
-type Phase = 'menu' | 'loading' | 'playing' | 'gameover' | 'leaderboard' | 'shop' | 'duel';
+type Phase = 'menu' | 'loading' | 'playing' | 'gameover' | 'leaderboard' | 'shop' | 'duel' | 'waiting';
 
 interface GameProfile {
   firebaseUid:   string;
@@ -179,8 +179,6 @@ export function ChallengeModal({ onClose }: Props) {
   const [score,       setScore]       = useState(0);
   const [timeLeft,    setTimeLeft]    = useState(60);
   const [board,       setBoard]       = useState<LeaderEntry[]>([]);
-  const [submitting,  setSubmitting]  = useState(false);
-  const [submitErr,   setSubmitErr]   = useState('');
   const [boardLoading,setBoardLoading]= useState(false);
 
   // ── Profile / shop state ───────────────────────────────────────────────────
@@ -202,6 +200,7 @@ export function ChallengeModal({ onClose }: Props) {
   const [shopMsg,     setShopMsg]     = useState('');
   const [redeeming,   setRedeeming]   = useState(false);
   const [dynSkins,    setDynSkins]    = useState<DynSkinDef[]>([]);
+  const [showCharge,  setShowCharge]  = useState(false);
 
   // ── Global session state ────────────────────────────────────────────────────
   const [sessionItemsLeft,  setSessionItemsLeft]  = useState<number | null>(null);
@@ -267,6 +266,7 @@ export function ChallengeModal({ onClose }: Props) {
   const bgImgRef        = useRef<HTMLImageElement | null>(null);
   const audioCtxRef     = useRef<AudioContext | null>(null);
   const comboTimerRef   = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const waitingPollRef  = useRef<ReturnType<typeof setInterval> | null>(null);
   const touchStartTsRef = useRef(0);
   const holdTimerRef    = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastTapTsRef    = useRef(0);
@@ -532,6 +532,7 @@ export function ChallengeModal({ onClose }: Props) {
     gs.current.running = false;
     cancelAnimationFrame(rafRef.current);
     if (timerRef.current) clearInterval(timerRef.current);
+    if (waitingPollRef.current) clearInterval(waitingPollRef.current);
   }, []);
 
   // ── End game ───────────────────────────────────────────────────────────────
@@ -539,36 +540,81 @@ export function ChallengeModal({ onClose }: Props) {
     gs.current.running = false;
     cancelAnimationFrame(rafRef.current);
     if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
+
     const finalScore = gs.current.score;
     setScore(finalScore);
     setDuelResultMsg('');
-    setPhase('gameover');
+
+    const uid    = userUidRef.current ?? auth.currentUser?.uid ?? '';
     const duelId = activeDuelIdRef.current;
-    const uid    = userUidRef.current;
-    if (duelId && uid) {
-      fetch('/api/game/duel/score', {
+
+    // ── Auto-save to global leaderboard (fire-and-forget) ──────────────────
+    if (uid) {
+      fetch('/api/game/score', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ firebaseUid: uid, duelId, score: finalScore }),
-      }).then(r => r.ok ? r.json() : null)
-        .then((d: { done?: boolean; youWon?: boolean; winnerScore?: number; loserScore?: number; prize?: number; waiting?: boolean } | null) => {
-          if (!d) return;
-          if (d.done) {
-            const msg = d.youWon
-              ? `🏆 فزت! ربحت ${(d.prize ?? 0).toLocaleString()} د.ع`
-              : `❌ خسرت! نتيجة الفائز: ${d.winnerScore}`;
-            setDuelResultMsg(msg);
-            const u = auth.currentUser;
-            if (u && d.youWon && d.prize) {
-              // Credit prize to Firestore balance (محفظة التطبيق)
-              runTransaction(db, async txn => {
-                txn.update(doc(db, 'users', u.uid), { balance: increment(d.prize!) });
-              }).catch(() => {});
-            }
-          } else if (d.waiting) {
-            setDuelResultMsg('⏳ تم تسجيل نتيجتك — بانتظار الخصم...');
-          }
-        }).catch(() => {});
+        body: JSON.stringify({
+          userId:   uid,
+          userName: auth.currentUser?.displayName || userNameRef.current || 'لاعب',
+          score:    finalScore,
+        }),
+      }).catch(() => {});
     }
+
+    if (!duelId || !uid) { setPhase('gameover'); return; }
+
+    // ── Versus Mode: submit duel score → waiting phase ─────────────────────
+    setPhase('waiting');
+    setDuelResultMsg('⏳ بانتظار الخصم...');
+
+    type DuelResult = { done?: boolean; youWon?: boolean; prize?: number; winnerScore?: number; loserScore?: number; alreadyPaid?: boolean };
+
+    const resolveResult = (d: DuelResult) => {
+      if (waitingPollRef.current) { clearInterval(waitingPollRef.current); waitingPollRef.current = null; }
+      activeDuelIdRef.current = null;
+      const msg = d.youWon
+        ? `🏆 فزت! ربحت ${(d.prize ?? 0).toLocaleString()} د.ع`
+        : `❌ خسرت — نتيجة الفائز: ${d.winnerScore ?? 0}`;
+      setDuelResultMsg(msg);
+      if (d.youWon && d.prize) {
+        const u = auth.currentUser;
+        if (u) runTransaction(db, async txn => {
+          txn.update(doc(db, 'users', u.uid), { balance: increment(d.prize!) });
+        }).catch(() => {});
+      }
+      // Show result for 2.5s then go to gameover
+      setTimeout(() => setPhase('gameover'), 2500);
+    };
+
+    const startPoll = () => {
+      if (waitingPollRef.current) clearInterval(waitingPollRef.current);
+      waitingPollRef.current = setInterval(async () => {
+        try {
+          const r = await fetch(`/api/game/duel/${duelId}?uid=${uid}`);
+          if (!r.ok) return;
+          const d = await r.json();
+          if (d.status === 'done' && d.done) resolveResult(d);
+        } catch { /* retry */ }
+      }, 3000);
+      // Auto-timeout after 10 minutes — unlock gracefully
+      setTimeout(() => {
+        if (waitingPollRef.current) {
+          clearInterval(waitingPollRef.current);
+          waitingPollRef.current = null;
+          setDuelResultMsg('⚠ انتهت مهلة انتظار الخصم');
+          setTimeout(() => { setPhase('gameover'); activeDuelIdRef.current = null; }, 2000);
+        }
+      }, 600_000);
+    };
+
+    fetch('/api/game/duel/score', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ firebaseUid: uid, duelId, score: finalScore }),
+    }).then(r => r.ok ? r.json() : null)
+      .then((d: DuelResult | null) => {
+        if (!d) { setPhase('gameover'); return; }
+        if (d.done && !d.alreadyPaid) { resolveResult(d); }
+        else { startPoll(); }
+      }).catch(() => setPhase('gameover'));
   }, []);
 
   // Jump mechanic removed — horizontal-only runner
@@ -1219,7 +1265,6 @@ export function ChallengeModal({ onClose }: Props) {
   const startGame = useCallback(async () => {
     if (!config) return;
     setPhase('loading');
-    setSubmitErr('');
 
     const loadImg = (url: string): Promise<HTMLImageElement | null> => {
       if (!url) return Promise.resolve(null);
@@ -1324,31 +1369,6 @@ export function ChallengeModal({ onClose }: Props) {
     rafRef.current = requestAnimationFrame(loop);
   }, [config, drawFrame, endGame]);
 
-  // ── Submit score ───────────────────────────────────────────────────────────
-  const submitScore = useCallback(async () => {
-    const user = auth.currentUser;
-    if (!user) { setSubmitErr('يجب تسجيل الدخول لحفظ نتيجتك'); return; }
-    setSubmitting(true);
-    setSubmitErr('');
-    try {
-      const r = await fetch('/api/game/score', {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({
-          userId:   user.uid,
-          userName: user.displayName || 'لاعب',
-          score:    gs.current.score,
-        }),
-      });
-      if (!r.ok) throw new Error('failed');
-      await loadBoard();
-      setPhase('leaderboard');
-    } catch {
-      setSubmitErr('فشل إرسال النتيجة، حاول مجدداً');
-    } finally {
-      setSubmitting(false);
-    }
-  }, [loadBoard]);
 
   // ── Pressing controls ──────────────────────────────────────────────────────
   const pressLeft  = useCallback(() => { gs.current.pressing = 'left';  }, []);
@@ -1490,9 +1510,67 @@ export function ChallengeModal({ onClose }: Props) {
       {(phase === 'menu' || phase === 'loading') && (
         <div style={{
           flex: 1, display: 'flex', flexDirection: 'column',
-          alignItems: 'center', justifyContent: 'center', gap: '28px',
-          padding: '24px',
+          alignItems: 'center', justifyContent: 'center', gap: '22px',
+          padding: '20px',
         }}>
+
+          {/* ── Wallet + Points Hub ────────────────────────────────────────── */}
+          {(walletBal > 0 || (profile && profile.gamePoints > 0)) && (
+            <div style={{
+              width: '100%', maxWidth: '320px', borderRadius: '12px', padding: '14px 16px',
+              background: 'linear-gradient(135deg, rgba(0,212,255,0.08), rgba(245,197,24,0.06))',
+              border: '1px solid rgba(0,212,255,0.25)',
+              boxShadow: '0 0 20px rgba(0,212,255,0.06)',
+            }}>
+              {/* Balances row */}
+              <div style={{ display: 'flex', gap: '12px', marginBottom: '12px' }}>
+                <div style={{ flex: 1, textAlign: 'center', padding: '8px 0', background: 'rgba(245,197,24,0.08)', borderRadius: '8px', border: '1px solid rgba(245,197,24,0.2)' }}>
+                  <div style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '15px', color: C.yellow, fontWeight: 700, textShadow: neon(C.yellow, 6) }}>
+                    {walletBal.toLocaleString()}
+                  </div>
+                  <div style={{ fontSize: '9px', color: C.dim, marginTop: '2px', letterSpacing: '0.05em' }}>💰 رصيد المحفظة (د.ع)</div>
+                </div>
+                {profile && (
+                  <div style={{ flex: 1, textAlign: 'center', padding: '8px 0', background: 'rgba(0,245,212,0.06)', borderRadius: '8px', border: '1px solid rgba(0,245,212,0.18)' }}>
+                    <div style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '15px', color: C.green, fontWeight: 700, textShadow: neon(C.green, 6) }}>
+                      {profile.gamePoints.toLocaleString()}
+                    </div>
+                    <div style={{ fontSize: '9px', color: C.dim, marginTop: '2px', letterSpacing: '0.05em' }}>⭐ نقاط اللعبة</div>
+                  </div>
+                )}
+              </div>
+              {/* Action buttons */}
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <button
+                  onClick={() => setShowCharge(true)}
+                  style={{
+                    flex: 1, padding: '9px 0', borderRadius: '7px',
+                    background: 'rgba(0,212,255,0.12)', border: '1px solid rgba(0,212,255,0.35)',
+                    color: C.blue, fontFamily: 'Orbitron, sans-serif', fontSize: '9px',
+                    letterSpacing: '0.08em', cursor: 'pointer',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '5px',
+                  }}>
+                  ⚡ شحن رصيد
+                </button>
+                <button
+                  onClick={redeemPoints}
+                  disabled={redeeming || !profile || profile.gamePoints < 5000}
+                  style={{
+                    flex: 1, padding: '9px 0', borderRadius: '7px',
+                    background: (!profile || profile.gamePoints < 5000) ? 'rgba(255,255,255,0.03)' : 'rgba(0,245,212,0.12)',
+                    border: `1px solid ${(!profile || profile.gamePoints < 5000) ? 'rgba(255,255,255,0.1)' : 'rgba(0,245,212,0.35)'}`,
+                    color: (!profile || profile.gamePoints < 5000) ? C.dim : C.green,
+                    fontFamily: 'Orbitron, sans-serif', fontSize: '9px',
+                    letterSpacing: '0.08em', cursor: (!profile || profile.gamePoints < 5000) ? 'not-allowed' : 'pointer',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '5px',
+                    opacity: redeeming ? 0.6 : 1,
+                  }}>
+                  {redeeming ? '⏳' : '💱 تحويل أرباح'}
+                </button>
+              </div>
+            </div>
+          )}
+
           <div style={{ textAlign: 'center' }}>
             <div style={{ fontSize: '64px', marginBottom: '12px' }}>🏆</div>
             <div style={{
@@ -1793,29 +1871,7 @@ export function ChallengeModal({ onClose }: Props) {
             }}>{score}</div>
           </div>
 
-          {submitErr && (
-            <div style={{ color: C.red, fontSize: '12px', textAlign: 'center' }}>{submitErr}</div>
-          )}
-
           <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', width: '100%', maxWidth: '300px' }}>
-            <button
-              onClick={submitScore}
-              disabled={submitting}
-              style={{
-                padding: '15px', borderRadius: '6px',
-                background: `linear-gradient(135deg, ${C.green}22, ${C.green}11)`,
-                border: `1.5px solid ${C.green}88`,
-                color: C.green, fontFamily: 'Orbitron, sans-serif',
-                fontSize: '13px', letterSpacing: '0.1em',
-                cursor: submitting ? 'not-allowed' : 'pointer',
-                textShadow: neon(C.green, 6),
-                opacity: submitting ? 0.6 : 1,
-                transition: 'all 0.2s',
-              }}
-            >
-              {submitting ? '⏳ جاري الحفظ...' : '💾 احفظ نتيجتي'}
-            </button>
-
             <button
               onClick={async () => { await loadBoard(); setPhase('leaderboard'); }}
               style={{
@@ -1830,19 +1886,109 @@ export function ChallengeModal({ onClose }: Props) {
               🏅 قائمة متصدري المعدل
             </button>
 
+            {/* Replay only available outside duel mode */}
+            {!activeDuelIdRef.current && (
+              <button
+                onClick={startGame}
+                style={{
+                  padding: '13px', borderRadius: '6px',
+                  background: `${C.purple}11`,
+                  border: `1px solid ${C.purple}44`,
+                  color: C.purple, fontFamily: 'Orbitron, sans-serif',
+                  fontSize: '12px', letterSpacing: '0.1em',
+                  cursor: 'pointer', transition: 'all 0.2s',
+                }}
+              >
+                🔄 العب مجدداً
+              </button>
+            )}
+
             <button
-              onClick={startGame}
+              onClick={() => setPhase('menu')}
               style={{
-                padding: '13px', borderRadius: '6px',
-                background: `${C.purple}11`,
-                border: `1px solid ${C.purple}44`,
-                color: C.purple, fontFamily: 'Orbitron, sans-serif',
-                fontSize: '12px', letterSpacing: '0.1em',
+                padding: '12px', borderRadius: '6px',
+                background: 'rgba(255,255,255,0.03)',
+                border: `1px solid ${C.border}`,
+                color: C.dim, fontFamily: 'Orbitron, sans-serif',
+                fontSize: '11px', letterSpacing: '0.1em',
                 cursor: 'pointer', transition: 'all 0.2s',
               }}
             >
-              🔄 العب مجدداً
+              ← القائمة الرئيسية
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* ── WAITING FOR OPPONENT ─────────────────────────────────────────────── */}
+      {phase === 'waiting' && (
+        <div style={{
+          flex: 1, display: 'flex', flexDirection: 'column',
+          alignItems: 'center', justifyContent: 'center', gap: '28px',
+          padding: '28px',
+          background: 'radial-gradient(ellipse at center, rgba(0,212,255,0.04) 0%, transparent 70%)',
+        }}>
+          {/* Score display */}
+          <div style={{ textAlign: 'center' }}>
+            <div style={{ fontSize: '44px', marginBottom: '8px' }}>⚔</div>
+            <div style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '13px', color: C.dim, letterSpacing: '0.1em', marginBottom: '4px' }}>
+              نتيجتك النهائية
+            </div>
+            <div style={{
+              fontFamily: 'Orbitron, sans-serif', fontSize: '52px',
+              color: C.yellow, letterSpacing: '0.04em',
+              textShadow: neon(C.yellow, 14),
+            }}>{score}</div>
+          </div>
+
+          {/* Waiting indicator */}
+          <div style={{
+            padding: '20px 32px', borderRadius: '16px',
+            background: 'rgba(0,212,255,0.06)',
+            border: '1.5px solid rgba(0,212,255,0.3)',
+            boxShadow: '0 0 32px rgba(0,212,255,0.08)',
+            textAlign: 'center', minWidth: '240px',
+          }}>
+            <div style={{
+              fontSize: '36px', marginBottom: '10px',
+              display: 'inline-block',
+              animation: duelResultMsg && !duelResultMsg.startsWith('⏳') ? 'none' : 'cm-spin 1.4s linear infinite',
+            }}>
+              {duelResultMsg?.startsWith('🏆') ? '🏆' : duelResultMsg?.startsWith('❌') ? '💀' : '⏳'}
+            </div>
+            <div style={{
+              fontFamily: 'Orbitron, sans-serif', fontSize: '12px',
+              color: duelResultMsg?.startsWith('🏆') ? C.yellow : duelResultMsg?.startsWith('❌') ? C.red : C.blue,
+              letterSpacing: '0.1em',
+              textShadow: duelResultMsg?.startsWith('🏆') ? neon(C.yellow, 8) : duelResultMsg?.startsWith('❌') ? neon(C.red, 6) : neon(C.blue, 6),
+            }}>
+              {duelResultMsg || '⏳ بانتظار الخصم...'}
+            </div>
+            {(!duelResultMsg || duelResultMsg.startsWith('⏳')) && (
+              <div style={{ fontSize: '10px', color: 'rgba(0,212,255,0.4)', marginTop: '8px', fontFamily: 'Rajdhani, sans-serif' }}>
+                يتم فحص النتائج كل 3 ثوانٍ
+              </div>
+            )}
+          </div>
+
+          {/* Locked buttons */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', width: '100%', maxWidth: '260px' }}>
+            <button disabled style={{
+              padding: '13px', borderRadius: '6px', cursor: 'not-allowed',
+              background: 'rgba(255,255,255,0.02)',
+              border: `1px solid ${C.border}`,
+              color: C.dim, fontFamily: 'Orbitron, sans-serif',
+              fontSize: '11px', letterSpacing: '0.1em', opacity: 0.35,
+              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '7px',
+            }}>🔒 إعادة اللعب — مقفل حتى يلعب الخصم</button>
+            <button disabled style={{
+              padding: '11px', borderRadius: '6px', cursor: 'not-allowed',
+              background: 'rgba(255,255,255,0.02)',
+              border: `1px solid ${C.border}`,
+              color: C.dim, fontFamily: 'Orbitron, sans-serif',
+              fontSize: '10px', letterSpacing: '0.08em', opacity: 0.25,
+              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '7px',
+            }}>🔒 خروج — مقفل</button>
           </div>
         </div>
       )}
@@ -2441,10 +2587,65 @@ export function ChallengeModal({ onClose }: Props) {
         </div>
       )}
 
+      {/* ── Charge Balance Modal ─────────────────────────────────────────────── */}
+      {showCharge && (
+        <div style={{
+          position: 'fixed', inset: 0, zIndex: 9900,
+          background: 'rgba(5,8,15,0.94)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          padding: '20px',
+        }} onClick={() => setShowCharge(false)}>
+          <div onClick={e => e.stopPropagation()} style={{
+            width: '100%', maxWidth: '360px',
+            background: 'rgba(10,14,25,0.98)',
+            border: '1.5px solid rgba(0,212,255,0.35)',
+            boxShadow: '0 0 40px rgba(0,212,255,0.12)',
+            borderRadius: '12px', padding: '24px 20px',
+            fontFamily: 'Rajdhani, sans-serif', direction: 'rtl',
+          }}>
+            <div style={{
+              fontFamily: 'Orbitron, sans-serif', fontSize: '13px',
+              color: C.blue, letterSpacing: '0.16em',
+              textShadow: neon(C.blue, 8), textAlign: 'center', marginBottom: '18px',
+            }}>⚡ شحن رصيد المحفظة</div>
+
+            <div style={{ fontSize: '13px', color: 'rgba(200,220,255,0.75)', lineHeight: 1.9, textAlign: 'right', marginBottom: '16px' }}>
+              <p style={{ marginBottom: '10px' }}>
+                رصيدك الحالي: <span style={{ color: C.yellow, fontFamily: 'Orbitron, sans-serif', fontSize: '15px' }}>{walletBal.toLocaleString()} د.ع</span>
+              </p>
+              <p style={{ marginBottom: '10px', color: 'rgba(180,200,255,0.6)', fontSize: '12px' }}>
+                لشحن رصيدك، تواصل مع إدارة التطبيق عبر واتساب أو قم بالتحويل المصرفي. سيتم إضافة الرصيد خلال دقائق.
+              </p>
+              <div style={{
+                padding: '12px 14px', borderRadius: '8px',
+                background: 'rgba(0,212,255,0.06)',
+                border: '1px solid rgba(0,212,255,0.2)',
+                fontSize: '11px', color: C.blue,
+              }}>
+                💡 يمكنك أيضاً تحويل نقاط اللعبة إلى رصيد عبر زر <strong>"تحويل أرباح"</strong> (يتطلب 5000 نقطة كحد أدنى)
+              </div>
+            </div>
+
+            <button
+              onClick={() => setShowCharge(false)}
+              style={{
+                width: '100%', padding: '12px', borderRadius: '7px', marginTop: '4px',
+                background: 'rgba(0,212,255,0.1)', border: '1px solid rgba(0,212,255,0.35)',
+                color: C.blue, fontFamily: 'Orbitron, sans-serif', fontSize: '9px',
+                letterSpacing: '0.14em', cursor: 'pointer',
+              }}>
+              إغلاق
+            </button>
+          </div>
+        </div>
+      )}
+
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Rajdhani:wght@400;500;600;700&display=swap');
-        @keyframes pulse  { from { opacity:1 } to { opacity:0.4 } }
-        @keyframes slideIn{ from { transform:translateX(20px); opacity:0 } to { transform:translateX(0); opacity:1 } }
+        @keyframes pulse    { from { opacity:1 } to { opacity:0.4 } }
+        @keyframes slideIn  { from { transform:translateX(20px); opacity:0 } to { transform:translateX(0); opacity:1 } }
+        @keyframes cm-spin  { from { transform:rotate(0deg) } to { transform:rotate(360deg) } }
+        @keyframes cm-pulse { 0%,100% { opacity:1; transform:scale(1) } 50% { opacity:0.6; transform:scale(0.95) } }
       `}</style>
     </div>
   );

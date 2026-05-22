@@ -715,13 +715,17 @@ router.post("/game/shop/upgrade", async (req: Request, res: Response) => {
 
 // ── Friendly Duels — gameCash-locked matchmaking ─────────────────────────────
 interface DuelRoom {
-  creatorId:     string;  // Firebase UID
-  joinerId?:     string;  // Firebase UID
+  creatorId:     string;
+  joinerId?:     string;
   bet:           number;
   createdAt:     number;
   status:        'waiting' | 'active' | 'done';
   creatorScore?: number;
   joinerScore?:  number;
+  winnerId?:     string;
+  prize?:        number;
+  winnerScore?:  number;
+  loserScore?:   number;
 }
 const duelRooms = new Map<string, DuelRoom>();
 
@@ -754,12 +758,17 @@ router.post("/game/duel/create", async (req: Request, res: Response) => {
   }
 });
 
-// GET /api/game/duel/:duelId — get room info
+// GET /api/game/duel/:duelId — get room info (pass ?uid=FIREBASE_UID for personalised result)
 router.get("/game/duel/:duelId", async (req: Request, res: Response) => {
   const duelId = (req.params.duelId ?? '').toUpperCase();
+  const uid    = (req.query.uid ?? '') as string;
   const room   = duelRooms.get(duelId);
   if (!room) { res.status(404).json({ error: "not_found" }); return; }
-  res.json({ duelId, bet: room.bet, status: room.status, hasJoiner: !!room.joinerId });
+  const base = { duelId, bet: room.bet, status: room.status, hasJoiner: !!room.joinerId };
+  if (room.status === 'done' && room.winnerId) {
+    return res.json({ ...base, done: true, youWon: uid ? room.winnerId === uid : undefined, prize: room.prize, winnerScore: room.winnerScore, loserScore: room.loserScore });
+  }
+  res.json(base);
 });
 
 // POST /api/game/duel/accept — client already deducted from Firestore; server just activates room
@@ -797,8 +806,11 @@ router.post("/game/duel/score", async (req: Request, res: Response) => {
     const winnerScore = Math.max(room.creatorScore, room.joinerScore);
     const loserScore  = Math.min(room.creatorScore, room.joinerScore);
     const prize       = room.bet * 2;
-    room.status = 'done';
-    // Payout handled client-side via Firestore (winner calls increment on their balance)
+    room.status      = 'done';
+    room.winnerId    = creatorWon ? room.creatorId : (room.joinerId ?? '');
+    room.prize       = prize;
+    room.winnerScore = winnerScore;
+    room.loserScore  = loserScore;
     const youWon = (isCreator && creatorWon) || (!isCreator && !creatorWon);
     res.json({ done: true, youWon, winnerScore, loserScore, prize });
   } else {
