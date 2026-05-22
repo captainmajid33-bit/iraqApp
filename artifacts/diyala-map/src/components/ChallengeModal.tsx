@@ -16,7 +16,24 @@ interface Props {
   onClose: () => void;
 }
 
-type Phase = 'menu' | 'loading' | 'playing' | 'gameover' | 'leaderboard';
+type Phase = 'menu' | 'loading' | 'playing' | 'gameover' | 'leaderboard' | 'shop';
+
+interface GameProfile {
+  firebaseUid:   string;
+  gamePoints:    number;
+  gameCash:      number;
+  unlockedSkins: string[];
+  activeSkin:    string;
+}
+
+interface SkinDef {
+  id:       string;
+  name:     string;
+  emoji:    string;
+  price:    number;
+  imageUrl: string;
+  color:    string;
+}
 
 interface GameConfig {
   characterUrl: string;
@@ -54,7 +71,43 @@ const C = {
 
 const neon = (c: string, b = 8) => `0 0 ${b}px ${c}88, 0 0 ${b * 2}px ${c}44`;
 
-// ── Game constants ────────────────────────────────────────────────────────────
+// ── Skins catalog ─────────────────────────────────────────────────────────────
+const SKINS: SkinDef[] = [
+  {
+    id:       'skin_captain',
+    name:     'كابتن كشخة',
+    emoji:    '🧢',
+    price:    1000,
+    imageUrl: 'https://api.dicebear.com/7.x/bottts/svg?seed=captain&backgroundColor=00f5d4',
+    color:    '#00f5d4',
+  },
+  {
+    id:       'skin_gold',
+    name:     'السكن الذهبي',
+    emoji:    '👑',
+    price:    2500,
+    imageUrl: 'https://api.dicebear.com/7.x/bottts/svg?seed=gold&backgroundColor=f5c518',
+    color:    '#f5c518',
+  },
+  {
+    id:       'skin_gas',
+    name:     'مندوب الغاز السريع',
+    emoji:    '🔥',
+    price:    1500,
+    imageUrl: 'https://api.dicebear.com/7.x/bottts/svg?seed=gasman&backgroundColor=ff2d78',
+    color:    '#ff2d78',
+  },
+  {
+    id:       'skin_ninja',
+    name:     'النينجا الأسطوري',
+    emoji:    '🥷',
+    price:    3000,
+    imageUrl: 'https://api.dicebear.com/7.x/bottts/svg?seed=ninja&backgroundColor=7b2ff7',
+    color:    '#7b2ff7',
+  },
+];
+
+// ── Game constants ─────────────────────────────────────────────────────────────
 const CHAR_W     = 60;
 const CHAR_H     = 60;
 const ITEM_W     = 44;
@@ -71,6 +124,12 @@ export function ChallengeModal({ onClose }: Props) {
   const [submitting,  setSubmitting]  = useState(false);
   const [submitErr,   setSubmitErr]   = useState('');
   const [boardLoading,setBoardLoading]= useState(false);
+
+  // ── Profile / shop state ───────────────────────────────────────────────────
+  const [profile,     setProfile]     = useState<GameProfile | null>(null);
+  const [shopBuying,  setShopBuying]  = useState<string | null>(null);
+  const [shopMsg,     setShopMsg]     = useState('');
+  const [redeeming,   setRedeeming]   = useState(false);
 
   const canvasRef  = useRef<HTMLCanvasElement>(null);
   const rafRef     = useRef<number>(0);
@@ -103,6 +162,79 @@ export function ChallengeModal({ onClose }: Props) {
         duration:     d.duration     ?? 60,
       }))
       .catch(() => setConfig({ characterUrl: '', targetUrl: '', duration: 60 }));
+  }, []);
+
+  // ── Load player profile ────────────────────────────────────────────────────
+  const loadProfile = useCallback(async () => {
+    const user = auth.currentUser;
+    if (!user) return;
+    try {
+      const r = await fetch(`/api/game/profile/${user.uid}`);
+      if (r.ok) setProfile(await r.json());
+    } catch { /* silent */ }
+  }, []);
+
+  useEffect(() => { loadProfile(); }, [loadProfile]);
+
+  // ── Shop: buy a skin ───────────────────────────────────────────────────────
+  const buySkin = useCallback(async (skin: SkinDef) => {
+    const user = auth.currentUser;
+    if (!user) { setShopMsg('يجب تسجيل الدخول أولاً'); return; }
+    setShopBuying(skin.id);
+    setShopMsg('');
+    try {
+      const r = await fetch('/api/game/shop/buy-skin', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ firebaseUid: user.uid, skinId: skin.id, price: skin.price }),
+      });
+      const d = await r.json();
+      if (!r.ok) { setShopMsg(d.message ?? 'فشل الشراء'); return; }
+      setProfile(p => p ? { ...p, gameCash: d.gameCash, unlockedSkins: d.unlockedSkins } : p);
+      setShopMsg(`✓ تم شراء "${skin.name}" بنجاح!`);
+    } catch { setShopMsg('خطأ في الاتصال'); }
+    finally  { setShopBuying(null); }
+  }, []);
+
+  // ── Shop: equip a skin (immediate canvas update) ───────────────────────────
+  const equipSkin = useCallback(async (skin: SkinDef) => {
+    const user = auth.currentUser;
+    if (!user) return;
+    // Update charImgRef immediately so the game uses it right away
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => { charImgRef.current = img; };
+    img.src = skin.imageUrl;
+    // Persist to server
+    try {
+      await fetch(`/api/game/profile/${user.uid}/active-skin`, {
+        method:  'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ skinId: skin.id }),
+      });
+    } catch { /* non-critical */ }
+    setProfile(p => p ? { ...p, activeSkin: skin.id } : p);
+    setShopMsg(`✓ تم تفعيل "${skin.name}"!`);
+  }, []);
+
+  // ── Shop: redeem points ─────────────────────────────────────────────────────
+  const redeemPoints = useCallback(async () => {
+    const user = auth.currentUser;
+    if (!user) { setShopMsg('يجب تسجيل الدخول أولاً'); return; }
+    setRedeeming(true);
+    setShopMsg('');
+    try {
+      const r = await fetch('/api/game/shop/redeem-points', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ firebaseUid: user.uid }),
+      });
+      const d = await r.json();
+      if (!r.ok) { setShopMsg(d.message ?? 'فشل الاستبدال'); return; }
+      setProfile(p => p ? { ...p, gamePoints: d.gamePoints, gameCash: d.gameCash } : p);
+      setShopMsg(`✓ تم إضافة ${d.cashEarned} دينار إلى رصيدك!`);
+    } catch { setShopMsg('خطأ في الاتصال'); }
+    finally  { setRedeeming(false); }
   }, []);
 
   // ── Load leaderboard ───────────────────────────────────────────────────────
@@ -458,6 +590,26 @@ export function ChallengeModal({ onClose }: Props) {
             >
               🏅 قائمة المتصدرين
             </button>
+
+            <button
+              onClick={() => { setShopMsg(''); setPhase('shop'); }}
+              style={{
+                padding: '14px', borderRadius: '6px',
+                background: `${C.purple}11`,
+                border: `1px solid ${C.purple}44`,
+                color: C.purple, fontFamily: 'Orbitron, sans-serif',
+                fontSize: '12px', letterSpacing: '0.1em',
+                cursor: 'pointer', transition: 'all 0.2s',
+                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px',
+              }}
+            >
+              🛍 المتجر
+              {profile && (
+                <span style={{ fontSize: '10px', background: `${C.purple}33`, padding: '2px 7px', borderRadius: '10px' }}>
+                  {profile.gameCash.toLocaleString()} د.ع
+                </span>
+              )}
+            </button>
           </div>
         </div>
       )}
@@ -706,6 +858,213 @@ export function ChallengeModal({ onClose }: Props) {
                 transition: 'all 0.2s',
               }}
             >▶ العب الآن</button>
+          </div>
+        </div>
+      )}
+
+      {/* ── SHOP ─────────────────────────────────────────────────────────────── */}
+      {phase === 'shop' && (
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+
+          {/* Shop header */}
+          <div style={{
+            padding: '14px 18px 10px',
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            flexShrink: 0,
+          }}>
+            <div style={{
+              fontFamily: 'Orbitron, sans-serif', fontSize: '13px',
+              color: C.purple, letterSpacing: '0.1em', textShadow: neon(C.purple, 6),
+            }}>🛍 متجر السكنات</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+              {profile && (
+                <div style={{
+                  fontFamily: 'Orbitron, sans-serif', fontSize: '11px',
+                  color: C.yellow, letterSpacing: '0.08em',
+                  background: `${C.yellow}11`, border: `1px solid ${C.yellow}33`,
+                  padding: '4px 10px', borderRadius: '20px',
+                }}>
+                  💰 {profile.gameCash.toLocaleString()} د.ع
+                </div>
+              )}
+              <button
+                onClick={() => setPhase('menu')}
+                style={{ background: 'transparent', border: 'none', color: C.dim, fontSize: '12px', cursor: 'pointer', fontFamily: 'Orbitron, sans-serif', letterSpacing: '0.08em' }}
+              >← رجوع</button>
+            </div>
+          </div>
+
+          <div style={{ flex: 1, overflowY: 'auto', padding: '0 14px 16px' }}>
+
+            {/* ── Points stats bar ── */}
+            {profile && (
+              <div style={{
+                background: `${C.green}0a`, border: `1px solid ${C.green}22`,
+                borderRadius: '8px', padding: '12px 16px', marginBottom: '16px',
+                display: 'flex', alignItems: 'center', gap: '16px', flexWrap: 'wrap',
+              }}>
+                <div style={{ textAlign: 'center', flex: 1 }}>
+                  <div style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '20px', color: C.green, textShadow: neon(C.green, 6) }}>
+                    {profile.gamePoints.toLocaleString()}
+                  </div>
+                  <div style={{ fontSize: '10px', color: C.dim, marginTop: '2px' }}>نقاط اللعب</div>
+                </div>
+                <div style={{ width: '1px', height: '32px', background: C.border }} />
+                <div style={{ textAlign: 'center', flex: 1 }}>
+                  <div style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '20px', color: C.yellow, textShadow: neon(C.yellow, 6) }}>
+                    {profile.gameCash.toLocaleString()}
+                  </div>
+                  <div style={{ fontSize: '10px', color: C.dim, marginTop: '2px' }}>دينار رصيد</div>
+                </div>
+              </div>
+            )}
+
+            {/* ── Redeem card ── */}
+            <div style={{
+              background: profile && profile.gamePoints >= 5000 ? `${C.green}0d` : 'rgba(255,255,255,0.02)',
+              border: `1px solid ${profile && profile.gamePoints >= 5000 ? C.green + '44' : C.border}`,
+              borderRadius: '10px', padding: '16px', marginBottom: '18px',
+              transition: 'all 0.3s',
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', flexWrap: 'wrap' }}>
+                <div>
+                  <div style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '12px', color: C.green, letterSpacing: '0.08em', marginBottom: '4px' }}>
+                    🔄 استبدال النقاط
+                  </div>
+                  <div style={{ fontSize: '12px', color: C.dim, lineHeight: 1.5 }}>
+                    كل <strong style={{ color: 'rgba(255,255,255,0.7)' }}>5,000</strong> نقطة = <strong style={{ color: C.yellow }}>1,000</strong> دينار رصيد رحلات
+                  </div>
+                  {profile && profile.gamePoints < 5000 && (
+                    <div style={{ fontSize: '11px', color: C.red, marginTop: '4px' }}>
+                      تحتاج {(5000 - profile.gamePoints).toLocaleString()} نقطة إضافية
+                    </div>
+                  )}
+                </div>
+                <button
+                  onClick={redeemPoints}
+                  disabled={redeeming || !profile || profile.gamePoints < 5000}
+                  style={{
+                    padding: '10px 18px', borderRadius: '6px', flexShrink: 0,
+                    background: profile && profile.gamePoints >= 5000 ? `${C.green}22` : 'rgba(255,255,255,0.04)',
+                    border: `1.5px solid ${profile && profile.gamePoints >= 5000 ? C.green + '66' : C.border}`,
+                    color: profile && profile.gamePoints >= 5000 ? C.green : C.dim,
+                    fontFamily: 'Orbitron, sans-serif', fontSize: '11px', letterSpacing: '0.08em',
+                    cursor: profile && profile.gamePoints >= 5000 ? 'pointer' : 'not-allowed',
+                    transition: 'all 0.2s', opacity: redeeming ? 0.6 : 1,
+                  }}
+                >
+                  {redeeming ? '⏳...' : '💱 استبدال'}
+                </button>
+              </div>
+            </div>
+
+            {/* ── Feedback message ── */}
+            {shopMsg && (
+              <div style={{
+                padding: '10px 14px', borderRadius: '6px', marginBottom: '14px',
+                background: shopMsg.startsWith('✓') ? `${C.green}15` : `${C.red}15`,
+                border: `1px solid ${shopMsg.startsWith('✓') ? C.green + '44' : C.red + '44'}`,
+                color: shopMsg.startsWith('✓') ? C.green : C.red,
+                fontFamily: 'Rajdhani, sans-serif', fontSize: '13px', textAlign: 'center',
+              }}>
+                {shopMsg}
+              </div>
+            )}
+
+            {/* ── Skins grid ── */}
+            <div style={{
+              fontFamily: 'Orbitron, sans-serif', fontSize: '11px', color: C.dim,
+              letterSpacing: '0.1em', marginBottom: '10px',
+            }}>
+              سكنات الشخصية
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+              {SKINS.map(skin => {
+                const owned  = profile?.unlockedSkins?.includes(skin.id) ?? false;
+                const active = profile?.activeSkin === skin.id;
+                const canBuy = (profile?.gameCash ?? 0) >= skin.price;
+                const buying = shopBuying === skin.id;
+
+                return (
+                  <div key={skin.id} style={{
+                    borderRadius: '10px', overflow: 'hidden',
+                    background: active ? `${skin.color}15` : owned ? `${skin.color}08` : 'rgba(255,255,255,0.02)',
+                    border: `1.5px solid ${active ? skin.color + '77' : owned ? skin.color + '33' : C.border}`,
+                    transition: 'all 0.25s',
+                    boxShadow: active ? neon(skin.color, 8) : 'none',
+                  }}>
+                    {/* Avatar */}
+                    <div style={{
+                      height: '90px', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      background: active ? `${skin.color}22` : `${skin.color}08`,
+                      position: 'relative',
+                    }}>
+                      <img
+                        src={skin.imageUrl}
+                        alt={skin.name}
+                        style={{ width: '64px', height: '64px', objectFit: 'contain', filter: active ? `drop-shadow(0 0 8px ${skin.color})` : 'none', transition: 'all 0.3s' }}
+                        onError={e => { (e.currentTarget as HTMLImageElement).style.display = 'none'; (e.currentTarget.nextElementSibling as HTMLElement).style.display = 'flex'; }}
+                      />
+                      <div style={{ display: 'none', fontSize: '40px', alignItems: 'center', justifyContent: 'center' }}>
+                        {skin.emoji}
+                      </div>
+                      {active && (
+                        <div style={{
+                          position: 'absolute', top: '6px', right: '6px',
+                          background: skin.color, color: '#000', fontSize: '9px',
+                          fontFamily: 'Orbitron, sans-serif', padding: '2px 5px', borderRadius: '4px',
+                          fontWeight: 700, letterSpacing: '0.05em',
+                        }}>نشط</div>
+                      )}
+                    </div>
+
+                    {/* Info */}
+                    <div style={{ padding: '10px 10px 12px' }}>
+                      <div style={{ fontFamily: 'Rajdhani, sans-serif', fontSize: '14px', fontWeight: 600, color: active ? skin.color : 'rgba(255,255,255,0.85)', marginBottom: '4px', textShadow: active ? neon(skin.color, 4) : 'none' }}>
+                        {skin.emoji} {skin.name}
+                      </div>
+                      <div style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '10px', color: C.yellow, marginBottom: '8px' }}>
+                        {skin.price.toLocaleString()} د.ع
+                      </div>
+
+                      {owned ? (
+                        <button
+                          onClick={() => equipSkin(skin)}
+                          disabled={active}
+                          style={{
+                            width: '100%', padding: '7px', borderRadius: '5px',
+                            background: active ? `${skin.color}30` : `${skin.color}18`,
+                            border: `1px solid ${skin.color}${active ? '77' : '44'}`,
+                            color: skin.color,
+                            fontFamily: 'Orbitron, sans-serif', fontSize: '10px', letterSpacing: '0.08em',
+                            cursor: active ? 'default' : 'pointer', transition: 'all 0.2s',
+                          }}
+                        >
+                          {active ? '✓ مفعّل' : '▶ تفعيل'}
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => buySkin(skin)}
+                          disabled={buying || !canBuy || !profile}
+                          style={{
+                            width: '100%', padding: '7px', borderRadius: '5px',
+                            background: canBuy ? `${C.yellow}18` : 'rgba(255,255,255,0.03)',
+                            border: `1px solid ${canBuy ? C.yellow + '55' : C.border}`,
+                            color: canBuy ? C.yellow : C.dim,
+                            fontFamily: 'Orbitron, sans-serif', fontSize: '10px', letterSpacing: '0.08em',
+                            cursor: canBuy && !buying ? 'pointer' : 'not-allowed',
+                            transition: 'all 0.2s', opacity: buying ? 0.6 : 1,
+                          }}
+                        >
+                          {buying ? '⏳...' : canBuy ? '🛒 شراء' : '🔒 رصيد غير كافٍ'}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
           </div>
         </div>
       )}
