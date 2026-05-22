@@ -258,6 +258,10 @@ export function ChallengeModal({ onClose }: Props) {
     lives:          3,   // player lives (obstacles reduce this)
     invincible:     0,   // ms timestamp — invincibility until
     bgThemeIdx:     0,   // current background theme index (0-4)
+    particles:      [] as Array<{
+      x: number; y: number; vx: number; vy: number;
+      life: number; maxLife: number; color: string; size: number;
+    }>,
   });
 
   const bgImgRef        = useRef<HTMLImageElement | null>(null);
@@ -596,12 +600,8 @@ export function ChallengeModal({ onClose }: Props) {
     }
     const charDrawY = Math.round(BASE_Y + g.jumpYOffset);
 
-    // ── Horizontal rush ───────────────────────────────────────────────────────
-    if (g.pressing === 'right') {
-      g.charX = Math.min(MAX_X, g.charX + RUSH_SPEED);
-    } else {
-      g.charX = Math.max(BASE_X, g.charX - RETURN_SPEED);
-    }
+    // ── Character FIXED at left — infinite runner, bg scrolls past ───────────
+    g.charX = BASE_X;
 
     // ── Progressive difficulty (every 15 s) ───────────────────────────────────
     if (g.lastDiffTime === 0) g.lastDiffTime = ts;
@@ -610,8 +610,8 @@ export function ChallengeModal({ onClose }: Props) {
       g.lastDiffTime   = ts;
     }
 
-    // ── Parallax scroll ───────────────────────────────────────────────────────
-    const scrollSpd = g.pressing === 'right' ? BG_SCROLL_RUN : BG_SCROLL_IDL;
+    // ── Parallax scroll — always running; hold = sprint (faster BG) ─────────
+    const scrollSpd = BG_SCROLL_IDL + (g.pressing === 'right' ? BG_SCROLL_RUN : 0);
     g.bgScrollX = (g.bgScrollX + scrollSpd * g.diffMultiplier) % W;
 
     // Score-based speed boost
@@ -639,8 +639,10 @@ export function ChallengeModal({ onClose }: Props) {
     const spawnInterval = baseInterval / g.diffMultiplier;
     if (ts - g.lastSpawn > spawnInterval) {
       const isMagnet   = (g.nextId > 3) && (Math.random() < 0.10);
-      const isObstacle = !isMagnet && (Math.random() < 0.22);
-      const lane       = isMagnet ? 2 : Math.floor(Math.random() * 3); // 0=top 1=mid 2=ground
+      const isObstacle = !isMagnet && (Math.random() < 0.20);
+      // Obstacles always on GROUND lane — player must JUMP to dodge
+      // Food items at all 3 heights — player jumps to catch higher ones
+      const lane       = isMagnet ? 2 : isObstacle ? 2 : Math.floor(Math.random() * 3);
       const itemY      = LANE_Y[lane];
       g.items.push({
         id:        g.nextId++,
@@ -663,27 +665,37 @@ export function ChallengeModal({ onClose }: Props) {
       const dy = Math.abs(item.y - charDrawY);
       if (dx < (CHAR_W / 2 + ITEM_W / 2) * 0.82 && dy < (CHAR_H / 2 + ITEM_H / 2) * 1.10) {
         if (item.type === 'obstacle') {
-          if (now_ms > g.invincible) {
+          // Only collide if player is on (or near) the ground — jumping = dodge!
+          const onGround = g.jumpYOffset > -22;
+          if (onGround && now_ms > g.invincible) {
             item.collected = true;
-            g.lives      = Math.max(0, g.lives - 1);
-            g.invincible = now_ms + 1500;
-            g.comboCount = 0;
+            g.comboCount = 0;       // break the combo streak
+            g.invincible = now_ms + 900;
+            // Emit red impact particles
+            for (let pi = 0; pi < 10; pi++) {
+              const ang = (Math.PI * 2 * pi) / 10 + Math.random() * 0.6;
+              const spd = 2 + Math.random() * 3.5;
+              g.particles.push({
+                x: item.x, y: item.y,
+                vx: Math.cos(ang) * spd, vy: Math.sin(ang) * spd - 1.5,
+                life: 20 + Math.floor(Math.random() * 12), maxLife: 32,
+                color: '#ff2d78', size: 3,
+              });
+            }
             try {
               if (!audioCtxRef.current) audioCtxRef.current = new AudioContext();
               const actx = audioCtxRef.current;
               const osc  = actx.createOscillator();
               const gain = actx.createGain();
               osc.connect(gain); gain.connect(actx.destination);
-              osc.type = 'sawtooth'; osc.frequency.value = 90;
-              gain.gain.setValueAtTime(0.35, actx.currentTime);
-              gain.gain.exponentialRampToValueAtTime(0.001, actx.currentTime + 0.38);
-              osc.start(actx.currentTime); osc.stop(actx.currentTime + 0.38);
+              osc.type = 'sawtooth'; osc.frequency.value = 100;
+              gain.gain.setValueAtTime(0.25, actx.currentTime);
+              gain.gain.exponentialRampToValueAtTime(0.001, actx.currentTime + 0.28);
+              osc.start(actx.currentTime); osc.stop(actx.currentTime + 0.28);
             } catch {}
             if (comboTimerRef.current) clearTimeout(comboTimerRef.current);
-            const livesStr = '❤'.repeat(Math.max(0, g.lives));
-            setComboFlash(g.lives > 0 ? `💥 اصطدام! ${livesStr}` : '💀 انتهت الحياة!');
-            comboTimerRef.current = setTimeout(() => setComboFlash(null), 1400);
-            if (g.lives <= 0) { g.running = false; }
+            setComboFlash('💥 انكسر الكومبو!');
+            comboTimerRef.current = setTimeout(() => setComboFlash(null), 900);
           }
           continue;
         }
@@ -718,6 +730,21 @@ export function ChallengeModal({ onClose }: Props) {
           const multiplier = combo >= 3 ? combo : 1;
           g.score += multiplier;
           setScore(g.score);
+          // ── Emit catch particles ────────────────────────────────────────────
+          {
+            const pCount = combo >= 5 ? 16 : combo >= 3 ? 12 : 7;
+            const pColor = combo >= 5 ? '#ff9900' : combo >= 3 ? '#f5c518' : '#00f5d4';
+            for (let pi = 0; pi < pCount; pi++) {
+              const ang = (Math.PI * 2 * pi) / pCount + Math.random() * 0.55;
+              const spd = 2.5 + Math.random() * 4;
+              g.particles.push({
+                x: item.x, y: item.y,
+                vx: Math.cos(ang) * spd, vy: Math.sin(ang) * spd - 2.5,
+                life: 22 + Math.floor(Math.random() * 18), maxLife: 40,
+                color: pColor, size: combo >= 3 ? 4 : 2.5,
+              });
+            }
+          }
           try {
             if (!audioCtxRef.current) audioCtxRef.current = new AudioContext();
             const actx = audioCtxRef.current;
@@ -925,17 +952,19 @@ export function ChallengeModal({ onClose }: Props) {
     ctx.lineWidth = 1.5;
     ctx.beginPath(); ctx.moveTo(0, roadTop); ctx.lineTo(W, roadTop); ctx.stroke();
 
-    // Speed streaks
-    if (g.pressing === 'right') {
+    // Speed streaks — always show (runner always moves, more intense on sprint)
+    {
+      const streakAlpha = g.pressing === 'right' ? 0.28 : 0.10;
+      const streakCount = g.pressing === 'right' ? 9 : 4;
       ctx.save();
-      ctx.globalAlpha = 0.18;
-      for (let i = 0; i < 7; i++) {
+      ctx.globalAlpha = streakAlpha;
+      for (let i = 0; i < streakCount; i++) {
         const sy   = roadTop + 4 + Math.random() * (roadH - 8);
-        const slen = 18 + Math.random() * 40;
-        const sx   = g.charX - 30 - Math.random() * 80;
+        const slen = 20 + Math.random() * 55;
+        const sx   = BASE_X + 20 + Math.random() * (W - BASE_X - 20);
         const streak = ctx.createLinearGradient(sx - slen, sy, sx, sy);
         streak.addColorStop(0, 'transparent');
-        streak.addColorStop(1, '#00d4ff');
+        streak.addColorStop(1, g.pressing === 'right' ? '#00d4ff' : '#00f5d466');
         ctx.fillStyle = streak;
         ctx.fillRect(sx - slen, sy - 1, slen, 2);
       }
@@ -960,18 +989,82 @@ export function ChallengeModal({ onClose }: Props) {
       ctx.restore();
     }
 
+    // ── Particle system — update physics + draw ───────────────────────────────
+    for (let pi = g.particles.length - 1; pi >= 0; pi--) {
+      const p = g.particles[pi];
+      p.life--;
+      if (p.life <= 0) { g.particles.splice(pi, 1); continue; }
+      p.x  += p.vx;
+      p.y  += p.vy;
+      p.vy += 0.25; // gravity
+      p.vx *= 0.96; // air drag
+      const alpha = (p.life / p.maxLife);
+      ctx.save();
+      ctx.globalAlpha = alpha * 0.92;
+      ctx.fillStyle   = p.color;
+      ctx.shadowColor = p.color;
+      ctx.shadowBlur  = 8;
+      // Star shape for combo particles, circle for regular
+      const sz = p.size * (0.5 + alpha * 0.5);
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, sz, 0, Math.PI * 2);
+      ctx.fill();
+      // Sparkle cross for larger particles
+      if (p.size >= 3.5) {
+        ctx.globalAlpha = alpha * 0.55;
+        ctx.lineWidth = 1.2;
+        ctx.strokeStyle = p.color;
+        ctx.beginPath();
+        ctx.moveTo(p.x - sz * 2, p.y); ctx.lineTo(p.x + sz * 2, p.y);
+        ctx.moveTo(p.x, p.y - sz * 2); ctx.lineTo(p.x, p.y + sz * 2);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
     // Items
     for (const item of g.items) {
       if (item.collected) continue;
       const bob = Math.sin(ts * 0.006 + item.id) * 4;
       ctx.save();
       if (item.type === 'obstacle') {
+        // Brick wall obstacle — must jump to dodge
         const obFlash = g.invincible > Date.now() && Math.floor(ts / 130) % 2 === 0;
-        ctx.globalAlpha = obFlash ? 0.22 : 1;
-        ctx.shadowColor = '#ff2d78cc'; ctx.shadowBlur = 20;
-        ctx.font = '38px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-        const obstEmojis = ['🚗', '🚧', '🛑', '🚌'];
-        ctx.fillText(obstEmojis[item.id % 4], item.x, item.y + bob);
+        ctx.globalAlpha = obFlash ? 0.28 : 1;
+        const bW = ITEM_W + 10, bH = Math.round(ITEM_H * 0.75);
+        const bx = item.x - bW / 2, by = item.y - bH + 4;
+        // Drop shadow
+        ctx.shadowColor = '#ff2d78cc'; ctx.shadowBlur = 18;
+        ctx.fillStyle = '#1a0508';
+        ctx.fillRect(bx + 3, by + 4, bW, bH);
+        // Brick gradient face
+        const bGrad = ctx.createLinearGradient(bx, by, bx, by + bH);
+        bGrad.addColorStop(0, '#8b1a1a');
+        bGrad.addColorStop(0.5, '#6b1212');
+        bGrad.addColorStop(1, '#3a0808');
+        ctx.fillStyle = bGrad;
+        ctx.shadowBlur = 0;
+        ctx.fillRect(bx, by, bW, bH);
+        // Brick mortar lines
+        ctx.strokeStyle = '#ff2d7833';
+        ctx.lineWidth = 1;
+        // Horizontal lines
+        ctx.beginPath();
+        ctx.moveTo(bx, by + bH * 0.5); ctx.lineTo(bx + bW, by + bH * 0.5);
+        ctx.stroke();
+        // Vertical lines (offset per row)
+        ctx.beginPath();
+        ctx.moveTo(bx + bW * 0.5, by); ctx.lineTo(bx + bW * 0.5, by + bH * 0.5);
+        ctx.moveTo(bx + bW * 0.25, by + bH * 0.5); ctx.lineTo(bx + bW * 0.25, by + bH);
+        ctx.moveTo(bx + bW * 0.75, by + bH * 0.5); ctx.lineTo(bx + bW * 0.75, by + bH);
+        ctx.stroke();
+        // Warning pulse glow on top edge
+        ctx.fillStyle = `rgba(255,45,120,${0.55 + Math.sin(ts * 0.018) * 0.30})`;
+        ctx.fillRect(bx, by - 3, bW, 4);
+        // Outer neon border
+        ctx.strokeStyle = `rgba(255,45,120,${0.50 + Math.sin(ts * 0.012) * 0.25})`;
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(bx, by, bW, bH);
       } else if (item.type === 'magnet') {
         ctx.shadowColor = '#f5c518cc'; ctx.shadowBlur = 20;
         ctx.font = '36px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
@@ -1005,18 +1098,22 @@ export function ChallengeModal({ onClose }: Props) {
       ctx.shadowBlur  = airborne ? 20 : rushing ? 22 : 12;
       ctx.globalAlpha = isInvincible ? 0.65 : 1;
       if (charImgRef.current) {
-        if (rushing || airborne) {
-          ctx.save();
-          ctx.translate(g.charX + CHAR_W / 2, 0);
-          ctx.scale(-1, 1);
-          ctx.drawImage(charImgRef.current, -CHAR_W / 2, charDrawY - CHAR_H / 2, CHAR_W, CHAR_H);
-          ctx.restore();
-        } else {
-          ctx.drawImage(charImgRef.current, g.charX - CHAR_W / 2, charDrawY - CHAR_H / 2, CHAR_W, CHAR_H);
+        // Character always faces RIGHT (mirrored) — always running forward
+        ctx.save();
+        ctx.translate(g.charX + CHAR_W / 2, 0);
+        ctx.scale(-1, 1);
+        // Slight lean forward on sprint, bounce on ground
+        const lean = g.pressing === 'right' ? 0.12 : airborne ? -0.06 : 0;
+        if (lean !== 0) {
+          ctx.translate(0, charDrawY);
+          ctx.rotate(lean);
+          ctx.translate(0, -charDrawY);
         }
+        ctx.drawImage(charImgRef.current, -CHAR_W / 2, charDrawY - CHAR_H / 2, CHAR_W, CHAR_H);
+        ctx.restore();
       } else {
         ctx.font = '44px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-        const emoji = airborne ? (g.jumpCount >= 2 ? '🦋' : '🦅') : rushing ? '🏃' : '🧍';
+        const emoji = airborne ? (g.jumpCount >= 2 ? '🦋' : '🦅') : g.pressing === 'right' ? '🏃' : '🚶';
         ctx.fillText(emoji, g.charX, charDrawY);
       }
       ctx.restore();
@@ -1065,6 +1162,55 @@ export function ChallengeModal({ onClose }: Props) {
       ctx.shadowBlur  = used ? 0 : 9;
       ctx.font = '13px sans-serif'; ctx.textAlign = 'right'; ctx.textBaseline = 'top';
       ctx.fillText('▲', W - 8, 8 + ji * 17);
+      ctx.restore();
+    }
+
+    // ── COMBO counter — big fiery canvas text ────────────────────────────────
+    if (g.comboCount >= 2) {
+      const cVal  = g.comboCount;
+      const cSize = Math.min(46, 22 + cVal * 2.8);
+      const cX    = W / 2;
+      const cY    = GROUND_Y - 90 + Math.sin(ts * 0.022) * (cVal >= 5 ? 7 : 3);
+      ctx.save();
+      ctx.font         = `900 ${cSize}px Orbitron, sans-serif`;
+      ctx.textAlign    = 'center';
+      ctx.textBaseline = 'middle';
+      // Outer flame glow
+      ctx.globalAlpha = 0.95;
+      ctx.shadowColor = cVal >= 7 ? '#ff4400' : cVal >= 5 ? '#ff7700' : '#f5c518';
+      ctx.shadowBlur  = 28 + cVal * 4;
+      ctx.fillStyle   = cVal >= 7 ? '#ff6600' : cVal >= 5 ? '#ffaa00' : '#f5c518';
+      ctx.fillText(`×${cVal}`, cX, cY);
+      // Inner bright white core
+      ctx.shadowBlur  = 10;
+      ctx.globalAlpha = 0.65;
+      ctx.fillStyle   = '#fff';
+      ctx.fillText(`×${cVal}`, cX, cY);
+      // Combo label
+      ctx.shadowBlur  = 0;
+      ctx.globalAlpha = 0.55;
+      ctx.font = `700 10px Orbitron, sans-serif`;
+      ctx.fillStyle = cVal >= 5 ? '#ffaa00' : '#f5c518';
+      ctx.fillText('COMBO', cX, cY + cSize * 0.65);
+      ctx.restore();
+    }
+
+    // ── Sprint indicator (bottom-center pill) ───────────────────────────────
+    if (g.pressing === 'right') {
+      ctx.save();
+      ctx.globalAlpha = 0.72;
+      ctx.fillStyle   = '#00d4ff18';
+      ctx.strokeStyle = '#00d4ff66';
+      ctx.lineWidth   = 1;
+      const pw = 64, ph = 16, px2 = (W - pw) / 2, py2 = H - 36;
+      ctx.beginPath();
+      ctx.roundRect(px2, py2, pw, ph, 8);
+      ctx.fill(); ctx.stroke();
+      ctx.font = '700 9px Orbitron, sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#00d4ff';
+      ctx.shadowColor = '#00d4ffaa'; ctx.shadowBlur = 8;
+      ctx.fillText('⚡ سريع', W / 2, py2 + ph / 2);
       ctx.restore();
     }
   }, [endGame]);
@@ -1135,6 +1281,7 @@ export function ChallengeModal({ onClose }: Props) {
     g.magnetEnd      = 0;
     g.diffMultiplier = 1.0;
     g.lastDiffTime   = 0;
+    g.particles      = [];
     g.magnetLevel    = profile?.magnetLevel ?? 1;
     g.comboLevel     = profile?.comboLevel  ?? 1;
     g.charLane       = 1;   // start in middle lane
@@ -1285,12 +1432,13 @@ export function ChallengeModal({ onClose }: Props) {
         flexShrink: 0,
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-          <span style={{ fontSize: '20px' }}>🏆</span>
+          <span style={{ fontSize: '20px' }}>🔥</span>
           <span style={{
-            fontFamily: 'Orbitron, sans-serif', fontSize: '14px',
-            color: C.yellow, letterSpacing: '0.12em',
-            textShadow: neon(C.yellow, 7),
-          }}>تحدي المعدل</span>
+            fontFamily: 'Orbitron, sans-serif', fontSize: '15px',
+            color: C.yellow, letterSpacing: '0.14em',
+            fontWeight: 900,
+            textShadow: `0 0 8px ${C.yellow}, 0 0 22px ${C.yellow}88, 0 0 48px #ff990055`,
+          }}>تحدي المعدّل</span>
         </div>
 
         {phase === 'playing' && (
@@ -1348,15 +1496,21 @@ export function ChallengeModal({ onClose }: Props) {
           <div style={{ textAlign: 'center' }}>
             <div style={{ fontSize: '64px', marginBottom: '12px' }}>🏆</div>
             <div style={{
-              fontFamily: 'Orbitron, sans-serif', fontSize: '22px',
-              color: C.yellow, letterSpacing: '0.12em',
-              textShadow: neon(C.yellow, 10),
+              fontFamily: 'Orbitron, sans-serif', fontSize: '24px',
+              background: 'linear-gradient(90deg, #f5c518, #ff9900, #f5c518)',
+              WebkitBackgroundClip: 'text',
+              WebkitTextFillColor: 'transparent',
+              letterSpacing: '0.14em',
+              fontWeight: 900,
+              textShadow: 'none',
+              filter: 'drop-shadow(0 0 14px #f5c51899)',
               marginBottom: '10px',
-            }}>التحدي</div>
-            <div style={{ color: C.dim, fontSize: '13px', lineHeight: 1.7, maxWidth: '280px', margin: '0 auto' }}>
+            }}>تحدي المعدّل</div>
+            <div style={{ color: C.dim, fontSize: '13px', lineHeight: 1.8, maxWidth: '290px', margin: '0 auto' }}>
               اصطد أكبر قدر من العناصر خلال {config?.duration ?? 60} ثانية!<br/>
-              اضغط باستمرار → للانطلاق • اضغط بسرعة للقفز<br/>
-              ضغطتان متتاليتان = قفزة مزدوجة 🦅 • المغناطيس 🧲 يجذب كل شيء!
+              انقر مرة = قفز 🦅 • انقر مرتين سريعاً = قفزة مزدوجة<br/>
+              اضغط مطوّلاً = سرعة قصوى ⚡ • المغناطيس 🧲 يجذب كل شيء!<br/>
+              <span style={{ color: C.red }}>احذر الطوب 🧱 — اقفز لتتجنبه وإلا يكسر الكومبو!</span>
             </div>
           </div>
 
@@ -1548,7 +1702,7 @@ export function ChallengeModal({ onClose }: Props) {
               fontFamily: 'Orbitron, sans-serif', fontSize: '10px',
               color: 'rgba(0,212,255,0.40)', letterSpacing: '0.06em',
             }}>
-              اضغط سريعاً ← قفز  •  اضغط مرتين ← قفزة مزدوجة  •  اضغط مطوّلاً ← انطلاق 🏃
+              انقر = قفز  •  انقر مرتين سريعاً = قفزة مزدوجة 🦅  •  اضغط مطوّلاً = سرعة قصوى ⚡
             </div>
           )}
 
