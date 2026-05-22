@@ -1,5 +1,5 @@
 import { Router, type IRouter, type Request, type Response } from "express";
-import { db, settingsTable, gameScoresTable, gameProfilesTable, gameCurrentSessionTable } from "@workspace/db";
+import { db, settingsTable, gameScoresTable, gameProfilesTable, gameCurrentSessionTable, usersTable } from "@workspace/db";
 import { eq, desc, sql } from "drizzle-orm";
 import { broadcastGameSessionUpdate } from "../lib/sse";
 import { randomUUID } from "crypto";
@@ -39,16 +39,17 @@ router.get("/game/config", async (req: Request, res: Response) => {
       .select()
       .from(settingsTable)
       .where(
-        sql`${settingsTable.key} IN ('game_character_url','game_target_url','game_duration')`
+        sql`${settingsTable.key} IN ('game_character_url','game_target_url','game_duration','game_background_url')`
       );
 
     const map: Record<string, string> = {};
     for (const r of rows) map[r.key] = r.value;
 
     res.json({
-      characterUrl: map["game_character_url"] ?? "",
-      targetUrl:    map["game_target_url"]    ?? "",
-      duration:     parseInt(map["game_duration"] ?? "60", 10),
+      characterUrl:  map["game_character_url"]  ?? "",
+      targetUrl:     map["game_target_url"]     ?? "",
+      duration:      parseInt(map["game_duration"] ?? "60", 10),
+      backgroundUrl: map["game_background_url"] ?? "",
     });
   } catch (err) {
     req.log.error({ err }, "game config fetch error");
@@ -58,17 +59,19 @@ router.get("/game/config", async (req: Request, res: Response) => {
 
 // ── PATCH /api/game/config ──────────────────────────────────────────────────
 router.patch("/game/config", async (req: Request, res: Response) => {
-  const { characterUrl, targetUrl, duration } = req.body as {
-    characterUrl?: string;
-    targetUrl?:    string;
-    duration?:     number;
+  const { characterUrl, targetUrl, duration, backgroundUrl } = req.body as {
+    characterUrl?:  string;
+    targetUrl?:     string;
+    duration?:      number;
+    backgroundUrl?: string;
   };
 
   try {
     const updates: Array<{ key: string; value: string }> = [];
-    if (characterUrl !== undefined) updates.push({ key: "game_character_url", value: String(characterUrl) });
-    if (targetUrl    !== undefined) updates.push({ key: "game_target_url",    value: String(targetUrl)    });
-    if (duration     !== undefined) updates.push({ key: "game_duration",      value: String(duration)     });
+    if (characterUrl  !== undefined) updates.push({ key: "game_character_url",  value: String(characterUrl)  });
+    if (targetUrl     !== undefined) updates.push({ key: "game_target_url",     value: String(targetUrl)     });
+    if (duration      !== undefined) updates.push({ key: "game_duration",       value: String(duration)      });
+    if (backgroundUrl !== undefined) updates.push({ key: "game_background_url", value: String(backgroundUrl) });
 
     for (const u of updates) {
       await db
@@ -83,6 +86,39 @@ router.patch("/game/config", async (req: Request, res: Response) => {
     res.json({ ok: true });
   } catch (err) {
     req.log.error({ err }, "game config update error");
+    res.status(500).json({ error: "internal" });
+  }
+});
+
+// ── GET /api/game/wallet/:firebaseUid ───────────────────────────────────────
+// Returns real wallet balance (users.balance) linked to a Firebase UID.
+router.get("/game/wallet/:firebaseUid", async (req: Request, res: Response) => {
+  const { firebaseUid } = req.params;
+  try {
+    const [user] = await db
+      .select({ balance: usersTable.balance, id: usersTable.id })
+      .from(usersTable)
+      .where(eq(usersTable.firebaseUid, firebaseUid));
+    res.json({ balance: user?.balance ?? 0, linked: !!user });
+  } catch (err) {
+    req.log.error({ err }, "wallet fetch error");
+    res.status(500).json({ error: "internal" });
+  }
+});
+
+// ── POST /api/game/wallet/link ──────────────────────────────────────────────
+// Link a Firebase UID to an existing users row (by userId integer id).
+// Body: { firebaseUid, userId }
+router.post("/game/wallet/link", async (req: Request, res: Response) => {
+  const { firebaseUid, userId } = req.body as { firebaseUid?: string; userId?: number };
+  if (!firebaseUid || !userId) {
+    res.status(400).json({ error: "firebaseUid and userId required" }); return;
+  }
+  try {
+    await db.update(usersTable).set({ firebaseUid }).where(eq(usersTable.id, userId));
+    res.json({ ok: true });
+  } catch (err) {
+    req.log.error({ err }, "wallet link error");
     res.status(500).json({ error: "internal" });
   }
 });
@@ -181,12 +217,8 @@ router.get("/game/profile/:uid", async (req: Request, res: Response) => {
 });
 
 // ── POST /api/game/shop/buy-skin ────────────────────────────────────────────
-// Purchase a skin using gameCash.
+// Purchase a skin — tries wallet balance (users.balance) first, falls back to gameCash.
 // Body: { firebaseUid: string, skinId: string, price: number }
-// Logic:
-//   - Verify gameCash >= price
-//   - Deduct price from gameCash
-//   - Add skinId to unlockedSkins (if not already owned)
 router.post("/game/shop/buy-skin", async (req: Request, res: Response) => {
   const { firebaseUid, skinId, price } = req.body as {
     firebaseUid?: string;
@@ -201,10 +233,7 @@ router.post("/game/shop/buy-skin", async (req: Request, res: Response) => {
 
   try {
     const profile = await upsertProfile(firebaseUid);
-    if (!profile) {
-      res.status(404).json({ error: "profile not found" });
-      return;
-    }
+    if (!profile) { res.status(404).json({ error: "profile not found" }); return; }
 
     // Check if already owned
     if (profile.unlockedSkins.includes(skinId)) {
@@ -212,18 +241,52 @@ router.post("/game/shop/buy-skin", async (req: Request, res: Response) => {
       return;
     }
 
-    // Check balance
-    if (profile.gameCash < price) {
-      res.status(402).json({
-        error:    "insufficient_balance",
-        message:  "رصيدك غير كافٍ لشراء هذا السكن",
-        gameCash: profile.gameCash,
-        required: price,
+    // ── Try real wallet (users.balance linked via firebase_uid) first ─────────
+    const [walletUser] = await db
+      .select({ id: usersTable.id, balance: usersTable.balance })
+      .from(usersTable)
+      .where(eq(usersTable.firebaseUid, firebaseUid));
+
+    if (walletUser && walletUser.balance >= price) {
+      // Deduct from real wallet
+      await db
+        .update(usersTable)
+        .set({ balance: walletUser.balance - price })
+        .where(eq(usersTable.id, walletUser.id));
+
+      // Add skin to profile
+      const [updated] = await db
+        .update(gameProfilesTable)
+        .set({
+          unlockedSkins: sql`array_append(${gameProfilesTable.unlockedSkins}, ${skinId}::text)`,
+          updatedAt:     new Date(),
+        })
+        .where(eq(gameProfilesTable.firebaseUid, firebaseUid))
+        .returning();
+
+      res.json({
+        ok:             true,
+        source:         "wallet",
+        walletBalance:  walletUser.balance - price,
+        gameCash:       updated.gameCash,
+        unlockedSkins:  updated.unlockedSkins,
       });
       return;
     }
 
-    // Deduct price and add skin
+    // ── Fall back to gameCash ─────────────────────────────────────────────────
+    if (profile.gameCash < price) {
+      const walletBalance = walletUser?.balance ?? 0;
+      res.status(402).json({
+        error:         "insufficient_balance",
+        message:       `رصيدك غير كافٍ — المحفظة: ${walletBalance} د، نقود اللعبة: ${profile.gameCash} د، المطلوب: ${price} د`,
+        walletBalance,
+        gameCash:      profile.gameCash,
+        required:      price,
+      });
+      return;
+    }
+
     const [updated] = await db
       .update(gameProfilesTable)
       .set({
@@ -236,6 +299,8 @@ router.post("/game/shop/buy-skin", async (req: Request, res: Response) => {
 
     res.json({
       ok:            true,
+      source:        "gameCash",
+      walletBalance: walletUser?.balance ?? 0,
       gameCash:      updated.gameCash,
       unlockedSkins: updated.unlockedSkins,
     });

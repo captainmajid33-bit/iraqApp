@@ -3,13 +3,14 @@ import { createInsertSchema, createSelectSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 
 export const usersTable = pgTable("users", {
-  id: serial("id").primaryKey(),
-  name: text("name").notNull(),
-  lat: real("lat"),
-  lng: real("lng"),
-  xp: integer("xp").notNull().default(0),
-  balance: real("balance").notNull().default(0),
-  createdAt: timestamp("created_at").defaultNow(),
+  id:          serial("id").primaryKey(),
+  name:        text("name").notNull(),
+  lat:         real("lat"),
+  lng:         real("lng"),
+  xp:          integer("xp").notNull().default(0),
+  balance:     real("balance").notNull().default(0),
+  firebaseUid: text("firebase_uid").unique(),
+  createdAt:   timestamp("created_at").defaultNow(),
 });
 
 export const insertUserSchema = createInsertSchema(usersTable).omit({

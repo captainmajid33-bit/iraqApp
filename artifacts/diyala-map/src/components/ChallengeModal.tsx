@@ -36,9 +36,10 @@ interface SkinDef {
 }
 
 interface GameConfig {
-  characterUrl: string;
-  targetUrl:    string;
-  duration:     number;
+  characterUrl:  string;
+  targetUrl:     string;
+  duration:      number;
+  backgroundUrl: string;
 }
 
 interface FallingItem {
@@ -127,6 +128,8 @@ export function ChallengeModal({ onClose }: Props) {
 
   // ── Profile / shop state ───────────────────────────────────────────────────
   const [profile,     setProfile]     = useState<GameProfile | null>(null);
+  const [walletBal,   setWalletBal]   = useState(0);
+  const [comboFlash,  setComboFlash]  = useState<string | null>(null);
   const [shopBuying,  setShopBuying]  = useState<string | null>(null);
   const [shopMsg,     setShopMsg]     = useState('');
   const [redeeming,   setRedeeming]   = useState(false);
@@ -157,29 +160,36 @@ export function ChallengeModal({ onClose }: Props) {
 
   // All mutable game state in a single ref (no re-render per frame)
   const gs = useRef({
-    charX:     0,
-    charY:     0,
-    items:     [] as FallingItem[],
-    score:     0,
-    timeLeft:  60,
-    pressing:  null as 'left' | 'right' | null,
-    nextId:    0,
-    lastSpawn: 0,
-    running:   false,
-    W:         380,
-    H:         520,
+    charX:        0,
+    charY:        0,
+    items:        [] as FallingItem[],
+    score:        0,
+    timeLeft:     60,
+    pressing:     null as 'left' | 'right' | null,
+    nextId:       0,
+    lastSpawn:    0,
+    running:      false,
+    W:            380,
+    H:            520,
+    comboCount:   0,
+    lastCatchTs:  0,
   });
+
+  const bgImgRef      = useRef<HTMLImageElement | null>(null);
+  const audioCtxRef   = useRef<AudioContext | null>(null);
+  const comboTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // ── Fetch game config ──────────────────────────────────────────────────────
   useEffect(() => {
     fetch('/api/game/config')
       .then(r => r.ok ? r.json() : Promise.reject())
       .then((d: GameConfig) => setConfig({
-        characterUrl: d.characterUrl ?? '',
-        targetUrl:    d.targetUrl    ?? '',
-        duration:     d.duration     ?? 60,
+        characterUrl:  d.characterUrl  ?? '',
+        targetUrl:     d.targetUrl     ?? '',
+        duration:      d.duration      ?? 60,
+        backgroundUrl: d.backgroundUrl ?? '',
       }))
-      .catch(() => setConfig({ characterUrl: '', targetUrl: '', duration: 60 }));
+      .catch(() => setConfig({ characterUrl: '', targetUrl: '', duration: 60, backgroundUrl: '' }));
   }, []);
 
   // ── Load player profile ────────────────────────────────────────────────────
@@ -187,8 +197,12 @@ export function ChallengeModal({ onClose }: Props) {
     const user = auth.currentUser;
     if (!user) return;
     try {
-      const r = await fetch(`/api/game/profile/${user.uid}`);
-      if (r.ok) setProfile(await r.json());
+      const [profRes, walletRes] = await Promise.all([
+        fetch(`/api/game/profile/${user.uid}`),
+        fetch(`/api/game/wallet/${user.uid}`),
+      ]);
+      if (profRes.ok)   setProfile(await profRes.json());
+      if (walletRes.ok) { const w = await walletRes.json(); setWalletBal(w.balance ?? 0); }
     } catch { /* silent */ }
   }, []);
 
@@ -277,7 +291,9 @@ export function ChallengeModal({ onClose }: Props) {
       const d = await r.json();
       if (!r.ok) { setShopMsg(d.message ?? 'فشل الشراء'); return; }
       setProfile(p => p ? { ...p, gameCash: d.gameCash, unlockedSkins: d.unlockedSkins } : p);
-      setShopMsg(`✓ تم شراء "${skin.name}" بنجاح!`);
+      if (typeof d.walletBalance === 'number') setWalletBal(d.walletBalance);
+      const src = d.source === 'wallet' ? ' (من المحفظة)' : ' (من رصيد اللعبة)';
+      setShopMsg(`✓ تم شراء "${skin.name}" بنجاح${src}!`);
     } catch { setShopMsg('خطأ في الاتصال'); }
     finally  { setShopBuying(null); }
   }, []);
@@ -386,8 +402,45 @@ export function ChallengeModal({ onClose }: Props) {
       const dy = Math.abs(item.y - g.charY);
       if (dx < (CHAR_W / 2 + ITEM_W / 2) * 0.72 && dy < (CHAR_H / 2 + ITEM_H / 2) * 0.72) {
         item.collected = true;
-        g.score++;
+
+        // ── Combo system ──────────────────────────────────────────────────────
+        const now = ts;
+        const timeSinceLast = now - g.lastCatchTs;
+        if (timeSinceLast < 2000) {
+          g.comboCount = Math.min(g.comboCount + 1, 10);
+        } else {
+          g.comboCount = 1;
+        }
+        g.lastCatchTs = now;
+        const combo = g.comboCount;
+
+        // Combo score multiplier (triggers at 3+)
+        const multiplier = combo >= 3 ? combo : 1;
+        g.score += multiplier;
         setScore(g.score);
+
+        // Play catch sound
+        try {
+          if (!audioCtxRef.current) audioCtxRef.current = new AudioContext();
+          const actx = audioCtxRef.current;
+          const osc  = actx.createOscillator();
+          const gain = actx.createGain();
+          osc.connect(gain); gain.connect(actx.destination);
+          osc.frequency.value = combo >= 3 ? 880 + (combo - 3) * 120 : 540;
+          osc.type = 'sine';
+          gain.gain.setValueAtTime(0.25, actx.currentTime);
+          gain.gain.exponentialRampToValueAtTime(0.001, actx.currentTime + 0.18);
+          osc.start(actx.currentTime);
+          osc.stop(actx.currentTime + 0.18);
+        } catch { /* audio blocked */ }
+
+        // Show combo flash overlay (3+)
+        if (combo >= 3) {
+          if (comboTimerRef.current) clearTimeout(comboTimerRef.current);
+          setComboFlash(`Combo ×${combo}!`);
+          comboTimerRef.current = setTimeout(() => setComboFlash(null), 900);
+        }
+
         // ── Global session: atomic catch + optimistic profile update ─────────
         const uid = userUidRef.current;
         if (uid && sessionActiveRef.current && (sessionItemsRef.current ?? 1) > 0) {
@@ -399,8 +452,7 @@ export function ChallengeModal({ onClose }: Props) {
           })
           .then(r => r.ok ? r.json() : null)
           .then((res: { caught: boolean } | null) => {
-            // Optimistically add 1 game point to profile so shop reflects it live
-            if (res?.caught) setProfile(p => p ? { ...p, gamePoints: p.gamePoints + 1 } : p);
+            if (res?.caught) setProfile(p => p ? { ...p, gamePoints: p.gamePoints + multiplier } : p);
           })
           .catch(() => {});
         }
@@ -422,6 +474,14 @@ export function ChallengeModal({ onClose }: Props) {
     // Background
     ctx.fillStyle = '#05080f';
     ctx.fillRect(0, 0, W, H);
+
+    if (bgImgRef.current) {
+      ctx.save();
+      ctx.globalAlpha = 0.22;
+      ctx.drawImage(bgImgRef.current, 0, 0, W, H);
+      ctx.globalAlpha = 1;
+      ctx.restore();
+    }
 
     // Grid
     ctx.strokeStyle = 'rgba(0,212,255,0.055)';
@@ -501,12 +561,23 @@ export function ChallengeModal({ onClose }: Props) {
       });
     };
 
-    const [ci, ii] = await Promise.all([
+    const loadBg = (url: string) => new Promise<HTMLImageElement | null>(res => {
+      if (!url) { res(null); return; }
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload  = () => res(img);
+      img.onerror = () => res(null);
+      img.src = url;
+    });
+
+    const [ci, ii, bg] = await Promise.all([
       loadImg(config.characterUrl),
       loadImg(config.targetUrl),
+      loadBg(config.backgroundUrl),
     ]);
     charImgRef.current = ci;
     itemImgRef.current = ii;
+    bgImgRef.current   = bg;
 
     // Wait for React to flush the DOM (canvas is now rendered during 'loading' phase)
     await new Promise(r => setTimeout(r, 120));
