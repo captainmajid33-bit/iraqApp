@@ -264,8 +264,8 @@ export function ChallengeModal({ onClose }: Props) {
     charImgRef.current = ci;
     itemImgRef.current = ii;
 
-    // Wait one tick for canvas to mount
-    await new Promise(r => setTimeout(r, 60));
+    // Wait for React to flush the DOM (canvas is now rendered during 'loading' phase)
+    await new Promise(r => setTimeout(r, 120));
 
     const canvas = canvasRef.current;
     if (!canvas) { setPhase('menu'); return; }
@@ -418,7 +418,7 @@ export function ChallengeModal({ onClose }: Props) {
               color: C.yellow, letterSpacing: '0.12em',
               textShadow: neon(C.yellow, 10),
               marginBottom: '10px',
-            }}>تحدي ديالى</div>
+            }}>التحدي</div>
             <div style={{ color: C.dim, fontSize: '13px', lineHeight: 1.7, maxWidth: '280px', margin: '0 auto' }}>
               اصطد أكبر عدد من العناصر خلال {config?.duration ?? 60} ثانية!<br/>
               استخدم زري ← و → للتحرك
@@ -462,15 +462,30 @@ export function ChallengeModal({ onClose }: Props) {
         </div>
       )}
 
-      {/* ── PLAYING ──────────────────────────────────────────────────────────── */}
-      {phase === 'playing' && (
+      {/* ── PLAYING (canvas is mounted during loading too so ref is valid) ──── */}
+      {(phase === 'playing' || phase === 'loading') && (
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+          {/* Loading overlay — visible only while images load */}
+          {phase === 'loading' && (
+            <div style={{
+              position: 'absolute', inset: 0, zIndex: 10,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              background: 'rgba(5,8,15,0.92)',
+              flexDirection: 'column', gap: '16px',
+            }}>
+              <div style={{ fontSize: '40px', animation: 'spin 1s linear infinite' }}>⏳</div>
+              <div style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '13px', color: C.yellow, letterSpacing: '0.1em' }}>
+                جاري التحضير...
+              </div>
+            </div>
+          )}
           {/* Canvas */}
           <canvas
             ref={canvasRef}
             style={{
               flex: 1, width: '100%', display: 'block',
               touchAction: 'none',
+              visibility: phase === 'loading' ? 'hidden' : 'visible',
             }}
           />
 
