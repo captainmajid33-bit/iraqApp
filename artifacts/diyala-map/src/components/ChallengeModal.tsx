@@ -108,12 +108,18 @@ const SKINS: SkinDef[] = [
   },
 ];
 
-// ── Game constants ─────────────────────────────────────────────────────────────
-const CHAR_W     = 60;
-const CHAR_H     = 60;
-const ITEM_W     = 44;
-const ITEM_H     = 44;
-const CHAR_SPEED = 6;
+// ── Game constants — Horizontal Runner ────────────────────────────────────────
+const CHAR_W        = 64;
+const CHAR_H        = 64;
+const ITEM_W        = 48;
+const ITEM_H        = 48;
+const CHAR_SPEED    = 6;   // unused (kept for compat)
+const RUSH_SPEED    = 10;  // px/frame — character rushes right on press
+const RETURN_SPEED  = 7;   // px/frame — character snaps left on release
+const ITEM_SPD_MIN  = 4.0; // horizontal item speed (px/frame)
+const ITEM_SPD_VAR  = 3.0;
+const BG_SCROLL_RUN = 3.5; // parallax speed when pressing
+const BG_SCROLL_IDL = 1.0; // parallax speed when idle
 
 // ── Component ────────────────────────────────────────────────────────────────
 export function ChallengeModal({ onClose }: Props) {
@@ -173,6 +179,8 @@ export function ChallengeModal({ onClose }: Props) {
     H:            520,
     comboCount:   0,
     lastCatchTs:  0,
+    bgScrollX:    0,   // parallax scroll offset
+    speedBoost:   0,   // item speed multiplier (grows over time)
   });
 
   const bgImgRef      = useRef<HTMLImageElement | null>(null);
@@ -369,7 +377,7 @@ export function ChallengeModal({ onClose }: Props) {
     setPhase('gameover');
   }, []);
 
-  // ── Draw one frame ─────────────────────────────────────────────────────────
+  // ── Draw one frame — Horizontal Runner ────────────────────────────────────
   const drawFrame = useCallback((ts: number) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -378,170 +386,264 @@ export function ChallengeModal({ onClose }: Props) {
     const g = gs.current;
     const { W, H } = g;
 
-    // Move character
-    if (g.pressing === 'right') g.charX = Math.min(W - CHAR_W / 2, g.charX + CHAR_SPEED);
-    if (g.pressing === 'left')  g.charX = Math.max(CHAR_W / 2,     g.charX - CHAR_SPEED);
+    // Character anchor points
+    const BASE_X = Math.round(W * 0.16);
+    const MAX_X  = Math.round(W * 0.60);
+    const GROUND_Y = Math.round(H * 0.74);
+    g.charY = GROUND_Y;
 
-    // Spawn new item
-    if (ts - g.lastSpawn > 1100) {
+    // ── Move character ────────────────────────────────────────────────────────
+    if (g.pressing === 'right') {
+      g.charX = Math.min(MAX_X, g.charX + RUSH_SPEED);
+    } else {
+      g.charX = Math.max(BASE_X, g.charX - RETURN_SPEED);
+    }
+
+    // ── Scroll parallax background ────────────────────────────────────────────
+    const scrollSpd = g.pressing === 'right' ? BG_SCROLL_RUN : BG_SCROLL_IDL;
+    g.bgScrollX = (g.bgScrollX + scrollSpd) % W;
+
+    // Speed boost grows over session time (items get faster after ~20s)
+    g.speedBoost = Math.min(3.5, (g.score * 0.08));
+
+    // ── Spawn items from right ─────────────────────────────────────────────────
+    const spawnInterval = Math.max(500, 1050 - g.score * 8);
+    if (ts - g.lastSpawn > spawnInterval) {
+      const variance = (Math.random() - 0.5) * 22;
       g.items.push({
         id:        g.nextId++,
-        x:         ITEM_W / 2 + Math.random() * (W - ITEM_W),
-        y:         -ITEM_H,
-        speed:     2.2 + Math.random() * 2.2,
+        x:         W + ITEM_W,
+        y:         GROUND_Y + variance,
+        speed:     ITEM_SPD_MIN + Math.random() * ITEM_SPD_VAR + g.speedBoost,
         collected: false,
       });
       g.lastSpawn = ts;
     }
 
-    // Update items + collision
+    // ── Update items (move left) + collision ──────────────────────────────────
     for (const item of g.items) {
       if (item.collected) continue;
-      item.y += item.speed;
+      item.x -= item.speed;
+
       const dx = Math.abs(item.x - g.charX);
       const dy = Math.abs(item.y - g.charY);
-      if (dx < (CHAR_W / 2 + ITEM_W / 2) * 0.72 && dy < (CHAR_H / 2 + ITEM_H / 2) * 0.72) {
+      if (dx < (CHAR_W / 2 + ITEM_W / 2) * 0.78 && dy < (CHAR_H / 2 + ITEM_H / 2) * 0.80) {
         item.collected = true;
 
         // ── Combo system ──────────────────────────────────────────────────────
-        const now = ts;
-        const timeSinceLast = now - g.lastCatchTs;
-        if (timeSinceLast < 2000) {
-          g.comboCount = Math.min(g.comboCount + 1, 10);
-        } else {
-          g.comboCount = 1;
-        }
-        g.lastCatchTs = now;
+        const timeSinceLast = ts - g.lastCatchTs;
+        g.comboCount = timeSinceLast < 2200 ? Math.min(g.comboCount + 1, 10) : 1;
+        g.lastCatchTs = ts;
         const combo = g.comboCount;
-
-        // Combo score multiplier (triggers at 3+)
         const multiplier = combo >= 3 ? combo : 1;
         g.score += multiplier;
         setScore(g.score);
 
-        // Play catch sound
+        // Play catch sound (Web Audio API — no file needed)
         try {
           if (!audioCtxRef.current) audioCtxRef.current = new AudioContext();
           const actx = audioCtxRef.current;
-          const osc  = actx.createOscillator();
+          const osc = actx.createOscillator();
           const gain = actx.createGain();
           osc.connect(gain); gain.connect(actx.destination);
-          osc.frequency.value = combo >= 3 ? 880 + (combo - 3) * 120 : 540;
-          osc.type = 'sine';
-          gain.gain.setValueAtTime(0.25, actx.currentTime);
-          gain.gain.exponentialRampToValueAtTime(0.001, actx.currentTime + 0.18);
+          osc.frequency.value = combo >= 3 ? 880 + (combo - 3) * 130 : 560;
+          osc.type = combo >= 3 ? 'triangle' : 'sine';
+          gain.gain.setValueAtTime(0.28, actx.currentTime);
+          gain.gain.exponentialRampToValueAtTime(0.001, actx.currentTime + 0.22);
           osc.start(actx.currentTime);
-          osc.stop(actx.currentTime + 0.18);
+          osc.stop(actx.currentTime + 0.22);
         } catch { /* audio blocked */ }
 
-        // Show combo flash overlay (3+)
+        // Combo overlay
         if (combo >= 3) {
           if (comboTimerRef.current) clearTimeout(comboTimerRef.current);
           setComboFlash(`Combo ×${combo}!`);
-          comboTimerRef.current = setTimeout(() => setComboFlash(null), 900);
+          comboTimerRef.current = setTimeout(() => setComboFlash(null), 950);
         }
 
-        // ── Global session: atomic catch + optimistic profile update ─────────
+        // Global session catch
         const uid = userUidRef.current;
         if (uid && sessionActiveRef.current && (sessionItemsRef.current ?? 1) > 0) {
           if (sessionItemsRef.current !== null) sessionItemsRef.current = Math.max(0, sessionItemsRef.current - 1);
           fetch('/api/game/session/catch', {
-            method:  'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body:    JSON.stringify({ firebaseUid: uid, userName: userNameRef.current }),
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ firebaseUid: uid, userName: userNameRef.current }),
           })
           .then(r => r.ok ? r.json() : null)
           .then((res: { caught: boolean } | null) => {
             if (res?.caught) setProfile(p => p ? { ...p, gamePoints: p.gamePoints + multiplier } : p);
-          })
-          .catch(() => {});
+          }).catch(() => {});
         }
       }
     }
-    g.items = g.items.filter(it => !it.collected && it.y < H + ITEM_H);
+    // Remove items that passed off-screen left
+    g.items = g.items.filter(it => !it.collected && it.x > -ITEM_W * 2);
 
-    // ── External catch queue: remove items taken by other players ────────────
+    // External catch queue
     if (externalCatchQueue.current > 0) {
       const visible = g.items.filter(it => !it.collected);
       const toRemove = Math.min(externalCatchQueue.current, visible.length);
       for (let i = 0; i < toRemove; i++) visible[i].collected = true;
       externalCatchQueue.current = Math.max(0, externalCatchQueue.current - toRemove);
-      // Also clear them from items array immediately
       g.items = g.items.filter(it => !it.collected);
     }
 
-    // ── Draw ──────────────────────────────────────────────────────────────────
-    // Background
+    // ══════════════════════════════════════════════════════════════════════════
+    // DRAW
+    // ══════════════════════════════════════════════════════════════════════════
+
+    // ── Sky background ────────────────────────────────────────────────────────
     ctx.fillStyle = '#05080f';
     ctx.fillRect(0, 0, W, H);
 
+    // ── Parallax background image ─────────────────────────────────────────────
     if (bgImgRef.current) {
       ctx.save();
-      ctx.globalAlpha = 0.22;
-      ctx.drawImage(bgImgRef.current, 0, 0, W, H);
+      ctx.globalAlpha = 0.28;
+      const bx = -(g.bgScrollX % W);
+      ctx.drawImage(bgImgRef.current, bx,     0, W, H);
+      ctx.drawImage(bgImgRef.current, bx + W, 0, W, H);
       ctx.globalAlpha = 1;
       ctx.restore();
-    }
-
-    // Grid
-    ctx.strokeStyle = 'rgba(0,212,255,0.055)';
-    ctx.lineWidth = 1;
-    for (let x = 0; x <= W; x += 38) { ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,H); ctx.stroke(); }
-    for (let y = 0; y <= H; y += 38) { ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke(); }
-
-    // Scanline effect (subtle)
-    ctx.fillStyle = 'rgba(0,0,0,0.18)';
-    for (let y = 0; y < H; y += 4) ctx.fillRect(0, y, W, 2);
-
-    // Ground glow
-    const groundY = g.charY + CHAR_H / 2 + 8;
-    const grad = ctx.createLinearGradient(0, groundY - 4, 0, groundY + 12);
-    grad.addColorStop(0, '#00f5d466');
-    grad.addColorStop(1, 'transparent');
-    ctx.fillStyle = grad;
-    ctx.fillRect(0, groundY - 4, W, 16);
-    ctx.strokeStyle = '#00f5d455';
-    ctx.lineWidth = 1.5;
-    ctx.beginPath(); ctx.moveTo(0, groundY); ctx.lineTo(W, groundY); ctx.stroke();
-
-    // Draw items
-    for (const item of g.items) {
-      if (item.collected) continue;
-      if (itemImgRef.current) {
-        ctx.save();
-        ctx.shadowColor = '#f5c51888';
-        ctx.shadowBlur = 10;
-        ctx.drawImage(itemImgRef.current, item.x - ITEM_W / 2, item.y - ITEM_H / 2, ITEM_W, ITEM_H);
-        ctx.restore();
-      } else {
-        ctx.save();
-        ctx.font = '32px sans-serif';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.shadowColor = C.yellow;
-        ctx.shadowBlur = 12;
-        ctx.fillText('🍔', item.x, item.y);
-        ctx.restore();
+    } else {
+      // ── Built-in city silhouette (when no bg image) ───────────────────────
+      const bx = -(g.bgScrollX % W);
+      for (let pass = 0; pass < 2; pass++) {
+        const ox = bx + pass * W;
+        // building silhouettes
+        const bldgs = [
+          { x: 0.05, w: 0.08, h: 0.28 }, { x: 0.15, w: 0.05, h: 0.38 },
+          { x: 0.22, w: 0.09, h: 0.22 }, { x: 0.33, w: 0.06, h: 0.42 },
+          { x: 0.41, w: 0.07, h: 0.30 }, { x: 0.50, w: 0.05, h: 0.35 },
+          { x: 0.57, w: 0.10, h: 0.24 }, { x: 0.69, w: 0.06, h: 0.44 },
+          { x: 0.77, w: 0.08, h: 0.32 }, { x: 0.87, w: 0.07, h: 0.26 },
+        ];
+        ctx.fillStyle = '#0a0f1c';
+        for (const b of bldgs) {
+          const bh = b.h * H * 0.55;
+          ctx.fillRect(ox + b.x * W, GROUND_Y - bh, b.w * W, bh);
+        }
+        // window lights
+        ctx.fillStyle = '#f5c51833';
+        for (const b of bldgs) {
+          const bh = b.h * H * 0.55;
+          for (let wy = GROUND_Y - bh + 8; wy < GROUND_Y - 8; wy += 14) {
+            for (let wx = ox + b.x * W + 4; wx < ox + (b.x + b.w) * W - 4; wx += 10) {
+              if (Math.sin(wx * 3.7 + wy * 1.3) > 0.2) ctx.fillRect(wx, wy, 4, 6);
+            }
+          }
+        }
       }
     }
 
-    // Draw character
-    if (charImgRef.current) {
+    // ── Scanline overlay ──────────────────────────────────────────────────────
+    ctx.fillStyle = 'rgba(0,0,0,0.14)';
+    for (let y = 0; y < H; y += 4) ctx.fillRect(0, y, W, 2);
+
+    // ── Road / ground strip ───────────────────────────────────────────────────
+    const roadTop = GROUND_Y - CHAR_H / 2 - 6;
+    const roadH   = H - roadTop;
+    const roadGrad = ctx.createLinearGradient(0, roadTop, 0, H);
+    roadGrad.addColorStop(0, '#0d1220');
+    roadGrad.addColorStop(1, '#070b15');
+    ctx.fillStyle = roadGrad;
+    ctx.fillRect(0, roadTop, W, roadH);
+
+    // road lane dashes (scrolling)
+    ctx.strokeStyle = 'rgba(0,212,255,0.18)';
+    ctx.lineWidth   = 2;
+    ctx.setLineDash([22, 18]);
+    ctx.lineDashOffset = -(g.bgScrollX * 1.6) % 40;
+    const laneY = roadTop + roadH * 0.38;
+    ctx.beginPath(); ctx.moveTo(0, laneY); ctx.lineTo(W, laneY); ctx.stroke();
+    ctx.setLineDash([]);
+
+    // road top glow line
+    const glowGrad = ctx.createLinearGradient(0, roadTop - 3, 0, roadTop + 8);
+    glowGrad.addColorStop(0, '#00f5d488');
+    glowGrad.addColorStop(1, 'transparent');
+    ctx.fillStyle = glowGrad;
+    ctx.fillRect(0, roadTop - 3, W, 11);
+    ctx.strokeStyle = '#00f5d466';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(0, roadTop); ctx.lineTo(W, roadTop); ctx.stroke();
+
+    // ── Speed streaks when pressing ───────────────────────────────────────────
+    if (g.pressing === 'right') {
       ctx.save();
-      ctx.shadowColor = '#00f5d466';
-      ctx.shadowBlur = 14;
-      ctx.drawImage(charImgRef.current, g.charX - CHAR_W / 2, g.charY - CHAR_H / 2, CHAR_W, CHAR_H);
-      ctx.restore();
-    } else {
-      ctx.save();
-      ctx.font = '40px sans-serif';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.shadowColor = C.green;
-      ctx.shadowBlur = 16;
-      ctx.fillText('🏃', g.charX, g.charY);
+      ctx.globalAlpha = 0.18;
+      for (let i = 0; i < 7; i++) {
+        const sy   = roadTop + 4 + Math.random() * (roadH - 8);
+        const slen = 18 + Math.random() * 40;
+        const sx   = g.charX - 30 - Math.random() * 80;
+        const streak = ctx.createLinearGradient(sx - slen, sy, sx, sy);
+        streak.addColorStop(0, 'transparent');
+        streak.addColorStop(1, '#00d4ff');
+        ctx.fillStyle = streak;
+        ctx.fillRect(sx - slen, sy - 1, slen, 2);
+      }
       ctx.restore();
     }
+
+    // ── Draw items ────────────────────────────────────────────────────────────
+    for (const item of g.items) {
+      if (item.collected) continue;
+      // bobbing effect
+      const bob = Math.sin(ts * 0.006 + item.id) * 4;
+      ctx.save();
+      if (itemImgRef.current) {
+        ctx.shadowColor = '#f5c51899';
+        ctx.shadowBlur  = 14;
+        ctx.drawImage(itemImgRef.current, item.x - ITEM_W / 2, item.y - ITEM_H / 2 + bob, ITEM_W, ITEM_H);
+      } else {
+        ctx.font         = '34px sans-serif';
+        ctx.textAlign    = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.shadowColor  = C.yellow;
+        ctx.shadowBlur   = 16;
+        ctx.fillText('🍔', item.x, item.y + bob);
+      }
+      // glow halo
+      ctx.shadowBlur = 0;
+      const halo = ctx.createRadialGradient(item.x, item.y + bob, 4, item.x, item.y + bob, ITEM_W * 0.8);
+      halo.addColorStop(0, '#f5c51822');
+      halo.addColorStop(1, 'transparent');
+      ctx.fillStyle = halo;
+      ctx.fillRect(item.x - ITEM_W, item.y + bob - ITEM_H, ITEM_W * 2, ITEM_H * 2);
+      ctx.restore();
+    }
+
+    // ── Draw character ────────────────────────────────────────────────────────
+    const rushing = g.pressing === 'right';
+    ctx.save();
+    ctx.shadowColor = rushing ? '#00d4ff88' : '#00f5d455';
+    ctx.shadowBlur  = rushing ? 20 : 12;
+    if (charImgRef.current) {
+      // Flip horizontally when rushing right (face right direction)
+      if (rushing) {
+        ctx.translate(g.charX + CHAR_W / 2, 0);
+        ctx.scale(-1, 1);
+        ctx.drawImage(charImgRef.current, -CHAR_W / 2, g.charY - CHAR_H / 2, CHAR_W, CHAR_H);
+      } else {
+        ctx.drawImage(charImgRef.current, g.charX - CHAR_W / 2, g.charY - CHAR_H / 2, CHAR_W, CHAR_H);
+      }
+    } else {
+      ctx.font         = '44px sans-serif';
+      ctx.textAlign    = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(rushing ? '🏃' : '🧍', g.charX, g.charY);
+    }
+    ctx.restore();
+
+    // ── Character ground shadow ───────────────────────────────────────────────
+    ctx.save();
+    ctx.globalAlpha = 0.35;
+    const shGrad = ctx.createRadialGradient(g.charX, roadTop + 2, 0, g.charX, roadTop + 2, CHAR_W * 0.55);
+    shGrad.addColorStop(0, '#00f5d444');
+    shGrad.addColorStop(1, 'transparent');
+    ctx.fillStyle = shGrad;
+    ctx.fillRect(g.charX - CHAR_W * 0.6, roadTop - 2, CHAR_W * 1.2, 8);
+    ctx.restore();
   }, []);
 
   // ── Start game ─────────────────────────────────────────────────────────────
@@ -590,17 +692,19 @@ export function ChallengeModal({ onClose }: Props) {
     canvas.height = H;
 
     const g = gs.current;
-    g.charX    = W / 2;
-    g.charY    = H - CHAR_H - 24;
-    g.items       = [];
-    g.score       = 0;
-    g.timeLeft    = config.duration;
-    g.pressing    = null;
-    g.nextId      = 0;
-    g.lastSpawn   = 0;
-    g.running     = true;
-    g.comboCount  = 0;
-    g.lastCatchTs = 0;
+    g.charX      = Math.round(W * 0.16);   // start on LEFT side
+    g.charY      = Math.round(H * 0.74);
+    g.items      = [];
+    g.score      = 0;
+    g.timeLeft   = config.duration;
+    g.pressing   = null;
+    g.nextId     = 0;
+    g.lastSpawn  = 0;
+    g.running    = true;
+    g.comboCount = 0;
+    g.lastCatchTs= 0;
+    g.bgScrollX  = 0;
+    g.speedBoost = 0;
     g.W = W; g.H = H;
 
     setScore(0);
