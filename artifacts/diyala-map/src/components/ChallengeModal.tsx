@@ -132,21 +132,28 @@ export function ChallengeModal({ onClose }: Props) {
   const [redeeming,   setRedeeming]   = useState(false);
 
   // ── Global session state ────────────────────────────────────────────────────
-  const [sessionItemsLeft, setSessionItemsLeft] = useState<number | null>(null);
-  const [sessionActive,    setSessionActive]    = useState(false);
-  const [sessionTotal,     setSessionTotal]     = useState<number>(100);
+  const [sessionItemsLeft,  setSessionItemsLeft]  = useState<number | null>(null);
+  const [sessionActive,     setSessionActive]     = useState(false);
+  const [sessionTotal,      setSessionTotal]      = useState<number>(100);
+  const [externalCatchFlash,setExternalCatchFlash]= useState(false);   // "⚡ لاعب آخر التقط!"
 
-  const canvasRef       = useRef<HTMLCanvasElement>(null);
-  const rafRef          = useRef<number>(0);
-  const timerRef        = useRef<ReturnType<typeof setInterval> | null>(null);
-  const charImgRef      = useRef<HTMLImageElement | null>(null);
-  const itemImgRef      = useRef<HTMLImageElement | null>(null);
+  const canvasRef            = useRef<HTMLCanvasElement>(null);
+  const rafRef               = useRef<number>(0);
+  const timerRef             = useRef<ReturnType<typeof setInterval> | null>(null);
+  const charImgRef           = useRef<HTMLImageElement | null>(null);
+  const itemImgRef           = useRef<HTMLImageElement | null>(null);
   // refs accessible inside RAF loop without closure issues
-  const userUidRef      = useRef<string | null>(null);
-  const userNameRef     = useRef<string>('لاعب');
-  const sessionItemsRef = useRef<number | null>(null);
-  const sessionActiveRef= useRef<boolean>(false);
-  const sseRef          = useRef<EventSource | null>(null);
+  const userUidRef           = useRef<string | null>(null);
+  const userNameRef          = useRef<string>('لاعب');
+  const sessionItemsRef      = useRef<number | null>(null);
+  const sessionActiveRef     = useRef<boolean>(false);
+  const sseRef               = useRef<EventSource | null>(null);
+  // external catch queue: items taken by OTHER players → remove from canvas
+  const externalCatchQueue   = useRef<number>(0);
+  // phase ref so SSE handler (no closure re-creation) can read current phase
+  const phaseRef             = useRef<string>('menu');
+  // flash timeout handle
+  const flashTimerRef        = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // All mutable game state in a single ref (no re-render per frame)
   const gs = useRef({
@@ -187,6 +194,9 @@ export function ChallengeModal({ onClose }: Props) {
 
   useEffect(() => { loadProfile(); }, [loadProfile]);
 
+  // Keep phaseRef in sync with React state (SSE handler reads it without closure issues)
+  useEffect(() => { phaseRef.current = phase; }, [phase]);
+
   // ── Session fetch + SSE listener ────────────────────────────────────────────
   useEffect(() => {
     // Cache user info in refs (accessible inside RAF without closure)
@@ -218,6 +228,25 @@ export function ChallengeModal({ onClose }: Props) {
         const { session } = JSON.parse(e.data) as {
           session: { sessionId: string; totalItems: number; itemsLeft: number; isActive: boolean };
         };
+
+        // ── Detect external catches (items taken by OTHER players) ────────────
+        // Our optimistic decrement keeps sessionItemsRef ahead. If server says
+        // even LOWER, the difference = items grabbed by others this frame.
+        const prevItems = sessionItemsRef.current;
+        if (
+          prevItems !== null &&
+          session.isActive &&
+          session.itemsLeft < prevItems &&
+          phaseRef.current === 'playing'
+        ) {
+          const externalCount = prevItems - session.itemsLeft;
+          externalCatchQueue.current += externalCount;
+          // Show flash overlay "⚡ لاعب آخر التقط عنصراً!"
+          setExternalCatchFlash(true);
+          if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
+          flashTimerRef.current = setTimeout(() => setExternalCatchFlash(false), 1600);
+        }
+
         setSessionActive(session.isActive);
         setSessionTotal(session.totalItems);
         setSessionItemsLeft(session.itemsLeft);
@@ -229,6 +258,7 @@ export function ChallengeModal({ onClose }: Props) {
     return () => {
       es.close();
       sseRef.current = null;
+      if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
     };
   }, []);
 
@@ -358,20 +388,35 @@ export function ChallengeModal({ onClose }: Props) {
         item.collected = true;
         g.score++;
         setScore(g.score);
-        // ── Global session: fire-and-forget atomic catch ──────────────────────
+        // ── Global session: atomic catch + optimistic profile update ─────────
         const uid = userUidRef.current;
         if (uid && sessionActiveRef.current && (sessionItemsRef.current ?? 1) > 0) {
-          // Optimistically decrement local ref so RAF doesn't double-fire
           if (sessionItemsRef.current !== null) sessionItemsRef.current = Math.max(0, sessionItemsRef.current - 1);
           fetch('/api/game/session/catch', {
             method:  'POST',
             headers: { 'Content-Type': 'application/json' },
             body:    JSON.stringify({ firebaseUid: uid, userName: userNameRef.current }),
-          }).catch(() => {});
+          })
+          .then(r => r.ok ? r.json() : null)
+          .then((res: { caught: boolean } | null) => {
+            // Optimistically add 1 game point to profile so shop reflects it live
+            if (res?.caught) setProfile(p => p ? { ...p, gamePoints: p.gamePoints + 1 } : p);
+          })
+          .catch(() => {});
         }
       }
     }
     g.items = g.items.filter(it => !it.collected && it.y < H + ITEM_H);
+
+    // ── External catch queue: remove items taken by other players ────────────
+    if (externalCatchQueue.current > 0) {
+      const visible = g.items.filter(it => !it.collected);
+      const toRemove = Math.min(externalCatchQueue.current, visible.length);
+      for (let i = 0; i < toRemove; i++) visible[i].collected = true;
+      externalCatchQueue.current = Math.max(0, externalCatchQueue.current - toRemove);
+      // Also clear them from items array immediately
+      g.items = g.items.filter(it => !it.collected);
+    }
 
     // ── Draw ──────────────────────────────────────────────────────────────────
     // Background
@@ -638,6 +683,54 @@ export function ChallengeModal({ onClose }: Props) {
             </div>
           </div>
 
+          {/* ── Live Session Banner ───────────────────────────────────────────── */}
+          {sessionActive && sessionItemsLeft !== null && (
+            <div style={{
+              width: '100%', maxWidth: '300px',
+              background: `linear-gradient(135deg, ${C.yellow}14, ${C.yellow}08)`,
+              border: `1px solid ${C.yellow}55`,
+              borderRadius: '10px',
+              padding: '12px 16px',
+              display: 'flex', flexDirection: 'column', gap: '8px',
+            }}>
+              {/* Title row */}
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <span style={{
+                  fontFamily: 'Orbitron, sans-serif', fontSize: '11px',
+                  color: C.yellow, letterSpacing: '0.08em',
+                  textShadow: neon(C.yellow, 5),
+                }}>🏆 تحدي جماعي نشط!</span>
+                <span style={{
+                  fontFamily: 'Orbitron, sans-serif', fontSize: '13px',
+                  color: sessionItemsLeft === 0 ? C.red : C.green,
+                  textShadow: neon(sessionItemsLeft === 0 ? C.red : C.green, 6),
+                  fontWeight: 700,
+                }}>
+                  {sessionItemsLeft === 0 ? '⛔ انتهت العناصر' : `متبقي ${sessionItemsLeft} عنصر فقط!`}
+                </span>
+              </div>
+              {/* Progress bar */}
+              <div style={{
+                width: '100%', height: '6px', borderRadius: '3px',
+                background: `${C.yellow}22`,
+                overflow: 'hidden',
+              }}>
+                <div style={{
+                  height: '100%', borderRadius: '3px',
+                  width: `${Math.max(0, (sessionItemsLeft / sessionTotal) * 100)}%`,
+                  background: sessionItemsLeft < sessionTotal * 0.2
+                    ? `linear-gradient(90deg, ${C.red}, ${C.yellow})`
+                    : `linear-gradient(90deg, ${C.green}, ${C.yellow})`,
+                  transition: 'width 0.4s ease, background 0.4s',
+                  boxShadow: neon(C.yellow, 4),
+                }} />
+              </div>
+              <div style={{ fontSize: '10px', color: C.dim, textAlign: 'center' }}>
+                {sessionTotal - sessionItemsLeft} من {sessionTotal} عنصر تم التقاطه من اللاعبين
+              </div>
+            </div>
+          )}
+
           <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', width: '100%', maxWidth: '300px' }}>
             <button
               onClick={startGame}
@@ -712,6 +805,25 @@ export function ChallengeModal({ onClose }: Props) {
               </div>
             </div>
           )}
+          {/* ── External-catch flash overlay ──────────────────────────────── */}
+          {externalCatchFlash && (
+            <div style={{
+              position: 'absolute', top: '60px', left: '50%', transform: 'translateX(-50%)',
+              zIndex: 20, pointerEvents: 'none',
+              background: `linear-gradient(135deg, ${C.red}cc, ${C.yellow}99)`,
+              border: `1px solid ${C.red}88`,
+              borderRadius: '22px', padding: '6px 18px',
+              fontFamily: 'Orbitron, sans-serif', fontSize: '11px',
+              color: '#fff', letterSpacing: '0.07em',
+              textShadow: neon(C.red, 6),
+              boxShadow: `0 0 14px ${C.red}88`,
+              animation: 'fadeInOut 1.6s ease forwards',
+              whiteSpace: 'nowrap',
+            }}>
+              ⚡ لاعب آخر التقط عنصراً!
+            </div>
+          )}
+
           {/* Canvas */}
           <canvas
             ref={canvasRef}

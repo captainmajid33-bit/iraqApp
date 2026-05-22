@@ -5484,8 +5484,29 @@ function GameConfigTab({ toast }: { toast: ReturnType<typeof useToast> }) {
   const [board,        setBoard]        = useState<LeaderRow[]>([]);
   const [boardLoading, setBoardLoading] = useState(false);
 
+  // ── Global Game Session state ───────────────────────────────────────────────
+  interface GameSession {
+    sessionId: string; totalItems: number; itemsLeft: number;
+    itemType: string; isActive: boolean; createdAt: string;
+  }
+  const [session,        setSession]        = useState<GameSession | null>(null);
+  const [sessionLoading, setSessionLoading] = useState(false);
+  const [sessionItems,   setSessionItems]   = useState(50);
+  const [sessionType,    setSessionType]    = useState("burger");
+  const [sessionBusy,    setSessionBusy]    = useState(false);
+  // Live SSE updates for session
+  const sseAdminRef = useRef<EventSource | null>(null);
+
   const charFileRef   = useRef<HTMLInputElement>(null);
   const targetFileRef = useRef<HTMLInputElement>(null);
+
+  const loadSession = useCallback(async () => {
+    setSessionLoading(true);
+    try {
+      const s = await fetch("/api/game/session").then(r => r.ok ? r.json() : null);
+      setSession(s ?? null);
+    } catch { /* silent */ } finally { setSessionLoading(false); }
+  }, []);
 
   useEffect(() => {
     api.get("/api/game/config").then((d: { characterUrl: string; targetUrl: string; duration: number }) => {
@@ -5496,7 +5517,19 @@ function GameConfigTab({ toast }: { toast: ReturnType<typeof useToast> }) {
 
     setBoardLoading(true);
     api.get("/api/game/leaderboard").then((d: LeaderRow[]) => setBoard(Array.isArray(d) ? d : [])).catch(() => {}).finally(() => setBoardLoading(false));
-  }, []);
+
+    // Load current session & subscribe to live updates
+    loadSession();
+    const es = new EventSource("/api/events");
+    sseAdminRef.current = es;
+    es.addEventListener("game_session_update", (e: MessageEvent) => {
+      try {
+        const { session: s } = JSON.parse(e.data);
+        setSession(s.isActive ? s : null);
+      } catch { /* ignore */ }
+    });
+    return () => { es.close(); sseAdminRef.current = null; };
+  }, [loadSession]);
 
   // ── Upload image via object storage ─────────────────────────────────────────
   const uploadImage = async (
@@ -5531,6 +5564,42 @@ function GameConfigTab({ toast }: { toast: ReturnType<typeof useToast> }) {
       toast.show(err?.message ?? "فشل رفع الصورة", false);
     } finally {
       setUploading(false);
+    }
+  };
+
+  // ── Session handlers ────────────────────────────────────────────────────────
+  const startSession = async () => {
+    setSessionBusy(true);
+    try {
+      const s = await fetch("/api/game/session", {
+        method: "POST",
+        headers: admHeaders(),
+        body: JSON.stringify({ totalItems: sessionItems, itemType: sessionType }),
+      }).then(r => r.json());
+      setSession(s);
+      toast.show(`✓ بدأت جلسة جديدة — ${sessionItems} عنصر`, "success");
+    } catch {
+      toast.show("فشل بدء الجلسة", "error");
+    } finally {
+      setSessionBusy(false);
+    }
+  };
+
+  const stopSession = async () => {
+    if (!session) return;
+    setSessionBusy(true);
+    try {
+      await fetch("/api/game/session", {
+        method: "PATCH",
+        headers: admHeaders(),
+        body: JSON.stringify({ isActive: false }),
+      });
+      setSession(null);
+      toast.show("✓ تم إيقاف الجلسة", "success");
+    } catch {
+      toast.show("فشل إيقاف الجلسة", "error");
+    } finally {
+      setSessionBusy(false);
     }
   };
 
@@ -5658,6 +5727,96 @@ function GameConfigTab({ toast }: { toast: ReturnType<typeof useToast> }) {
           >
             {saving ? "⏳ جاري الحفظ..." : "💾 حفظ الإعدادات"}
           </button>
+        </div>
+      </div>
+
+      {/* ── Global Game Session Control ───────────────────────────────────── */}
+      <div style={{ background: C.surface, border: `1px solid ${session ? C.green + "66" : C.border}`, borderRadius: "8px", padding: "24px", transition: "border-color 0.4s" }}>
+        <div style={{ fontFamily: "Orbitron, sans-serif", fontSize: "12px", color: C.green, letterSpacing: "0.12em", marginBottom: "20px", textShadow: neon(C.green, 6), display: "flex", alignItems: "center", gap: "12px" }}>
+          🎯 جلسة اللعبة الجماعية المباشرة
+          {session && (
+            <span style={{ fontSize: "10px", background: `${C.green}22`, border: `1px solid ${C.green}44`, borderRadius: "12px", padding: "3px 10px", color: C.green, animation: "pulse 1.2s ease-in-out infinite alternate" }}>
+              ● نشطة
+            </span>
+          )}
+        </div>
+
+        {/* Live session status */}
+        {sessionLoading ? (
+          <div style={{ color: C.dim, fontSize: "13px", padding: "10px 0" }}>⏳ جاري التحميل...</div>
+        ) : session ? (
+          <div style={{ display: "flex", flexDirection: "column", gap: "14px", marginBottom: "20px" }}>
+            {/* Progress bar */}
+            <div>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "6px" }}>
+                <span style={{ fontFamily: "Orbitron, sans-serif", fontSize: "11px", color: C.yellow }}>
+                  متبقي: {session.itemsLeft} / {session.totalItems} عنصر
+                </span>
+                <span style={{ fontFamily: "Orbitron, sans-serif", fontSize: "11px", color: C.dim }}>
+                  {session.totalItems - session.itemsLeft} تم التقاطها
+                </span>
+              </div>
+              <div style={{ width: "100%", height: "10px", background: `${C.green}18`, borderRadius: "5px", overflow: "hidden" }}>
+                <div style={{
+                  height: "100%", borderRadius: "5px",
+                  width: `${(session.itemsLeft / session.totalItems) * 100}%`,
+                  background: session.itemsLeft < session.totalItems * 0.2
+                    ? `linear-gradient(90deg, ${C.red}, ${C.yellow})`
+                    : `linear-gradient(90deg, ${C.green}, ${C.blue})`,
+                  transition: "width 0.5s ease",
+                  boxShadow: neon(C.green, 5),
+                }} />
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: "16px", fontSize: "12px", color: C.dim, fontFamily: "Rajdhani, sans-serif" }}>
+              <span>النوع: <strong style={{ color: C.text }}>{session.itemType}</strong></span>
+              <span>ID: <code style={{ color: C.blue, fontSize: "10px" }}>{session.sessionId.slice(0, 8)}…</code></span>
+            </div>
+          </div>
+        ) : (
+          <div style={{ color: C.dim, fontSize: "13px", padding: "6px 0 16px", fontFamily: "Rajdhani, sans-serif" }}>
+            لا توجد جلسة نشطة حالياً — ابدأ جلسة ليلتحق بها اللاعبون فوراً
+          </div>
+        )}
+
+        {/* Controls */}
+        <div style={{ display: "flex", gap: "12px", flexWrap: "wrap", alignItems: "flex-end" }}>
+          {!session && (
+            <>
+              <div>
+                <label style={{ display: "block", fontSize: "10px", color: C.dim, fontFamily: "Orbitron, sans-serif", letterSpacing: "0.07em", marginBottom: "6px" }}>عدد العناصر</label>
+                <input
+                  type="number" min={5} max={1000} value={sessionItems}
+                  onChange={e => setSessionItems(Number(e.target.value))}
+                  style={{ width: "100px", padding: "9px 12px", background: "#0a0d14", border: `1px solid ${C.border}`, borderRadius: "4px", color: C.text, fontFamily: "Orbitron, sans-serif", fontSize: "12px", outline: "none" }}
+                />
+              </div>
+              <div>
+                <label style={{ display: "block", fontSize: "10px", color: C.dim, fontFamily: "Orbitron, sans-serif", letterSpacing: "0.07em", marginBottom: "6px" }}>نوع العنصر</label>
+                <input
+                  value={sessionType}
+                  onChange={e => setSessionType(e.target.value)}
+                  placeholder="burger / drink / pizza..."
+                  style={{ width: "150px", padding: "9px 12px", background: "#0a0d14", border: `1px solid ${C.border}`, borderRadius: "4px", color: C.text, fontFamily: "Rajdhani, sans-serif", fontSize: "13px", outline: "none" }}
+                />
+              </div>
+              <button
+                onClick={startSession} disabled={sessionBusy || sessionItems < 1}
+                style={{ padding: "9px 22px", background: `${C.green}22`, border: `1.5px solid ${C.green}66`, color: C.green, fontFamily: "Orbitron, sans-serif", fontSize: "11px", letterSpacing: "0.09em", cursor: sessionBusy ? "not-allowed" : "pointer", borderRadius: "4px", transition: "all 0.2s", textShadow: neon(C.green, 5), boxShadow: neon(C.green, 4), opacity: sessionBusy ? 0.6 : 1 }}
+              >
+                {sessionBusy ? "⏳ جاري البدء..." : "▶ ابدأ الجلسة"}
+              </button>
+            </>
+          )}
+
+          {session && (
+            <button
+              onClick={stopSession} disabled={sessionBusy}
+              style={{ padding: "9px 22px", background: `${C.red}22`, border: `1.5px solid ${C.red}66`, color: C.red, fontFamily: "Orbitron, sans-serif", fontSize: "11px", letterSpacing: "0.09em", cursor: sessionBusy ? "not-allowed" : "pointer", borderRadius: "4px", transition: "all 0.2s", textShadow: neon(C.red, 5), opacity: sessionBusy ? 0.6 : 1 }}
+            >
+              {sessionBusy ? "⏳ جاري الإيقاف..." : "⏹ إيقاف الجلسة"}
+            </button>
+          )}
         </div>
       </div>
 
