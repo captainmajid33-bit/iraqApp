@@ -134,6 +134,9 @@ const COMBO_WIN_LVL   = [2200, 2800,  3600,  4500,  6000]; // combo window ms pe
 const UPGRADE_COSTS   = { magnet: [1500, 3000, 5000, 8000], combo: [1500, 3000, 5000, 8000] }; // cost per step
 const MAX_UPG_LEVEL   = 5;
 
+// ── Dynamic skin def (from DB) ────────────────────────────────────────────────
+interface DynSkinDef extends SkinDef { isActive?: boolean; }
+
 // ── Component ────────────────────────────────────────────────────────────────
 export function ChallengeModal({ onClose }: Props) {
   const [phase,       setPhase]       = useState<Phase>('menu');
@@ -157,6 +160,7 @@ export function ChallengeModal({ onClose }: Props) {
   const [shopBuying,  setShopBuying]  = useState<string | null>(null);
   const [shopMsg,     setShopMsg]     = useState('');
   const [redeeming,   setRedeeming]   = useState(false);
+  const [dynSkins,    setDynSkins]    = useState<DynSkinDef[]>([]);
 
   // ── Global session state ────────────────────────────────────────────────────
   const [sessionItemsLeft,  setSessionItemsLeft]  = useState<number | null>(null);
@@ -245,6 +249,26 @@ export function ChallengeModal({ onClose }: Props) {
   }, []);
 
   useEffect(() => { loadProfile(); }, [loadProfile]);
+
+  // ── Load dynamic skins from DB ─────────────────────────────────────────────
+  useEffect(() => {
+    fetch('/api/game/shop/items')
+      .then(r => r.ok ? r.json() : [])
+      .then((rows: Array<{ id: number; name: string; emoji: string; price: number; imageUrl: string; color: string; category: string }>) => {
+        const skins = rows
+          .filter(r => r.category === 'skin')
+          .map(r => ({
+            id:       `skin_db_${r.id}`,
+            name:     r.name,
+            emoji:    r.emoji,
+            price:    r.price,
+            imageUrl: r.imageUrl,
+            color:    r.color,
+          } satisfies DynSkinDef));
+        if (skins.length > 0) setDynSkins(skins);
+      })
+      .catch(() => {});
+  }, []);
 
   // Keep phaseRef in sync with React state (SSE handler reads it without closure issues)
   useEffect(() => { phaseRef.current = phase; }, [phase]);
@@ -1603,7 +1627,7 @@ export function ChallengeModal({ onClose }: Props) {
             {/* ══════════════════ SKINS TAB ══════════════════ */}
             {shopTab === 'skins' && (
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
-                {SKINS.map(skin => {
+                {(dynSkins.length > 0 ? dynSkins : SKINS).map(skin => {
                   const owned  = profile?.unlockedSkins?.includes(skin.id) ?? false;
                   const active = profile?.activeSkin === skin.id;
                   const canBuy = (walletBal > 0 ? walletBal : (profile?.gameCash ?? 0)) >= skin.price;

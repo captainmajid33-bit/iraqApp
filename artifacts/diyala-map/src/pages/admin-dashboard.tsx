@@ -5470,6 +5470,353 @@ function GiftCardsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
   );
 }
 
+// ── GameShopManagementTab ──────────────────────────────────────────────────────
+function GameShopManagementTab({ toast }: { toast: ReturnType<typeof useToast> }) {
+  interface ShopItem {
+    id: number; name: string; emoji: string; price: number;
+    imageUrl: string; color: string; category: string;
+    sortOrder: number; isActive: boolean;
+  }
+
+  const [items,     setItems]     = useState<ShopItem[]>([]);
+  const [loading,   setLoading]   = useState(true);
+  const [saving,    setSaving]    = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [editRow,   setEditRow]   = useState<Partial<ShopItem> & { id?: number } | null>(null);
+  const imgRef     = useRef<HTMLInputElement>(null);
+  const editImgRef = useRef<HTMLInputElement>(null);
+
+  const [form, setForm] = useState({
+    name: '', emoji: '🎭', price: 1000, imageUrl: '', color: '#00f5d4', category: 'skin', sortOrder: 0,
+  });
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const r = await fetch('/api/game/admin/shop/items', { headers: admHeaders() });
+      const d = await r.json();
+      setItems(Array.isArray(d) ? d : []);
+    } catch { setItems([]); } finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  // ── Upload helper ──────────────────────────────────────────────────────────
+  const uploadImg = async (file: File, onUrl: (url: string) => void) => {
+    if (!file.type.startsWith('image/')) { toast.show('يُسمح فقط بملفات الصور', false); return; }
+    setUploading(true);
+    try {
+      const metaRes = await fetch('/api/storage/uploads/request-url', {
+        method: 'POST', headers: admHeaders(),
+        body: JSON.stringify({ name: file.name, size: file.size, contentType: file.type }),
+      });
+      if (!metaRes.ok) throw new Error('فشل رابط الرفع');
+      const { uploadURL, objectPath } = await metaRes.json();
+      await new Promise<void>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('PUT', uploadURL);
+        xhr.setRequestHeader('Content-Type', file.type);
+        xhr.onload = () => xhr.status < 300 ? resolve() : reject(new Error(`GCS ${xhr.status}`));
+        xhr.onerror = () => reject(new Error('فشل الاتصال'));
+        xhr.send(file);
+      });
+      onUrl(`/api/storage${objectPath}`);
+      toast.show('✓ تم رفع الصورة', 'success');
+    } catch (e: any) { toast.show(e?.message ?? 'فشل الرفع', false); }
+    finally { setUploading(false); }
+  };
+
+  // ── CRUD ─────────────────────────────────────────────────────────────────
+  const addItem = async () => {
+    if (!form.name.trim()) { toast.show('اسم السكن مطلوب', false); return; }
+    setSaving(true);
+    try {
+      const r = await fetch('/api/game/admin/shop/add', {
+        method: 'POST',
+        headers: { ...admHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify(form),
+      });
+      if (!r.ok) throw new Error('فشل الإضافة');
+      toast.show('✓ تم إضافة السكن الجديد', 'success');
+      setForm({ name: '', emoji: '🎭', price: 1000, imageUrl: '', color: '#00f5d4', category: 'skin', sortOrder: 0 });
+      load();
+    } catch (e: any) { toast.show(e?.message, false); } finally { setSaving(false); }
+  };
+
+  const saveEdit = async () => {
+    if (!editRow?.id) return;
+    setSaving(true);
+    try {
+      const r = await fetch(`/api/game/admin/shop/update/${editRow.id}`, {
+        method: 'PUT',
+        headers: { ...admHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify(editRow),
+      });
+      if (!r.ok) throw new Error('فشل التحديث');
+      toast.show('✓ تم التحديث', 'success');
+      setEditRow(null);
+      load();
+    } catch (e: any) { toast.show(e?.message, false); } finally { setSaving(false); }
+  };
+
+  const toggleActive = async (item: ShopItem) => {
+    try {
+      await fetch(`/api/game/admin/shop/update/${item.id}`, {
+        method: 'PUT',
+        headers: { ...admHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ isActive: !item.isActive }),
+      });
+      toast.show(item.isActive ? 'تم إخفاء السكن' : '✓ تم تفعيل السكن', item.isActive ? false : 'success');
+      load();
+    } catch { toast.show('فشل التغيير', false); }
+  };
+
+  const deleteItem = async (id: number) => {
+    if (!window.confirm('حذف هذا السكن نهائياً؟')) return;
+    try {
+      const r = await fetch(`/api/game/admin/shop/delete/${id}`, { method: 'DELETE', headers: admHeaders() });
+      if (!r.ok) throw new Error('فشل الحذف');
+      toast.show('✓ تم الحذف', 'success');
+      load();
+    } catch (e: any) { toast.show(e?.message, false); }
+  };
+
+  const S = {
+    card:   { background: 'rgba(13,17,30,0.8)', border: `1px solid ${C.border}`, borderRadius: '10px', padding: '20px', marginBottom: '20px' } as React.CSSProperties,
+    label:  { fontSize: '11px', color: C.dim, fontFamily: 'Orbitron, sans-serif', letterSpacing: '0.08em', marginBottom: '6px' } as React.CSSProperties,
+    input:  { width: '100%', padding: '9px 12px', background: 'rgba(255,255,255,0.05)', border: `1px solid ${C.border}`, borderRadius: '6px', color: C.text, fontFamily: 'Rajdhani, sans-serif', fontSize: '14px', outline: 'none' } as React.CSSProperties,
+    btn:    (col: string) => ({ padding: '8px 16px', borderRadius: '6px', border: `1px solid ${col}55`, background: `${col}18`, color: col, fontFamily: 'Orbitron, sans-serif', fontSize: '10px', letterSpacing: '0.08em', cursor: 'pointer' } as React.CSSProperties),
+  };
+
+  return (
+    <div>
+      {/* ── Page title ── */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '24px' }}>
+        <div style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '14px', color: C.purple, textShadow: neon(C.purple, 8), letterSpacing: '0.12em' }}>
+          🛒 إدارة متجر الألعاب
+        </div>
+        <div style={{ flex: 1, height: '1px', background: C.border }} />
+        <button onClick={load} style={S.btn(C.blue)}>↻ تحديث</button>
+      </div>
+
+      {/* ════════ ADD FORM ════════ */}
+      <div style={S.card}>
+        <div style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '12px', color: C.green, letterSpacing: '0.1em', marginBottom: '16px', textShadow: neon(C.green, 5) }}>
+          ＋ إضافة سكن جديد
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px', marginBottom: '14px' }}>
+          {/* Name */}
+          <div>
+            <div style={S.label}>اسم السكن *</div>
+            <input
+              style={S.input}
+              placeholder="مثال: المحارب الأسطوري"
+              value={form.name}
+              onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
+            />
+          </div>
+          {/* Emoji */}
+          <div>
+            <div style={S.label}>الإيموجي</div>
+            <input
+              style={{ ...S.input, fontSize: '24px' }}
+              placeholder="🎭"
+              value={form.emoji}
+              onChange={e => setForm(f => ({ ...f, emoji: e.target.value }))}
+            />
+          </div>
+          {/* Price */}
+          <div>
+            <div style={S.label}>السعر (دينار عراقي)</div>
+            <input
+              type="number" min={100} step={100}
+              style={S.input}
+              value={form.price}
+              onChange={e => setForm(f => ({ ...f, price: parseInt(e.target.value) || 1000 }))}
+            />
+          </div>
+          {/* Color */}
+          <div>
+            <div style={S.label}>لون الكارت</div>
+            <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+              <input type="color" value={form.color} onChange={e => setForm(f => ({ ...f, color: e.target.value }))}
+                style={{ width: '42px', height: '38px', borderRadius: '6px', border: 'none', background: 'none', cursor: 'pointer' }} />
+              <input style={{ ...S.input, flex: 1 }} value={form.color} onChange={e => setForm(f => ({ ...f, color: e.target.value }))} />
+            </div>
+          </div>
+          {/* Sort Order */}
+          <div>
+            <div style={S.label}>ترتيب العرض</div>
+            <input type="number" min={0} style={S.input} value={form.sortOrder}
+              onChange={e => setForm(f => ({ ...f, sortOrder: parseInt(e.target.value) || 0 }))} />
+          </div>
+          {/* Category */}
+          <div>
+            <div style={S.label}>النوع</div>
+            <select style={{ ...S.input, cursor: 'pointer' }} value={form.category}
+              onChange={e => setForm(f => ({ ...f, category: e.target.value }))}>
+              <option value="skin">سكن (Skin)</option>
+              <option value="upgrade">تطوير (Upgrade)</option>
+            </select>
+          </div>
+        </div>
+
+        {/* Image URL + uploader */}
+        <div style={{ marginBottom: '16px' }}>
+          <div style={S.label}>صورة السكن (URL أو رفع ملف)</div>
+          <div style={{ display: 'flex', gap: '8px' }}>
+            <input style={{ ...S.input, flex: 1 }} placeholder="https://... أو اضغط رفع"
+              value={form.imageUrl} onChange={e => setForm(f => ({ ...f, imageUrl: e.target.value }))} />
+            <button style={S.btn(C.blue)} onClick={() => imgRef.current?.click()} disabled={uploading}>
+              {uploading ? '⏳' : '📁 رفع'}
+            </button>
+            <input ref={imgRef} type="file" accept="image/*" style={{ display: 'none' }}
+              onChange={e => { const f = e.target.files?.[0]; if (f) uploadImg(f, url => setForm(fm => ({ ...fm, imageUrl: url }))); e.target.value = ''; }} />
+          </div>
+          {form.imageUrl && (
+            <div style={{ marginTop: '8px', display: 'flex', alignItems: 'center', gap: '10px' }}>
+              <img src={form.imageUrl} alt="" style={{ width: '48px', height: '48px', objectFit: 'contain', borderRadius: '6px', border: `1px solid ${C.border}` }} onError={e => (e.currentTarget.style.display = 'none')} />
+              <span style={{ fontSize: '11px', color: C.dim }}>معاينة الصورة</span>
+            </div>
+          )}
+        </div>
+
+        <button
+          onClick={addItem} disabled={saving || !form.name.trim()}
+          style={{ ...S.btn(C.green), padding: '11px 24px', fontSize: '12px', opacity: saving ? 0.6 : 1 }}
+        >
+          {saving ? '⏳ جاري الحفظ...' : '✚ إضافة السكن'}
+        </button>
+      </div>
+
+      {/* ════════ ITEMS TABLE ════════ */}
+      <div style={S.card}>
+        <div style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '12px', color: C.yellow, letterSpacing: '0.1em', marginBottom: '16px', textShadow: neon(C.yellow, 5) }}>
+          📋 السكنات والتطويرات الحالية
+        </div>
+
+        {loading ? (
+          <div style={{ textAlign: 'center', padding: '30px', color: C.dim }}>⏳ جاري التحميل...</div>
+        ) : items.length === 0 ? (
+          <div style={{ textAlign: 'center', padding: '30px', color: C.dim }}>لا توجد عناصر بعد</div>
+        ) : (
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontFamily: 'Rajdhani, sans-serif' }}>
+              <thead>
+                <tr style={{ borderBottom: `1px solid ${C.border}` }}>
+                  {['#', 'صورة', 'الاسم', 'الإيموجي', 'السعر', 'النوع', 'الترتيب', 'الحالة', 'إجراءات'].map(h => (
+                    <th key={h} style={{ padding: '10px 8px', textAlign: 'right', fontSize: '10px', color: C.dim, fontFamily: 'Orbitron, sans-serif', letterSpacing: '0.06em', whiteSpace: 'nowrap' }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {items.map(item => {
+                  const isEditing = editRow?.id === item.id;
+                  return (
+                    <tr key={item.id} style={{ borderBottom: `1px solid ${C.border}22`, background: isEditing ? `${C.purple}08` : 'transparent' }}>
+                      <td style={{ padding: '10px 8px', fontSize: '12px', color: C.dim }}>{item.id}</td>
+                      {/* Image */}
+                      <td style={{ padding: '8px' }}>
+                        {isEditing ? (
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                            <input style={{ ...S.input, width: '160px', fontSize: '11px' }} placeholder="URL الصورة"
+                              value={editRow.imageUrl ?? ''} onChange={e => setEditRow(r => ({ ...r, imageUrl: e.target.value }))} />
+                            <button style={{ ...S.btn(C.blue), padding: '4px 8px', fontSize: '9px' }}
+                              onClick={() => editImgRef.current?.click()} disabled={uploading}>📁 رفع</button>
+                            <input ref={editImgRef} type="file" accept="image/*" style={{ display: 'none' }}
+                              onChange={e => { const f = e.target.files?.[0]; if (f) uploadImg(f, url => setEditRow(r => ({ ...r, imageUrl: url }))); e.target.value = ''; }} />
+                          </div>
+                        ) : (
+                          item.imageUrl
+                            ? <img src={item.imageUrl} alt="" style={{ width: '40px', height: '40px', objectFit: 'contain', borderRadius: '5px', border: `1px solid ${item.color}44` }} onError={e => (e.currentTarget.style.display = 'none')} />
+                            : <span style={{ fontSize: '28px' }}>{item.emoji}</span>
+                        )}
+                      </td>
+                      {/* Name */}
+                      <td style={{ padding: '8px' }}>
+                        {isEditing
+                          ? <input style={{ ...S.input, width: '130px' }} value={editRow.name ?? ''} onChange={e => setEditRow(r => ({ ...r, name: e.target.value }))} />
+                          : <span style={{ fontSize: '14px', fontWeight: 600, color: item.isActive ? C.text : C.dim }}>{item.name}</span>
+                        }
+                      </td>
+                      {/* Emoji */}
+                      <td style={{ padding: '8px', fontSize: '22px' }}>
+                        {isEditing
+                          ? <input style={{ ...S.input, width: '60px', fontSize: '20px', textAlign: 'center' }} value={editRow.emoji ?? ''} onChange={e => setEditRow(r => ({ ...r, emoji: e.target.value }))} />
+                          : item.emoji
+                        }
+                      </td>
+                      {/* Price */}
+                      <td style={{ padding: '8px' }}>
+                        {isEditing
+                          ? <input type="number" min={100} step={100} style={{ ...S.input, width: '100px' }} value={editRow.price ?? item.price} onChange={e => setEditRow(r => ({ ...r, price: parseInt(e.target.value) || 1000 }))} />
+                          : <span style={{ color: C.yellow, fontFamily: 'Orbitron, sans-serif', fontSize: '12px' }}>{item.price.toLocaleString()} د.ع</span>
+                        }
+                      </td>
+                      {/* Category */}
+                      <td style={{ padding: '8px' }}>
+                        <span style={{ fontSize: '11px', padding: '3px 8px', borderRadius: '12px', background: item.category === 'skin' ? `${C.purple}22` : `${C.yellow}22`, color: item.category === 'skin' ? C.purple : C.yellow, border: `1px solid ${item.category === 'skin' ? C.purple + '44' : C.yellow + '44'}` }}>
+                          {item.category === 'skin' ? 'سكن' : 'تطوير'}
+                        </span>
+                      </td>
+                      {/* Sort Order */}
+                      <td style={{ padding: '8px' }}>
+                        {isEditing
+                          ? <input type="number" min={0} style={{ ...S.input, width: '70px' }} value={editRow.sortOrder ?? item.sortOrder} onChange={e => setEditRow(r => ({ ...r, sortOrder: parseInt(e.target.value) || 0 }))} />
+                          : <span style={{ fontSize: '12px', color: C.dim }}>{item.sortOrder}</span>
+                        }
+                      </td>
+                      {/* Active */}
+                      <td style={{ padding: '8px' }}>
+                        <button onClick={() => toggleActive(item)} style={{ ...S.btn(item.isActive ? C.green : C.red), padding: '4px 10px', fontSize: '9px' }}>
+                          {item.isActive ? '✓ نشط' : '✗ مخفي'}
+                        </button>
+                      </td>
+                      {/* Actions */}
+                      <td style={{ padding: '8px' }}>
+                        <div style={{ display: 'flex', gap: '6px' }}>
+                          {isEditing ? (
+                            <>
+                              <button onClick={saveEdit} disabled={saving} style={{ ...S.btn(C.green), padding: '5px 10px' }}>
+                                {saving ? '⏳' : '✓ حفظ'}
+                              </button>
+                              <button onClick={() => setEditRow(null)} style={{ ...S.btn(C.dim), padding: '5px 10px' }}>✕ إلغاء</button>
+                            </>
+                          ) : (
+                            <>
+                              <button
+                                onClick={() => setEditRow({ ...item })}
+                                style={{ ...S.btn(C.blue), padding: '5px 10px' }}>✏ تعديل</button>
+                              <button
+                                onClick={() => deleteItem(item.id)}
+                                style={{ ...S.btn(C.red), padding: '5px 10px' }}>🗑 حذف</button>
+                            </>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* ════════ INFO BOX ════════ */}
+      <div style={{ ...S.card, background: `${C.blue}08`, border: `1px solid ${C.blue}22` }}>
+        <div style={{ fontSize: '11px', color: C.dim, lineHeight: 1.8 }}>
+          💡 <strong style={{ color: C.blue }}>مزامنة فورية:</strong> أي سكن جديد تضيفه أو تُفعّله سيظهر فوراً في متجر الزبائن دون إعادة تشغيل.<br/>
+          🎨 <strong style={{ color: C.yellow }}>اللون:</strong> يُستخدم لإطار بطاقة السكن وتأثير الإضاءة في الشاشة.<br/>
+          🔢 <strong style={{ color: C.green }}>الترتيب:</strong> الأرقام الأصغر تظهر أولاً (0 = أول السكنات).<br/>
+          👁 <strong style={{ color: C.purple }}>إخفاء:</strong> السكن المخفي لن يظهر للزبائن لكن يظل محفوظاً في قاعدة البيانات.
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── GameConfigTab ─────────────────────────────────────────────────────────────
 function GameConfigTab({ toast }: { toast: ReturnType<typeof useToast> }) {
   const [characterUrl,   setCharacterUrl]   = useState("");
@@ -5879,7 +6226,7 @@ function GameConfigTab({ toast }: { toast: ReturnType<typeof useToast> }) {
 // ── Admin Dashboard ───────────────────────────────────────────────────────────
 export function AdminDashboard() {
   const [, navigate] = useLocation();
-  const [tab, setTab] = useState<"merchants" | "map" | "categories" | "settings" | "taxi" | "drivers" | "fuel" | "bounty" | "users" | "users_radar" | "gift_cards" | "doctors_bookings" | "services_settings" | "game">("merchants");
+  const [tab, setTab] = useState<"merchants" | "map" | "categories" | "settings" | "taxi" | "drivers" | "fuel" | "bounty" | "users" | "users_radar" | "gift_cards" | "doctors_bookings" | "services_settings" | "game" | "game_shop">("merchants");
   const [cats, setCats] = useState<Cat[]>([]);
   const [authChecked, setAuthChecked] = useState(false);
   const toast = useToast();
@@ -5937,6 +6284,7 @@ export function AdminDashboard() {
     { key: "services_settings" as const, en: "SERVICES SETTINGS", ar: "⚙️ إعدادات الخدمات" },
     { key: "settings"          as const, en: "SETTINGS",          ar: "الإعدادات" },
     { key: "game"              as const, en: "GAME",               ar: "🏆 التحدي" },
+    { key: "game_shop"         as const, en: "GAME SHOP",          ar: "🛒 متجر الألعاب" },
   ];
 
   return (
@@ -5994,6 +6342,7 @@ export function AdminDashboard() {
         {tab === "services_settings"  && <ServicesSettingsTab toast={toast} />}
         {tab === "settings"           && <SettingsTab toast={toast} />}
         {tab === "game"               && <GameConfigTab toast={toast} />}
+        {tab === "game_shop"          && <GameShopManagementTab toast={toast} />}
       </main>
 
       <Toast toast={toast.toast} />

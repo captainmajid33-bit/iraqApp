@@ -1,5 +1,5 @@
 import { Router, type IRouter, type Request, type Response } from "express";
-import { db, settingsTable, gameScoresTable, gameProfilesTable, gameCurrentSessionTable, usersTable } from "@workspace/db";
+import { db, settingsTable, gameScoresTable, gameProfilesTable, gameCurrentSessionTable, usersTable, shopItemsTable } from "@workspace/db";
 import { eq, desc, sql } from "drizzle-orm";
 import { broadcastGameSessionUpdate } from "../lib/sse";
 import { randomUUID } from "crypto";
@@ -769,6 +769,105 @@ router.get("/game/duel/:duelId", async (req: Request, res: Response) => {
   const room   = duelRooms.get(duelId);
   if (!room) { res.status(404).json({ error: "not_found" }); return; }
   res.json({ duelId, ...room });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SHOP ITEMS — public + admin CRUD
+// ═══════════════════════════════════════════════════════════════════════════
+
+// GET /api/game/shop/items  — public, returns active items ordered by sort_order
+router.get("/game/shop/items", async (req: Request, res: Response) => {
+  try {
+    const rows = await db
+      .select()
+      .from(shopItemsTable)
+      .where(eq(shopItemsTable.isActive, true))
+      .orderBy(shopItemsTable.sortOrder, shopItemsTable.id);
+    res.json(rows);
+  } catch (err) {
+    req.log.error({ err }, "shop items fetch error");
+    res.status(500).json({ error: "internal" });
+  }
+});
+
+// GET /api/game/admin/shop/items  — admin, returns ALL items
+router.get("/game/admin/shop/items", async (req: Request, res: Response) => {
+  if (!isAdmin(req)) { res.status(403).json({ error: "forbidden" }); return; }
+  try {
+    const rows = await db
+      .select()
+      .from(shopItemsTable)
+      .orderBy(shopItemsTable.sortOrder, shopItemsTable.id);
+    res.json(rows);
+  } catch (err) {
+    req.log.error({ err }, "admin shop items error");
+    res.status(500).json({ error: "internal" });
+  }
+});
+
+// POST /api/game/admin/shop/add
+router.post("/game/admin/shop/add", async (req: Request, res: Response) => {
+  if (!isAdmin(req)) { res.status(403).json({ error: "forbidden" }); return; }
+  const { name, emoji = "🎭", price = 1000, imageUrl = "", color = "#00f5d4", category = "skin", sortOrder = 0 } =
+    req.body as { name?: string; emoji?: string; price?: number; imageUrl?: string; color?: string; category?: string; sortOrder?: number };
+  if (!name?.trim()) { res.status(400).json({ error: "name_required" }); return; }
+  try {
+    const [row] = await db
+      .insert(shopItemsTable)
+      .values({ name: name.trim(), emoji, price, imageUrl, color, category, sortOrder })
+      .returning();
+    res.status(201).json(row);
+  } catch (err) {
+    req.log.error({ err }, "admin shop add error");
+    res.status(500).json({ error: "internal" });
+  }
+});
+
+// PUT /api/game/admin/shop/update/:itemId
+router.put("/game/admin/shop/update/:itemId", async (req: Request, res: Response) => {
+  if (!isAdmin(req)) { res.status(403).json({ error: "forbidden" }); return; }
+  const id = parseInt(req.params.itemId ?? "0", 10);
+  if (!id) { res.status(400).json({ error: "invalid_id" }); return; }
+  const { name, emoji, price, imageUrl, color, category, sortOrder, isActive } = req.body as Partial<{
+    name: string; emoji: string; price: number; imageUrl: string;
+    color: string; category: string; sortOrder: number; isActive: boolean;
+  }>;
+  const patch: Record<string, unknown> = {};
+  if (name      !== undefined) patch.name      = name;
+  if (emoji     !== undefined) patch.emoji     = emoji;
+  if (price     !== undefined) patch.price     = price;
+  if (imageUrl  !== undefined) patch.imageUrl  = imageUrl;
+  if (color     !== undefined) patch.color     = color;
+  if (category  !== undefined) patch.category  = category;
+  if (sortOrder !== undefined) patch.sortOrder = sortOrder;
+  if (isActive  !== undefined) patch.isActive  = isActive;
+  if (Object.keys(patch).length === 0) { res.status(400).json({ error: "no_fields" }); return; }
+  try {
+    const [row] = await db
+      .update(shopItemsTable)
+      .set(patch)
+      .where(eq(shopItemsTable.id, id))
+      .returning();
+    if (!row) { res.status(404).json({ error: "not_found" }); return; }
+    res.json(row);
+  } catch (err) {
+    req.log.error({ err }, "admin shop update error");
+    res.status(500).json({ error: "internal" });
+  }
+});
+
+// DELETE /api/game/admin/shop/delete/:itemId
+router.delete("/game/admin/shop/delete/:itemId", async (req: Request, res: Response) => {
+  if (!isAdmin(req)) { res.status(403).json({ error: "forbidden" }); return; }
+  const id = parseInt(req.params.itemId ?? "0", 10);
+  if (!id) { res.status(400).json({ error: "invalid_id" }); return; }
+  try {
+    await db.delete(shopItemsTable).where(eq(shopItemsTable.id, id));
+    res.json({ ok: true });
+  } catch (err) {
+    req.log.error({ err }, "admin shop delete error");
+    res.status(500).json({ error: "internal" });
+  }
 });
 
 export default router;
