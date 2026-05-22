@@ -522,14 +522,8 @@ export function ClinicMap({
         const m = L.marker([lat, lng], {
           icon: L.divIcon({className:'', html:taxiPinHtml('#00f5d4','A'), iconSize:[34,42], iconAnchor:[17,42]}),
           zIndexOffset: 1000,
-          draggable: true,
+          draggable: false,
         }).addTo(mapRef.current);
-        m.on('dragend', ()=>{
-          const pos = m.getLatLng();
-          const pt  = { lat: pos.lat, lng: pos.lng };
-          setTaxiFromPt(pt);
-          taxiFromPtRef.current = pt;
-        });
         taxiFromMarkerRef.current = m;
         const pt = { lat, lng };
         setTaxiFromPt(pt);
@@ -556,19 +550,13 @@ export function ClinicMap({
       const fromPt = taxiFromPtRef.current;
       if (step === 'idle') return;
       if (step === 'pick-from') {
-        // Re-place draggable A marker at tapped location (user can also drag)
+        // Re-place A marker at tapped location
         taxiFromMarkerRef.current?.remove();
         const m = L.marker([lat,lng],{
           icon: L.divIcon({className:'',html:taxiPinHtml('#00f5d4','A'),iconSize:[34,42],iconAnchor:[17,42]}),
           zIndexOffset:1000,
-          draggable:true,
+          draggable:false,
         }).addTo(mapRef.current!);
-        m.on('dragend',()=>{
-          const pos = m.getLatLng();
-          const pt2 = {lat:pos.lat,lng:pos.lng};
-          setTaxiFromPt(pt2);
-          taxiFromPtRef.current=pt2;
-        });
         taxiFromMarkerRef.current = m;
         const pt={lat,lng};
         setTaxiFromPt(pt);
@@ -1895,19 +1883,13 @@ export function ClinicMap({
         taxiFromPtRef.current = fromPt;
         setTaxiFromPlaced(true);
 
-        // ── Place draggable A marker at GPS ──────────────────────────────────
+        // ── Place A marker at GPS ─────────────────────────────────────────────
         if (mapRef.current) {
           const m = L.marker([loc.lat, loc.lng], {
             icon: L.divIcon({className:'', html:taxiPinHtml('#00f5d4','A'), iconSize:[34,42], iconAnchor:[17,42]}),
             zIndexOffset: 1000,
-            draggable: true,
+            draggable: false,
           }).addTo(mapRef.current);
-          m.on('dragend', ()=>{
-            const pos = m.getLatLng();
-            const pt  = { lat: pos.lat, lng: pos.lng };
-            setTaxiFromPt(pt);
-            taxiFromPtRef.current = pt;
-          });
           taxiFromMarkerRef.current = m;
           mapRef.current.flyTo([loc.lat, loc.lng], 17, { animate:true, duration:1.0 });
         }
@@ -6193,7 +6175,7 @@ export function ClinicMap({
           style={{
             position: 'fixed',
             right: '14px',
-            bottom: `${(showTraffic ? 250 : 172) + LIST_LIFT + 60}px`,
+            bottom: `${(showTraffic ? 250 : 172) + LIST_LIFT + 82}px`,
             zIndex: 1100,
             width: '52px',
             height: '52px',

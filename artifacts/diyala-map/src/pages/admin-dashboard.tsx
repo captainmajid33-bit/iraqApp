@@ -5477,11 +5477,15 @@ function GameConfigTab({ toast }: { toast: ReturnType<typeof useToast> }) {
   const [duration,     setDuration]     = useState(60);
   const [loading,      setLoading]      = useState(true);
   const [saving,       setSaving]       = useState(false);
+  const [uploadingChar, setUploadingChar] = useState(false);
+  const [uploadingTarget, setUploadingTarget] = useState(false);
 
-  // Leaderboard
   interface LeaderRow { rank: number; userId: string; userName: string; bestScore: number; }
   const [board,        setBoard]        = useState<LeaderRow[]>([]);
   const [boardLoading, setBoardLoading] = useState(false);
+
+  const charFileRef   = useRef<HTMLInputElement>(null);
+  const targetFileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     api.get("/api/game/config").then((d: { characterUrl: string; targetUrl: string; duration: number }) => {
@@ -5493,6 +5497,42 @@ function GameConfigTab({ toast }: { toast: ReturnType<typeof useToast> }) {
     setBoardLoading(true);
     api.get("/api/game/leaderboard").then((d: LeaderRow[]) => setBoard(Array.isArray(d) ? d : [])).catch(() => {}).finally(() => setBoardLoading(false));
   }, []);
+
+  // ── Upload image via object storage ─────────────────────────────────────────
+  const uploadImage = async (
+    file: File,
+    setUploading: (v: boolean) => void,
+    setUrl: (url: string) => void,
+  ) => {
+    if (!file.type.startsWith("image/")) { toast.show("يُسمح فقط بملفات الصور", false); return; }
+    setUploading(true);
+    try {
+      const metaRes = await fetch("/api/storage/uploads/request-url", {
+        method:  "POST",
+        headers: admHeaders(),
+        body:    JSON.stringify({ name: file.name, size: file.size, contentType: file.type }),
+      });
+      if (!metaRes.ok) throw new Error("فشل الحصول على رابط الرفع");
+      const { uploadURL, objectPath } = await metaRes.json();
+
+      await new Promise<void>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open("PUT", uploadURL);
+        xhr.setRequestHeader("Content-Type", file.type);
+        xhr.onload  = () => xhr.status < 300 ? resolve() : reject(new Error(`GCS ${xhr.status}`));
+        xhr.onerror = () => reject(new Error("فشل الاتصال"));
+        xhr.send(file);
+      });
+
+      const url = `/api/storage${objectPath}`;
+      setUrl(url);
+      toast.show("✓ تم رفع الصورة بنجاح", "success");
+    } catch (err: any) {
+      toast.show(err?.message ?? "فشل رفع الصورة", false);
+    } finally {
+      setUploading(false);
+    }
+  };
 
   const save = async () => {
     setSaving(true);
@@ -5508,6 +5548,71 @@ function GameConfigTab({ toast }: { toast: ReturnType<typeof useToast> }) {
 
   const medal = (r: number) => r === 1 ? "🥇" : r === 2 ? "🥈" : r === 3 ? "🥉" : `#${r}`;
 
+  // ── Shared image field renderer ──────────────────────────────────────────────
+  const ImageField = ({
+    label, url, setUrl, uploading, setUploading, fileRef, accept = "image/*",
+  }: {
+    label: string; url: string; setUrl: (v: string) => void;
+    uploading: boolean; setUploading: (v: boolean) => void;
+    fileRef: React.RefObject<HTMLInputElement>; accept?: string;
+  }) => (
+    <div>
+      <label style={{ display: "block", fontSize: "11px", color: C.dim, letterSpacing: "0.08em", marginBottom: "8px", fontFamily: "Orbitron, sans-serif" }}>
+        {label}
+      </label>
+      <div style={{ display: "flex", gap: "10px", alignItems: "center", flexWrap: "wrap" }}>
+        {/* File input (hidden) */}
+        <input
+          ref={fileRef}
+          type="file"
+          accept={accept}
+          style={{ display: "none" }}
+          onChange={e => {
+            const f = e.target.files?.[0];
+            e.target.value = "";
+            if (f) uploadImage(f, setUploading, setUrl);
+          }}
+        />
+
+        {/* Upload button */}
+        <button
+          onClick={() => fileRef.current?.click()}
+          disabled={uploading}
+          style={{
+            padding: "9px 16px", borderRadius: "4px",
+            background: uploading ? `${C.purple}11` : `${C.purple}22`,
+            border: `1px solid ${C.purple}55`,
+            color: C.purple, fontFamily: "Orbitron, sans-serif",
+            fontSize: "11px", letterSpacing: "0.08em",
+            cursor: uploading ? "not-allowed" : "pointer",
+            whiteSpace: "nowrap", transition: "all 0.2s",
+            opacity: uploading ? 0.7 : 1,
+          }}
+        >
+          {uploading ? "⏳ جاري الرفع..." : "📷 رفع صورة"}
+        </button>
+
+        {/* Or paste URL */}
+        <input
+          value={url}
+          onChange={e => setUrl(e.target.value)}
+          placeholder="أو الصق رابط الصورة هنا..."
+          style={{ flex: 1, minWidth: "180px", padding: "9px 14px", background: "#0a0d14", border: `1px solid ${C.border}`, borderRadius: "4px", color: C.text, fontFamily: "Rajdhani, sans-serif", fontSize: "13px", outline: "none" }}
+        />
+
+        {/* Live preview */}
+        {url && (
+          <img
+            src={url}
+            alt="preview"
+            style={{ width: "52px", height: "52px", objectFit: "contain", borderRadius: "6px", border: `1px solid ${C.border}`, background: "#0a0d14", flexShrink: 0 }}
+            onError={e => { (e.currentTarget as HTMLImageElement).style.opacity = "0.2"; }}
+          />
+        )}
+      </div>
+    </div>
+  );
+
   if (loading) return <div style={{ color: C.dim, padding: "40px", textAlign: "center" }}>⏳ جاري التحميل...</div>;
 
   return (
@@ -5518,38 +5623,19 @@ function GameConfigTab({ toast }: { toast: ReturnType<typeof useToast> }) {
           🏆 إعدادات لعبة التحدي
         </div>
 
-        <div style={{ display: "flex", flexDirection: "column", gap: "18px" }}>
-          {/* Character URL */}
-          <div>
-            <label style={{ display: "block", fontSize: "11px", color: C.dim, letterSpacing: "0.08em", marginBottom: "8px", fontFamily: "Orbitron, sans-serif" }}>
-              صورة الشخصية (character_image_url)
-            </label>
-            <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
-              <input
-                value={characterUrl}
-                onChange={e => setCharacterUrl(e.target.value)}
-                placeholder="https://example.com/character.png"
-                style={{ flex: 1, padding: "10px 14px", background: "#0a0d14", border: `1px solid ${C.border}`, borderRadius: "4px", color: C.text, fontFamily: "Rajdhani, sans-serif", fontSize: "13px", outline: "none" }}
-              />
-              {characterUrl && <img src={characterUrl} alt="preview" style={{ width: "48px", height: "48px", objectFit: "contain", borderRadius: "6px", border: `1px solid ${C.border}`, background: "#0a0d14" }} onError={e => { (e.currentTarget as HTMLImageElement).style.display = "none"; }} />}
-            </div>
-          </div>
-
-          {/* Target URL */}
-          <div>
-            <label style={{ display: "block", fontSize: "11px", color: C.dim, letterSpacing: "0.08em", marginBottom: "8px", fontFamily: "Orbitron, sans-serif" }}>
-              صورة الهدف (target_item_url)
-            </label>
-            <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
-              <input
-                value={targetUrl}
-                onChange={e => setTargetUrl(e.target.value)}
-                placeholder="https://example.com/burger.png"
-                style={{ flex: 1, padding: "10px 14px", background: "#0a0d14", border: `1px solid ${C.border}`, borderRadius: "4px", color: C.text, fontFamily: "Rajdhani, sans-serif", fontSize: "13px", outline: "none" }}
-              />
-              {targetUrl && <img src={targetUrl} alt="preview" style={{ width: "48px", height: "48px", objectFit: "contain", borderRadius: "6px", border: `1px solid ${C.border}`, background: "#0a0d14" }} onError={e => { (e.currentTarget as HTMLImageElement).style.display = "none"; }} />}
-            </div>
-          </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: "22px" }}>
+          <ImageField
+            label="صورة الشخصية الكرتونية"
+            url={characterUrl} setUrl={setCharacterUrl}
+            uploading={uploadingChar} setUploading={setUploadingChar}
+            fileRef={charFileRef}
+          />
+          <ImageField
+            label="صورة العنصر المراد اصطياده (برجر / مشروب...)"
+            url={targetUrl} setUrl={setTargetUrl}
+            uploading={uploadingTarget} setUploading={setUploadingTarget}
+            fileRef={targetFileRef}
+          />
 
           {/* Duration */}
           <div>
