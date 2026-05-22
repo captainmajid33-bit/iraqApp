@@ -592,13 +592,15 @@ export function ChallengeModal({ onClose }: Props) {
     const g = gs.current;
     g.charX    = W / 2;
     g.charY    = H - CHAR_H - 24;
-    g.items    = [];
-    g.score    = 0;
-    g.timeLeft = config.duration;
-    g.pressing = null;
-    g.nextId   = 0;
-    g.lastSpawn = 0;
-    g.running  = true;
+    g.items       = [];
+    g.score       = 0;
+    g.timeLeft    = config.duration;
+    g.pressing    = null;
+    g.nextId      = 0;
+    g.lastSpawn   = 0;
+    g.running     = true;
+    g.comboCount  = 0;
+    g.lastCatchTs = 0;
     g.W = W; g.H = H;
 
     setScore(0);
@@ -896,53 +898,50 @@ export function ChallengeModal({ onClose }: Props) {
           )}
 
           {/* Canvas */}
+          {/* Combo flash overlay */}
+          {comboFlash && (
+            <div style={{
+              position: 'absolute', top: '38%', left: '50%',
+              transform: 'translate(-50%, -50%)',
+              zIndex: 25, pointerEvents: 'none',
+              fontFamily: 'Orbitron, sans-serif',
+              fontSize: '28px', fontWeight: 900,
+              color: C.yellow,
+              textShadow: `${neon(C.yellow, 14)}, 0 2px 8px #000`,
+              letterSpacing: '0.08em',
+              animation: 'fadeInOut 0.9s ease forwards',
+              whiteSpace: 'nowrap',
+            }}>
+              ⚡ {comboFlash}
+            </div>
+          )}
+
+          {/* Touch hint — only shown on first play */}
+          {phase === 'playing' && (
+            <div style={{
+              position: 'absolute', bottom: '10px', left: 0, right: 0,
+              textAlign: 'center', pointerEvents: 'none',
+              fontFamily: 'Orbitron, sans-serif', fontSize: '10px',
+              color: 'rgba(0,212,255,0.40)', letterSpacing: '0.06em',
+            }}>
+              اضغط مع الإمساك → للأمام  •  اترك → تراجع
+            </div>
+          )}
+
           <canvas
             ref={canvasRef}
+            onMouseDown={pressRight}
+            onMouseUp={() => { gs.current.pressing = 'left'; }}
+            onMouseLeave={() => { gs.current.pressing = null; }}
+            onTouchStart={e => { e.preventDefault(); pressRight(); }}
+            onTouchEnd={e => { e.preventDefault(); gs.current.pressing = 'left'; }}
+            onTouchCancel={e => { e.preventDefault(); gs.current.pressing = null; }}
             style={{
               flex: 1, width: '100%', display: 'block',
-              touchAction: 'none',
+              touchAction: 'none', cursor: 'pointer',
               visibility: phase === 'loading' ? 'hidden' : 'visible',
             }}
           />
-
-          {/* Controls */}
-          <div style={{
-            display: 'flex', gap: '12px',
-            padding: '12px 24px',
-            background: C.surface,
-            borderTop: `1px solid ${C.border}`,
-            flexShrink: 0,
-          }}>
-            <button
-              onMouseDown={pressLeft}  onMouseUp={pressStop} onMouseLeave={pressStop}
-              onTouchStart={e => { e.preventDefault(); pressLeft(); }}
-              onTouchEnd={e => { e.preventDefault(); pressStop(); }}
-              style={{
-                flex: 1, height: '64px', borderRadius: '8px',
-                background: `${C.blue}18`,
-                border: `2px solid ${C.blue}55`,
-                color: C.blue, fontSize: '26px', cursor: 'pointer',
-                touchAction: 'none', userSelect: 'none',
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                transition: 'all 0.1s',
-              }}
-            >◀</button>
-
-            <button
-              onMouseDown={pressRight} onMouseUp={pressStop} onMouseLeave={pressStop}
-              onTouchStart={e => { e.preventDefault(); pressRight(); }}
-              onTouchEnd={e => { e.preventDefault(); pressStop(); }}
-              style={{
-                flex: 1, height: '64px', borderRadius: '8px',
-                background: `${C.green}18`,
-                border: `2px solid ${C.green}55`,
-                color: C.green, fontSize: '26px', cursor: 'pointer',
-                touchAction: 'none', userSelect: 'none',
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                transition: 'all 0.1s',
-              }}
-            >▶</button>
-          </div>
         </div>
       )}
 
@@ -1148,7 +1147,7 @@ export function ChallengeModal({ onClose }: Props) {
                   background: `${C.yellow}11`, border: `1px solid ${C.yellow}33`,
                   padding: '4px 10px', borderRadius: '20px',
                 }}>
-                  💰 {profile.gameCash.toLocaleString()} د.ع
+                  💰 {walletBal > 0 ? walletBal.toLocaleString() : profile.gameCash.toLocaleString()} د.ع
                 </div>
               )}
               <button
@@ -1176,9 +1175,11 @@ export function ChallengeModal({ onClose }: Props) {
                 <div style={{ width: '1px', height: '32px', background: C.border }} />
                 <div style={{ textAlign: 'center', flex: 1 }}>
                   <div style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '20px', color: C.yellow, textShadow: neon(C.yellow, 6) }}>
-                    {profile.gameCash.toLocaleString()}
+                    {walletBal > 0 ? walletBal.toLocaleString() : profile.gameCash.toLocaleString()}
                   </div>
-                  <div style={{ fontSize: '10px', color: C.dim, marginTop: '2px' }}>دينار رصيد</div>
+                  <div style={{ fontSize: '10px', color: C.dim, marginTop: '2px' }}>
+                    {walletBal > 0 ? 'رصيد المحفظة' : 'دينار رصيد اللعبة'}
+                  </div>
                 </div>
               </div>
             )}

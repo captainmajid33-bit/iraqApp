@@ -5472,13 +5472,15 @@ function GiftCardsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
 
 // ── GameConfigTab ─────────────────────────────────────────────────────────────
 function GameConfigTab({ toast }: { toast: ReturnType<typeof useToast> }) {
-  const [characterUrl, setCharacterUrl] = useState("");
-  const [targetUrl,    setTargetUrl]    = useState("");
-  const [duration,     setDuration]     = useState(60);
-  const [loading,      setLoading]      = useState(true);
-  const [saving,       setSaving]       = useState(false);
-  const [uploadingChar, setUploadingChar] = useState(false);
-  const [uploadingTarget, setUploadingTarget] = useState(false);
+  const [characterUrl,   setCharacterUrl]   = useState("");
+  const [targetUrl,      setTargetUrl]      = useState("");
+  const [backgroundUrl,  setBackgroundUrl]  = useState("");
+  const [duration,       setDuration]       = useState(60);
+  const [loading,        setLoading]        = useState(true);
+  const [saving,         setSaving]         = useState(false);
+  const [uploadingChar,  setUploadingChar]  = useState(false);
+  const [uploadingTarget,setUploadingTarget]= useState(false);
+  const [uploadingBg,    setUploadingBg]    = useState(false);
 
   interface LeaderRow { rank: number; userId: string; userName: string; bestScore: number; }
   const [board,        setBoard]        = useState<LeaderRow[]>([]);
@@ -5499,6 +5501,7 @@ function GameConfigTab({ toast }: { toast: ReturnType<typeof useToast> }) {
 
   const charFileRef   = useRef<HTMLInputElement>(null);
   const targetFileRef = useRef<HTMLInputElement>(null);
+  const bgFileRef     = useRef<HTMLInputElement>(null);
 
   const loadSession = useCallback(async () => {
     setSessionLoading(true);
@@ -5509,10 +5512,11 @@ function GameConfigTab({ toast }: { toast: ReturnType<typeof useToast> }) {
   }, []);
 
   useEffect(() => {
-    api.get("/api/game/config").then((d: { characterUrl: string; targetUrl: string; duration: number }) => {
-      setCharacterUrl(d.characterUrl ?? "");
-      setTargetUrl(d.targetUrl    ?? "");
-      setDuration(d.duration      ?? 60);
+    api.get("/api/game/config").then((d: { characterUrl: string; targetUrl: string; duration: number; backgroundUrl: string }) => {
+      setCharacterUrl(d.characterUrl   ?? "");
+      setTargetUrl(d.targetUrl         ?? "");
+      setBackgroundUrl(d.backgroundUrl ?? "");
+      setDuration(d.duration           ?? 60);
     }).catch(() => {}).finally(() => setLoading(false));
 
     setBoardLoading(true);
@@ -5606,7 +5610,7 @@ function GameConfigTab({ toast }: { toast: ReturnType<typeof useToast> }) {
   const save = async () => {
     setSaving(true);
     try {
-      await api.patch("/api/game/config", { characterUrl, targetUrl, duration });
+      await api.patch("/api/game/config", { characterUrl, targetUrl, backgroundUrl, duration });
       toast.show("تم حفظ إعدادات اللعبة ✓", "success");
     } catch {
       toast.show("فشل الحفظ", "error");
@@ -5623,7 +5627,7 @@ function GameConfigTab({ toast }: { toast: ReturnType<typeof useToast> }) {
   }: {
     label: string; url: string; setUrl: (v: string) => void;
     uploading: boolean; setUploading: (v: boolean) => void;
-    fileRef: React.RefObject<HTMLInputElement>; accept?: string;
+    fileRef: React.RefObject<HTMLInputElement | null>; accept?: string;
   }) => (
     <div>
       <label style={{ display: "block", fontSize: "11px", color: C.dim, letterSpacing: "0.08em", marginBottom: "8px", fontFamily: "Orbitron, sans-serif" }}>
@@ -5704,6 +5708,12 @@ function GameConfigTab({ toast }: { toast: ReturnType<typeof useToast> }) {
             url={targetUrl} setUrl={setTargetUrl}
             uploading={uploadingTarget} setUploading={setUploadingTarget}
             fileRef={targetFileRef}
+          />
+          <ImageField
+            label="صورة خلفية ساحة اللعبة (اختياري)"
+            url={backgroundUrl} setUrl={setBackgroundUrl}
+            uploading={uploadingBg} setUploading={setUploadingBg}
+            fileRef={bgFileRef}
           />
 
           {/* Duration */}
