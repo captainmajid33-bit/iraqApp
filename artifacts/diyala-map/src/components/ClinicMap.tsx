@@ -3022,16 +3022,23 @@ export function ClinicMap({
       (snap) => {
         if (!snap.exists()) return;
         const d = snap.data();
-        if (!d || redirectLockRef.current) return; // skip during redirect
+        if (!d) return;
+        const status = (d.status ?? '') as string;
+        // Always process terminal statuses (accepted/driving/done) even during redirect —
+        // so a driver accepting while we redirect doesn't get silently ignored.
+        const isTerminal = status === 'accepted' || status === 'driving'
+          || status === 'done' || status === 'finished' || status === 'cancelled';
+        if (redirectLockRef.current && !isTerminal) return;
         applyOrderSnapshot({
-          id:        activeOrderId,
-          status:    (d.status ?? '') as string,
-          driverLat: typeof d.driver_lat === 'number' ? d.driver_lat : null,
-          driverLng: typeof d.driver_lng === 'number' ? d.driver_lng : null,
-          fromLat:   typeof d.from_lat   === 'number' ? d.from_lat   : null,
-          fromLng:   typeof d.from_lng   === 'number' ? d.from_lng   : null,
+          id:         activeOrderId,
+          status,
+          driverLat:  typeof d.driver_lat === 'number' ? d.driver_lat : null,
+          driverLng:  typeof d.driver_lng === 'number' ? d.driver_lng : null,
+          fromLat:    typeof d.from_lat   === 'number' ? d.from_lat   : null,
+          fromLng:    typeof d.from_lng   === 'number' ? d.from_lng   : null,
           locationId: d.location_id ?? null,
           userName:   d.user_name   ?? null,
+          driverName: (d.driver_name ?? d.driverName ?? null) as string | null,
         }, 'firestore');
       },
       () => { /* Firestore unreachable — SSE below is the fallback */ },

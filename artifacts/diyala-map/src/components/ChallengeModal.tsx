@@ -400,18 +400,29 @@ export function ChallengeModal({ onClose }: Props) {
     setShopBuying(skin.id);
     setShopMsg('');
     try {
+      // Deduct from Firestore balance first
+      const userRef = doc(db, 'users', user.uid);
+      await runTransaction(db, async txn => {
+        const snap = await txn.get(userRef);
+        const bal  = Number(snap.data()?.balance ?? 0);
+        if (bal < skin.price) throw new Error(`رصيدك ${bal.toLocaleString()} د.ع — المطلوب ${skin.price.toLocaleString()} د.ع`);
+        txn.update(userRef, { balance: increment(-skin.price) });
+      });
+      // Tell server to record the skin (no balance check needed)
       const r = await fetch('/api/game/shop/buy-skin', {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ firebaseUid: user.uid, skinId: skin.id, price: skin.price }),
+        body:    JSON.stringify({ firebaseUid: user.uid, skinId: skin.id, price: skin.price, preAuthorized: true }),
       });
       const d = await r.json();
-      if (!r.ok) { setShopMsg(d.message ?? 'فشل الشراء'); return; }
+      if (!r.ok) {
+        // Refund on server failure
+        runTransaction(db, async txn => { txn.update(userRef, { balance: increment(skin.price) }); }).catch(() => {});
+        setShopMsg(d.message ?? 'فشل الشراء'); return;
+      }
       setProfile(p => p ? { ...p, gameCash: d.gameCash, unlockedSkins: d.unlockedSkins } : p);
-      if (typeof d.walletBalance === 'number') setWalletBal(d.walletBalance);
-      const src = d.source === 'wallet' ? ' (من المحفظة)' : ' (من رصيد اللعبة)';
-      setShopMsg(`✓ تم شراء "${skin.name}" بنجاح${src}!`);
-    } catch { setShopMsg('خطأ في الاتصال'); }
+      setShopMsg(`✓ تم شراء "${skin.name}" بنجاح!`);
+    } catch (e: any) { setShopMsg(e?.message ?? 'خطأ في الاتصال'); }
     finally  { setShopBuying(null); }
   }, []);
 
@@ -462,15 +473,30 @@ export function ChallengeModal({ onClose }: Props) {
     if (!user || !profile) { setShopMsg('يجب تسجيل الدخول أولاً'); return; }
     const currentLevel = statType === 'magnet' ? profile.magnetLevel : profile.comboLevel;
     if (currentLevel >= MAX_UPG_LEVEL) { setShopMsg('وصلت للحد الأقصى!'); return; }
+    const UPG_COSTS = [1500, 3000, 5000, 8000];
+    const cost = UPG_COSTS[currentLevel - 1] ?? 1500;
     setUpgrading(statType);
     setShopMsg('');
     try {
+      // Deduct from Firestore balance first
+      const userRef = doc(db, 'users', user.uid);
+      await runTransaction(db, async txn => {
+        const snap = await txn.get(userRef);
+        const bal  = Number(snap.data()?.balance ?? 0);
+        if (bal < cost) throw new Error(`رصيدك ${bal.toLocaleString()} د.ع — المطلوب ${cost.toLocaleString()} د.ع`);
+        txn.update(userRef, { balance: increment(-cost) });
+      });
+      // Tell server to apply level-up (no balance check needed)
       const r = await fetch('/api/game/shop/upgrade', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ firebaseUid: user.uid, statType }),
+        body: JSON.stringify({ firebaseUid: user.uid, statType, preAuthorized: true }),
       });
       const d = await r.json();
-      if (!r.ok) { setShopMsg(d.message ?? 'فشل التطوير'); return; }
+      if (!r.ok) {
+        // Refund on server failure
+        runTransaction(db, async txn => { txn.update(userRef, { balance: increment(cost) }); }).catch(() => {});
+        setShopMsg(d.message ?? 'فشل التطوير'); return;
+      }
       setProfile(p => p ? {
         ...p,
         gameCash:    d.gameCash,
@@ -479,7 +505,7 @@ export function ChallengeModal({ onClose }: Props) {
       } : p);
       const label = statType === 'magnet' ? 'المغناطيس' : 'الكومبو';
       setShopMsg(`✓ تم ترقية ${label} إلى مستوى ${d.newLevel}! 🚀`);
-    } catch { setShopMsg('خطأ في الاتصال'); }
+    } catch (e: any) { setShopMsg(e?.message ?? 'خطأ في الاتصال'); }
     finally  { setUpgrading(null); }
   }, [profile]);
 

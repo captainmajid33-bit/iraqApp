@@ -220,13 +220,16 @@ router.get("/game/profile/:uid", async (req: Request, res: Response) => {
 });
 
 // ── POST /api/game/shop/buy-skin ────────────────────────────────────────────
-// Purchase a skin — tries wallet balance (users.balance) first, falls back to gameCash.
-// Body: { firebaseUid: string, skinId: string, price: number }
+// Purchase a skin.
+// When preAuthorized=true the client already deducted from Firestore — server
+// just records the skin without any balance check.
+// Body: { firebaseUid: string, skinId: string, price: number, preAuthorized?: boolean }
 router.post("/game/shop/buy-skin", async (req: Request, res: Response) => {
-  const { firebaseUid, skinId, price } = req.body as {
-    firebaseUid?: string;
-    skinId?:      string;
-    price?:       number;
+  const { firebaseUid, skinId, price, preAuthorized } = req.body as {
+    firebaseUid?:    string;
+    skinId?:         string;
+    price?:          number;
+    preAuthorized?:  boolean;
   };
 
   if (!firebaseUid || !skinId || typeof price !== "number" || price < 0) {
@@ -244,20 +247,8 @@ router.post("/game/shop/buy-skin", async (req: Request, res: Response) => {
       return;
     }
 
-    // ── Try real wallet (users.balance linked via firebase_uid) first ─────────
-    const [walletUser] = await db
-      .select({ id: usersTable.id, balance: usersTable.balance })
-      .from(usersTable)
-      .where(eq(usersTable.firebaseUid, firebaseUid));
-
-    if (walletUser && walletUser.balance >= price) {
-      // Deduct from real wallet
-      await db
-        .update(usersTable)
-        .set({ balance: walletUser.balance - price })
-        .where(eq(usersTable.id, walletUser.id));
-
-      // Add skin to profile
+    // ── Pre-authorized (Firestore deduction already done client-side) ─────────
+    if (preAuthorized) {
       const [updated] = await db
         .update(gameProfilesTable)
         .set({
@@ -266,26 +257,17 @@ router.post("/game/shop/buy-skin", async (req: Request, res: Response) => {
         })
         .where(eq(gameProfilesTable.firebaseUid, firebaseUid))
         .returning();
-
-      res.json({
-        ok:             true,
-        source:         "wallet",
-        walletBalance:  walletUser.balance - price,
-        gameCash:       updated.gameCash,
-        unlockedSkins:  updated.unlockedSkins,
-      });
+      res.json({ ok: true, source: "firestore", gameCash: updated.gameCash, unlockedSkins: updated.unlockedSkins });
       return;
     }
 
-    // ── Fall back to gameCash ─────────────────────────────────────────────────
+    // ── Legacy: fall back to gameCash ─────────────────────────────────────────
     if (profile.gameCash < price) {
-      const walletBalance = walletUser?.balance ?? 0;
       res.status(402).json({
-        error:         "insufficient_balance",
-        message:       `رصيدك غير كافٍ — المحفظة: ${walletBalance} د، نقود اللعبة: ${profile.gameCash} د، المطلوب: ${price} د`,
-        walletBalance,
-        gameCash:      profile.gameCash,
-        required:      price,
+        error:    "insufficient_balance",
+        message:  `رصيدك غير كافٍ — المطلوب: ${price.toLocaleString()} د.ع`,
+        gameCash: profile.gameCash,
+        required: price,
       });
       return;
     }
@@ -300,13 +282,7 @@ router.post("/game/shop/buy-skin", async (req: Request, res: Response) => {
       .where(eq(gameProfilesTable.firebaseUid, firebaseUid))
       .returning();
 
-    res.json({
-      ok:            true,
-      source:        "gameCash",
-      walletBalance: walletUser?.balance ?? 0,
-      gameCash:      updated.gameCash,
-      unlockedSkins: updated.unlockedSkins,
-    });
+    res.json({ ok: true, source: "gameCash", gameCash: updated.gameCash, unlockedSkins: updated.unlockedSkins });
   } catch (err) {
     req.log.error({ err }, "buy-skin error");
     res.status(500).json({ error: "internal" });
@@ -668,16 +644,22 @@ router.post("/game/session/catch", async (req: Request, res: Response) => {
 });
 
 // ── POST /api/game/shop/upgrade ──────────────────────────────────────────────
-// Upgrade magnet duration or combo window using wallet or gameCash.
-// Body: { firebaseUid: string, statType: 'magnet' | 'combo' }
+// Upgrade magnet duration or combo window.
+// When preAuthorized=true the client already deducted from Firestore — server
+// just applies the level-up without any balance check.
+// Body: { firebaseUid: string, statType: 'magnet' | 'combo', preAuthorized?: boolean }
 const UPG_COSTS: Record<string, number[]> = {
-  magnet: [1500, 3000, 5000, 8000], // index = current level - 1 (L1→L2 costs [0], etc.)
+  magnet: [1500, 3000, 5000, 8000],
   combo:  [1500, 3000, 5000, 8000],
 };
 const MAX_UPG = 5;
 
 router.post("/game/shop/upgrade", async (req: Request, res: Response) => {
-  const { firebaseUid, statType } = req.body as { firebaseUid?: string; statType?: string };
+  const { firebaseUid, statType, preAuthorized } = req.body as {
+    firebaseUid?:   string;
+    statType?:      string;
+    preAuthorized?: boolean;
+  };
   if (!firebaseUid || !['magnet', 'combo'].includes(statType ?? '')) {
     res.status(400).json({ error: "invalid_params" }); return;
   }
@@ -690,36 +672,25 @@ router.post("/game/shop/upgrade", async (req: Request, res: Response) => {
       res.status(409).json({ error: "max_level", message: "وصلت للحد الأقصى من التطوير!" }); return;
     }
 
-    const cost = UPG_COSTS[statType!][currentLevel - 1];
+    const cost     = UPG_COSTS[statType!][currentLevel - 1];
+    const newLevel = currentLevel + 1;
 
-    // Try real wallet first
-    const [walletUser] = await db
-      .select({ id: usersTable.id, balance: usersTable.balance })
-      .from(usersTable)
-      .where(eq(usersTable.firebaseUid, firebaseUid));
-
-    let source: 'wallet' | 'gameCash';
-    if (walletUser && walletUser.balance >= cost) {
-      await db.update(usersTable)
-        .set({ balance: walletUser.balance - cost })
-        .where(eq(usersTable.id, walletUser.id));
-      source = 'wallet';
-    } else if (profile.gameCash >= cost) {
-      source = 'gameCash';
-    } else {
-      res.status(402).json({
-        error:         "insufficient_balance",
-        message:       `رصيدك غير كافٍ — المطلوب: ${cost.toLocaleString()} د.ع`,
-        walletBalance: walletUser?.balance ?? 0,
-        gameCash:      profile.gameCash,
-        required:      cost,
-      }); return;
+    // ── Pre-authorized (Firestore deduction already done client-side) ─────────
+    if (!preAuthorized) {
+      // Legacy: deduct from gameCash
+      if (profile.gameCash < cost) {
+        res.status(402).json({
+          error:    "insufficient_balance",
+          message:  `رصيدك غير كافٍ — المطلوب: ${cost.toLocaleString()} د.ع`,
+          gameCash: profile.gameCash,
+          required: cost,
+        }); return;
+      }
     }
 
-    const newLevel = currentLevel + 1;
-    const setData  = statType === 'magnet'
-      ? { magnetLevel: newLevel, updatedAt: new Date(), ...(source === 'gameCash' ? { gameCash: profile.gameCash - cost } : {}) }
-      : { comboLevel:  newLevel, updatedAt: new Date(), ...(source === 'gameCash' ? { gameCash: profile.gameCash - cost } : {}) };
+    const setData = statType === 'magnet'
+      ? { magnetLevel: newLevel, updatedAt: new Date(), ...(!preAuthorized ? { gameCash: profile.gameCash - cost } : {}) }
+      : { comboLevel:  newLevel, updatedAt: new Date(), ...(!preAuthorized ? { gameCash: profile.gameCash - cost } : {}) };
 
     const [updated] = await db
       .update(gameProfilesTable)
@@ -728,14 +699,13 @@ router.post("/game/shop/upgrade", async (req: Request, res: Response) => {
       .returning();
 
     res.json({
-      ok:            true,
+      ok:          true,
       statType,
       newLevel,
-      source,
-      walletBalance: source === 'wallet' ? (walletUser!.balance - cost) : (walletUser?.balance ?? 0),
-      gameCash:      updated.gameCash,
-      magnetLevel:   updated.magnetLevel,
-      comboLevel:    updated.comboLevel,
+      source:      preAuthorized ? 'firestore' : 'gameCash',
+      gameCash:    updated.gameCash,
+      magnetLevel: updated.magnetLevel,
+      comboLevel:  updated.comboLevel,
     });
   } catch (err) {
     req.log.error({ err }, "upgrade error");
