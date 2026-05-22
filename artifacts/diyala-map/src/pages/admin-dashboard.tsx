@@ -5470,10 +5470,149 @@ function GiftCardsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
   );
 }
 
+// ── GameConfigTab ─────────────────────────────────────────────────────────────
+function GameConfigTab({ toast }: { toast: ReturnType<typeof useToast> }) {
+  const [characterUrl, setCharacterUrl] = useState("");
+  const [targetUrl,    setTargetUrl]    = useState("");
+  const [duration,     setDuration]     = useState(60);
+  const [loading,      setLoading]      = useState(true);
+  const [saving,       setSaving]       = useState(false);
+
+  // Leaderboard
+  interface LeaderRow { rank: number; userId: string; userName: string; bestScore: number; }
+  const [board,        setBoard]        = useState<LeaderRow[]>([]);
+  const [boardLoading, setBoardLoading] = useState(false);
+
+  useEffect(() => {
+    api.get("/api/game/config").then((d: { characterUrl: string; targetUrl: string; duration: number }) => {
+      setCharacterUrl(d.characterUrl ?? "");
+      setTargetUrl(d.targetUrl    ?? "");
+      setDuration(d.duration      ?? 60);
+    }).catch(() => {}).finally(() => setLoading(false));
+
+    setBoardLoading(true);
+    api.get("/api/game/leaderboard").then((d: LeaderRow[]) => setBoard(Array.isArray(d) ? d : [])).catch(() => {}).finally(() => setBoardLoading(false));
+  }, []);
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      await api.patch("/api/game/config", { characterUrl, targetUrl, duration });
+      toast.show("تم حفظ إعدادات اللعبة ✓", "success");
+    } catch {
+      toast.show("فشل الحفظ", "error");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const medal = (r: number) => r === 1 ? "🥇" : r === 2 ? "🥈" : r === 3 ? "🥉" : `#${r}`;
+
+  if (loading) return <div style={{ color: C.dim, padding: "40px", textAlign: "center" }}>⏳ جاري التحميل...</div>;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "28px", maxWidth: "800px" }}>
+      {/* Config Card */}
+      <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: "8px", padding: "24px" }}>
+        <div style={{ fontFamily: "Orbitron, sans-serif", fontSize: "12px", color: C.yellow, letterSpacing: "0.12em", marginBottom: "22px", textShadow: neon(C.yellow, 6) }}>
+          🏆 إعدادات لعبة التحدي
+        </div>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: "18px" }}>
+          {/* Character URL */}
+          <div>
+            <label style={{ display: "block", fontSize: "11px", color: C.dim, letterSpacing: "0.08em", marginBottom: "8px", fontFamily: "Orbitron, sans-serif" }}>
+              صورة الشخصية (character_image_url)
+            </label>
+            <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
+              <input
+                value={characterUrl}
+                onChange={e => setCharacterUrl(e.target.value)}
+                placeholder="https://example.com/character.png"
+                style={{ flex: 1, padding: "10px 14px", background: "#0a0d14", border: `1px solid ${C.border}`, borderRadius: "4px", color: C.text, fontFamily: "Rajdhani, sans-serif", fontSize: "13px", outline: "none" }}
+              />
+              {characterUrl && <img src={characterUrl} alt="preview" style={{ width: "48px", height: "48px", objectFit: "contain", borderRadius: "6px", border: `1px solid ${C.border}`, background: "#0a0d14" }} onError={e => { (e.currentTarget as HTMLImageElement).style.display = "none"; }} />}
+            </div>
+          </div>
+
+          {/* Target URL */}
+          <div>
+            <label style={{ display: "block", fontSize: "11px", color: C.dim, letterSpacing: "0.08em", marginBottom: "8px", fontFamily: "Orbitron, sans-serif" }}>
+              صورة الهدف (target_item_url)
+            </label>
+            <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
+              <input
+                value={targetUrl}
+                onChange={e => setTargetUrl(e.target.value)}
+                placeholder="https://example.com/burger.png"
+                style={{ flex: 1, padding: "10px 14px", background: "#0a0d14", border: `1px solid ${C.border}`, borderRadius: "4px", color: C.text, fontFamily: "Rajdhani, sans-serif", fontSize: "13px", outline: "none" }}
+              />
+              {targetUrl && <img src={targetUrl} alt="preview" style={{ width: "48px", height: "48px", objectFit: "contain", borderRadius: "6px", border: `1px solid ${C.border}`, background: "#0a0d14" }} onError={e => { (e.currentTarget as HTMLImageElement).style.display = "none"; }} />}
+            </div>
+          </div>
+
+          {/* Duration */}
+          <div>
+            <label style={{ display: "block", fontSize: "11px", color: C.dim, letterSpacing: "0.08em", marginBottom: "8px", fontFamily: "Orbitron, sans-serif" }}>
+              مدة اللعبة (ثانية)
+            </label>
+            <input
+              type="number"
+              value={duration}
+              min={15} max={300}
+              onChange={e => setDuration(Number(e.target.value))}
+              style={{ width: "120px", padding: "10px 14px", background: "#0a0d14", border: `1px solid ${C.border}`, borderRadius: "4px", color: C.text, fontFamily: "Orbitron, sans-serif", fontSize: "13px", outline: "none" }}
+            />
+          </div>
+
+          <button
+            onClick={save}
+            disabled={saving}
+            style={{ alignSelf: "flex-start", padding: "11px 28px", background: `${C.yellow}18`, border: `1.5px solid ${C.yellow}66`, color: C.yellow, fontFamily: "Orbitron, sans-serif", fontSize: "11px", letterSpacing: "0.1em", cursor: saving ? "not-allowed" : "pointer", borderRadius: "4px", transition: "all 0.2s", opacity: saving ? 0.6 : 1 }}
+          >
+            {saving ? "⏳ جاري الحفظ..." : "💾 حفظ الإعدادات"}
+          </button>
+        </div>
+      </div>
+
+      {/* Leaderboard preview */}
+      <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: "8px", padding: "24px" }}>
+        <div style={{ fontFamily: "Orbitron, sans-serif", fontSize: "12px", color: C.blue, letterSpacing: "0.12em", marginBottom: "18px", textShadow: neon(C.blue, 6) }}>
+          🏅 قائمة المتصدرين
+        </div>
+        {boardLoading ? (
+          <div style={{ color: C.dim, textAlign: "center", padding: "20px", fontSize: "13px" }}>⏳ جاري التحميل...</div>
+        ) : board.length === 0 ? (
+          <div style={{ color: C.dim, textAlign: "center", padding: "20px", fontSize: "13px" }}>لا توجد نتائج بعد</div>
+        ) : (
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr style={{ borderBottom: `1px solid ${C.border}` }}>
+                {["المركز", "اللاعب", "أعلى نتيجة"].map(h => (
+                  <th key={h} style={{ padding: "8px 12px", textAlign: "right", fontFamily: "Orbitron, sans-serif", fontSize: "10px", color: C.dim, letterSpacing: "0.08em" }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {board.map(row => (
+                <tr key={row.userId} style={{ borderBottom: `1px solid ${C.border}22` }}>
+                  <td style={{ padding: "10px 12px", fontSize: "16px" }}>{medal(row.rank)}</td>
+                  <td style={{ padding: "10px 12px", fontFamily: "Rajdhani, sans-serif", fontSize: "14px", color: C.text }}>{row.userName}</td>
+                  <td style={{ padding: "10px 12px", fontFamily: "Orbitron, sans-serif", fontSize: "14px", color: C.yellow, textShadow: neon(C.yellow, 5) }}>{row.bestScore}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ── Admin Dashboard ───────────────────────────────────────────────────────────
 export function AdminDashboard() {
   const [, navigate] = useLocation();
-  const [tab, setTab] = useState<"merchants" | "map" | "categories" | "settings" | "taxi" | "drivers" | "fuel" | "bounty" | "users" | "users_radar" | "gift_cards" | "doctors_bookings" | "services_settings">("merchants");
+  const [tab, setTab] = useState<"merchants" | "map" | "categories" | "settings" | "taxi" | "drivers" | "fuel" | "bounty" | "users" | "users_radar" | "gift_cards" | "doctors_bookings" | "services_settings" | "game">("merchants");
   const [cats, setCats] = useState<Cat[]>([]);
   const [authChecked, setAuthChecked] = useState(false);
   const toast = useToast();
@@ -5530,6 +5669,7 @@ export function AdminDashboard() {
     { key: "doctors_bookings"   as const, en: "DOCTORS BOOKINGS",  ar: "🏥 حجوزات الأطباء" },
     { key: "services_settings" as const, en: "SERVICES SETTINGS", ar: "⚙️ إعدادات الخدمات" },
     { key: "settings"          as const, en: "SETTINGS",          ar: "الإعدادات" },
+    { key: "game"              as const, en: "GAME",               ar: "🏆 التحدي" },
   ];
 
   return (
@@ -5586,6 +5726,7 @@ export function AdminDashboard() {
         {tab === "doctors_bookings"   && <DoctorsBookingsTab toast={toast} />}
         {tab === "services_settings"  && <ServicesSettingsTab toast={toast} />}
         {tab === "settings"           && <SettingsTab toast={toast} />}
+        {tab === "game"               && <GameConfigTab toast={toast} />}
       </main>
 
       <Toast toast={toast.toast} />

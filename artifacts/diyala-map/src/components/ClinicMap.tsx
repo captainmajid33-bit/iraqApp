@@ -10,6 +10,7 @@ import { MarketTicker } from './MarketTicker';
 import { FuelStationRadar } from './FuelStationRadar';
 import { BountyMissionSystem } from './BountyMissionSystem';
 import { BountyShortcutButton } from './BountyShortcutButton';
+import { ChallengeModal } from './ChallengeModal';
 import { DoctorBookingModal } from './DoctorBookingModal';
 import { ActiveOrderTracker } from './ActiveOrderTracker';
 import TrafficLayer from './TrafficLayer';
@@ -380,6 +381,7 @@ export function ClinicMap({
 }: ClinicMapProps) {
   const theme        = useMapTheme();
   const [isBountyUnlocked, setIsBountyUnlocked] = useState(false);
+  const [showChallenge, setShowChallenge]         = useState(false);
 
   const mapContainer      = useRef<HTMLDivElement>(null);
   const mapRef            = useRef<L.Map|null>(null);
@@ -6183,6 +6185,47 @@ export function ClinicMap({
 
       </div>
 
+      {/* ── Challenge FAB — "التحدي" game button above Fazaa ── */}
+      {!selectedPlace && (
+        <button
+          onClick={() => setShowChallenge(true)}
+          title="التحدي 🏆"
+          style={{
+            position: 'fixed',
+            right: '14px',
+            bottom: `${(showTraffic ? 250 : 172) + LIST_LIFT + 60}px`,
+            zIndex: 1100,
+            width: '52px',
+            height: '52px',
+            borderRadius: '50%',
+            background: 'rgba(245,197,24,0.13)',
+            border: '1.5px solid rgba(245,197,24,0.65)',
+            color: '#f5c518',
+            fontSize: '22px',
+            cursor: 'pointer',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: '1px',
+            boxShadow: '0 0 14px rgba(245,197,24,0.28), 0 2px 12px rgba(0,0,0,0.6)',
+            transition: 'all 0.2s',
+            backdropFilter: 'blur(8px)',
+          }}
+          onMouseEnter={e => { (e.currentTarget as HTMLElement).style.background = 'rgba(245,197,24,0.25)'; }}
+          onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = 'rgba(245,197,24,0.13)'; }}
+        >
+          🏆
+          <span style={{
+            fontFamily: 'Orbitron, sans-serif',
+            fontSize: '7px',
+            letterSpacing: '0.04em',
+            color: '#f5c518',
+            lineHeight: 1,
+          }}>تحدي</span>
+        </button>
+      )}
+
       {/* ── Fazaa Rescue System — hidden when destination sheet is open ── */}
       {!selectedPlace && (
         <FazaaSystem
@@ -6230,6 +6273,11 @@ export function ClinicMap({
           onUnlock={() => setIsBountyUnlocked(true)}
           bottomOffset={LIST_LIFT}
         />
+      )}
+
+      {/* ── Challenge Game Modal ── */}
+      {showChallenge && (
+        <ChallengeModal onClose={() => setShowChallenge(false)} />
       )}
 
       {/* ── Live Market Ticker ── */}
