@@ -3,21 +3,26 @@
  * ──────────────────────────────────────────────────────────────────────────────
  * Current mode: Web Mock (simulates ads for testing)
  *
- * MOBILE MIGRATION PATH (Capacitor + AdMob):
- *   1. Install: npm install @capacitor-community/admob
- *   2. In showRewardedAd() below, locate the "MOBILE SWAP POINT" comment
- *   3. Replace the mock block with the native SDK call shown in the comment
- *   4. Set your real Ad Unit IDs in AD_UNIT_IDS below
- *   5. No changes needed in any other file — this is the only swap point
+ * ══════════════════════════════════════════════════════════════════════
+ * MOBILE MIGRATION — 3 steps, this file only:
  *
- * PLACEMENT NAMES (for analytics & future per-placement controls):
+ * Step 1 — Install AdMob plugin (run once, locally):
+ *   pnpm --filter @workspace/diyala-map add @capacitor-community/admob
+ *   npx cap sync
+ *
+ * Step 2 — Add real Ad Unit IDs in AD_UNIT_IDS below
+ *
+ * Step 3 — Replace showRewardedAd() body with the native block shown in
+ *           the MOBILE SWAP POINT comment below
+ * ══════════════════════════════════════════════════════════════════════
+ *
+ * PLACEMENT NAMES (for analytics & per-placement controls):
  *   'mission_button'    — BountyShortcutButton "شاهد المهمة" flow
  *   'challenge_gameover'— ChallengeModal end-of-game bonus button
- *   Add more as needed — all tracked here centrally
  */
 
 // ── Ad Unit IDs ───────────────────────────────────────────────────────────────
-// Replace with real AdMob unit IDs when going mobile
+// Replace with your real AdMob unit IDs before publishing to stores
 export const AD_UNIT_IDS = {
   rewarded:     'ca-app-pub-XXXXXXXXXXXXXXXX/XXXXXXXXXX',  // Rewarded video
   interstitial: 'ca-app-pub-XXXXXXXXXXXXXXXX/XXXXXXXXXX',  // Interstitial
@@ -45,13 +50,31 @@ export interface AdResult {
 // Shows a rewarded video ad and returns the reward on completion.
 // Web mock: simulates the full AD_WATCH_SECONDS duration then grants reward.
 //
-// MOBILE SWAP POINT — replace the entire function body with:
-// ─────────────────────────────────────────────────────────
-//   import { AdMob } from '@capacitor-community/admob';
-//   await AdMob.prepareRewardVideoAd({ adId: AD_UNIT_IDS.rewarded });
-//   const result = await AdMob.showRewardVideoAd();
-//   return { success: true, reward: { type: result.rewardType, amount: result.rewardAmount } };
-// ─────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+// MOBILE SWAP POINT — replace the entire function body below with:
+// ──────────────────────────────────────────────────────────────────────────────
+//   import { AdMob, AdLoadInfo } from '@capacitor-community/admob';
+//   import { Capacitor } from '@capacitor/core';
+//
+//   export async function showRewardedAd(placement_name = 'default'): Promise<AdResult> {
+//     console.log(`[adsManager] showRewardedAd — placement: ${placement_name}`);
+//     if (!Capacitor.isNativePlatform()) {
+//       // Fallback for web preview during native development
+//       return { success: true, reward: { type: 'points', amount: 50 } };
+//     }
+//     try {
+//       await AdMob.prepareRewardVideoAd({
+//         adId: AD_UNIT_IDS.rewarded,
+//         isTesting: false, // set true during development
+//       });
+//       const result = await AdMob.showRewardVideoAd();
+//       return { success: true, reward: { type: result.rewardType, amount: result.rewardAmount } };
+//     } catch (e) {
+//       console.error(`[adsManager] Ad failed (${placement_name}):`, e);
+//       return { success: false, error: String(e) };
+//     }
+//   }
+// ══════════════════════════════════════════════════════════════════════════════
 export async function showRewardedAd(placement_name = 'default'): Promise<AdResult> {
   console.log(`[adsManager] showRewardedAd — placement: ${placement_name}`);
   return new Promise(resolve => {
