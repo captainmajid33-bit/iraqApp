@@ -10,3 +10,4 @@ export * from "./taxi_ratings";
 export * from "./gas_orders";
 export * from "./gas_order_messages";
 export * from "./game_scores";
+export * from "./game_profiles";
