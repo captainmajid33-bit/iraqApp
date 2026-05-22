@@ -2109,8 +2109,39 @@ export function ClinicMap({
       }
 
       type DriverRow = { locationId:number; driverName:string; phone:string; lat:number; lng:number; };
-      const rawDrivers: DriverRow[] = Array.isArray(dRaw) ? (dRaw as DriverRow[]) : [];
+      let rawDrivers: DriverRow[] = Array.isArray(dRaw) ? (dRaw as DriverRow[]) : [];
       const SEARCH_RADIUS_KM = 2;
+
+      // ── Firestore-sync fallback (mirrors autoFindDriver) ──────────────────────
+      // If REST returned empty but Firestore has live drivers with GPS coords,
+      // push them into PostgreSQL so the haversine + order flow can proceed.
+      if (rawDrivers.length === 0) {
+        const coordsMap  = liveDriverCoordsRef.current;
+        const phonesSet  = liveOnlineDriverPhonesRef.current;
+        const fsDrivers  = phonesSet && phonesSet.size > 0
+          ? [...phonesSet]
+              .filter(p => coordsMap.has(p))
+              .map(p => ({ phone: p, ...coordsMap.get(p)!, name: '', category: 'taxi' }))
+          : [];
+        if (fsDrivers.length > 0) {
+          try {
+            const syncRes = await fetch('/api/drivers-online/sync', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ drivers: fsDrivers }),
+            });
+            if (syncRes.ok) {
+              const { drivers: synced } = await syncRes.json();
+              if (Array.isArray(synced) && synced.length > 0) {
+                rawDrivers = synced as DriverRow[];
+                console.log(`[dispatchTaxiNow] Firestore-sync: ${synced.length} driver(s) pushed to PostgreSQL`);
+              }
+            }
+          } catch (e) {
+            console.warn('[dispatchTaxiNow] Firestore-sync call failed:', e);
+          }
+        }
+      }
 
       // ── Overlay fresh Firestore GPS coords (same as autoFindDriver) ──────────
       // Partner app pushes GPS to Firestore far more often than PostgreSQL,
@@ -2648,10 +2679,13 @@ export function ClinicMap({
           const p = ((data.phone as string | undefined) || d.id || '').trim();
           if (!p) return;
           phones.add(p);
+          // Accept both number and string lat/lng (different partner app versions may differ)
+          const dLat = typeof data.lat === 'number' ? data.lat : (data.lat != null ? parseFloat(String(data.lat)) : NaN);
+          const dLng = typeof data.lng === 'number' ? data.lng : (data.lng != null ? parseFloat(String(data.lng)) : NaN);
           activeDocs.push({
             phone: p,
-            lat:   typeof data.lat === 'number' ? data.lat : null,
-            lng:   typeof data.lng === 'number' ? data.lng : null,
+            lat:   Number.isFinite(dLat) ? dLat : null,
+            lng:   Number.isFinite(dLng) ? dLng : null,
             name:  (data.driverName ?? data.name ?? '') as string,
           });
         });
