@@ -42,6 +42,7 @@ interface GameConfig {
   targetUrl:     string;
   duration:      number;
   backgroundUrl: string;
+  bgTheme:       number; // 0=auto-rotate, 1-5=specific theme
 }
 
 interface FallingItem {
@@ -138,6 +139,35 @@ const COMBO_WIN_LVL   = [2200, 2800,  3600,  4500,  6000]; // combo window ms pe
 const UPGRADE_COSTS   = { magnet: [1500, 3000, 5000, 8000], combo: [1500, 3000, 5000, 8000] }; // cost per step
 const MAX_UPG_LEVEL   = 5;
 
+// ── Background Themes (5 procedural themes for parallax layers) ───────────────
+const BG_THEMES = [
+  // 0: Night City — default neon dark
+  { name: 'ليل المدينة',      sky1: '#020510', sky2: '#08122a', horizon: '#0d1a3a',
+    cloud1: '#1a2645', cloud2: '#101a35', star: '#cce0ff',
+    bld1: '#060c1a', bld2: '#0a1020', win: '#f5c51830', palm: '#1a3010',
+    fogR: 0, fogG: 212, fogB: 255, fogA: 0.035 },
+  // 1: Sunset Dusk
+  { name: 'غروب الشمس',      sky1: '#0f0510', sky2: '#9a3008', horizon: '#d05508',
+    cloud1: '#cc3a1a', cloud2: '#882010', star: '#ffddaa',
+    bld1: '#120815', bld2: '#1e0d0a', win: '#ff990030', palm: '#1a2a08',
+    fogR: 255, fogG: 80,  fogB: 0,   fogA: 0.040 },
+  // 2: Deep Space Purple
+  { name: 'الفضاء البنفسجي', sky1: '#04000e', sky2: '#180035', horizon: '#28005a',
+    cloud1: '#2a005a', cloud2: '#1a0040', star: '#ddaaff',
+    bld1: '#0a0020', bld2: '#140038', win: '#dd00ff28', palm: '#1a0035',
+    fogR: 180, fogG: 0,   fogB: 255, fogA: 0.050 },
+  // 3: Desert Dawn
+  { name: 'فجر الصحراء',     sky1: '#060c18', sky2: '#0e2040', horizon: '#1a3a5a',
+    cloud1: '#ffffff15', cloud2: '#ffffff0a', star: '#aabbff',
+    bld1: '#140e08', bld2: '#1e1508', win: '#ffbb4430', palm: '#2a4010',
+    fogR: 255, fogG: 190, fogB: 0,   fogA: 0.025 },
+  // 4: Cyberpunk Green
+  { name: 'سايبر أخضر',      sky1: '#020a06', sky2: '#04200e', horizon: '#062a10',
+    cloud1: '#083820', cloud2: '#052815', star: '#aaffcc',
+    bld1: '#030d06', bld2: '#061510', win: '#00ff6630', palm: '#083810',
+    fogR: 0,   fogG: 245, fogB: 100, fogA: 0.040 },
+] as const;
+
 // ── Dynamic skin def (from DB) ────────────────────────────────────────────────
 interface DynSkinDef extends SkinDef { isActive?: boolean; }
 
@@ -226,6 +256,7 @@ export function ChallengeModal({ onClose }: Props) {
     charLaneY:      0,   // animated Y toward LANE_Y[charLane]; init on first frame
     lives:          3,   // player lives (obstacles reduce this)
     invincible:     0,   // ms timestamp — invincibility until
+    bgThemeIdx:     0,   // current background theme index (0-4)
   });
 
   const bgImgRef        = useRef<HTMLImageElement | null>(null);
@@ -244,8 +275,9 @@ export function ChallengeModal({ onClose }: Props) {
         targetUrl:     d.targetUrl     ?? '',
         duration:      d.duration      ?? 60,
         backgroundUrl: d.backgroundUrl ?? '',
+        bgTheme:       d.bgTheme       ?? 0,
       }))
-      .catch(() => setConfig({ characterUrl: '', targetUrl: '', duration: 60, backgroundUrl: '' }));
+      .catch(() => setConfig({ characterUrl: '', targetUrl: '', duration: 60, backgroundUrl: '', bgTheme: 0 }));
   }, []);
 
   // ── Load player profile ────────────────────────────────────────────────────
@@ -690,47 +722,133 @@ export function ChallengeModal({ onClose }: Props) {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // DRAW
+    // DRAW — 3-Layer Parallax Background + HUD
     // ══════════════════════════════════════════════════════════════════════════
+    const theme = BG_THEMES[g.bgThemeIdx % BG_THEMES.length];
 
-    ctx.fillStyle = '#05080f';
-    ctx.fillRect(0, 0, W, H);
+    // ── Layer 0: Sky + Stars + Clouds (speed 0.08×) ───────────────────────────
+    const skyOff = (g.bgScrollX * 0.08) % W;
+    const skyGrad = ctx.createLinearGradient(0, 0, 0, GROUND_Y + 20);
+    skyGrad.addColorStop(0,   theme.sky1);
+    skyGrad.addColorStop(0.7, theme.sky2);
+    skyGrad.addColorStop(1,   theme.horizon);
+    ctx.fillStyle = skyGrad;
+    ctx.fillRect(0, 0, W, GROUND_Y + 20);
 
-    // Parallax background
-    if (bgImgRef.current) {
-      ctx.save();
-      ctx.globalAlpha = 0.62;
-      const bx = -(g.bgScrollX % W);
-      ctx.drawImage(bgImgRef.current, bx,     0, W, H);
-      ctx.drawImage(bgImgRef.current, bx + W, 0, W, H);
-      ctx.restore();
-    } else {
-      const bx = -(g.bgScrollX % W);
-      for (let pass = 0; pass < 2; pass++) {
-        const ox = bx + pass * W;
-        const bldgs = [
-          { x: 0.05, w: 0.08, h: 0.28 }, { x: 0.15, w: 0.05, h: 0.38 },
-          { x: 0.22, w: 0.09, h: 0.22 }, { x: 0.33, w: 0.06, h: 0.42 },
-          { x: 0.41, w: 0.07, h: 0.30 }, { x: 0.50, w: 0.05, h: 0.35 },
-          { x: 0.57, w: 0.10, h: 0.24 }, { x: 0.69, w: 0.06, h: 0.44 },
-          { x: 0.77, w: 0.08, h: 0.32 }, { x: 0.87, w: 0.07, h: 0.26 },
-        ];
-        ctx.fillStyle = '#0a0f1c';
-        for (const b of bldgs) {
-          const bh = b.h * H * 0.55;
-          ctx.fillRect(ox + b.x * W, GROUND_Y - bh, b.w * W, bh);
-        }
-        ctx.fillStyle = '#f5c51833';
-        for (const b of bldgs) {
-          const bh = b.h * H * 0.55;
-          for (let wy = GROUND_Y - bh + 8; wy < GROUND_Y - 8; wy += 14) {
-            for (let wx = ox + b.x * W + 4; wx < ox + (b.x + b.w) * W - 4; wx += 10) {
-              if (Math.sin(wx * 3.7 + wy * 1.3) > 0.2) ctx.fillRect(wx, wy, 4, 6);
+    // Stars — seeded positions, slow parallax, twinkle via sin
+    for (let i = 0; i < 45; i++) {
+      const sx = ((i * 137.508 + skyOff * 0.35) % W + W) % W;
+      const sy = ((i * 71.317) % (GROUND_Y * 0.62)) + 4;
+      const sz = 0.6 + (i % 3) * 0.4;
+      ctx.globalAlpha = Math.max(0.1, 0.35 + Math.sin(ts * 0.0008 + i * 1.73) * 0.28);
+      ctx.fillStyle = theme.star;
+      ctx.beginPath(); ctx.arc(sx, sy, sz, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    // Clouds — 2 passes for seamless infinite loop
+    const cloudOff = (g.bgScrollX * 0.08) % W;
+    const CLOUDS = [
+      { x: 0.10, y: 0.08, rx: 40, ry: 14 },
+      { x: 0.33, y: 0.14, rx: 58, ry: 19 },
+      { x: 0.56, y: 0.06, rx: 46, ry: 15 },
+      { x: 0.78, y: 0.12, rx: 52, ry: 17 },
+    ];
+    for (let pass = 0; pass < 2; pass++) {
+      const cx0 = -(cloudOff % W) + pass * W;
+      for (const c of CLOUDS) {
+        const ccx = cx0 + c.x * W;
+        const ccy = c.y * GROUND_Y;
+        ctx.save();
+        ctx.globalAlpha = 0.20;
+        ctx.fillStyle = theme.cloud1;
+        ctx.beginPath(); ctx.ellipse(ccx, ccy, c.rx, c.ry, 0, 0, Math.PI * 2); ctx.fill();
+        ctx.globalAlpha = 0.12;
+        ctx.fillStyle = theme.cloud2;
+        ctx.beginPath(); ctx.ellipse(ccx - 16, ccy + 5, c.rx * 0.60, c.ry * 0.80, 0, 0, Math.PI * 2); ctx.fill();
+        ctx.restore();
+      }
+    }
+
+    // ── Layer 1: Midground Buildings + Palm Trees (speed 0.30×) ──────────────
+    const midOff = (g.bgScrollX * 0.30) % W;
+    const BLDGS = [
+      { x: 0.04, w: 0.07, h: 0.31 }, { x: 0.14, w: 0.05, h: 0.44 },
+      { x: 0.21, w: 0.09, h: 0.26 }, { x: 0.32, w: 0.06, h: 0.50 },
+      { x: 0.40, w: 0.08, h: 0.34 }, { x: 0.51, w: 0.05, h: 0.40 },
+      { x: 0.58, w: 0.10, h: 0.28 }, { x: 0.70, w: 0.06, h: 0.46 },
+      { x: 0.78, w: 0.07, h: 0.36 }, { x: 0.88, w: 0.08, h: 0.30 },
+    ];
+    const PALMS = [
+      { x: 0.08, h: 54 }, { x: 0.25, h: 62 }, { x: 0.44, h: 50 },
+      { x: 0.63, h: 58 }, { x: 0.82, h: 52 }, { x: 0.95, h: 60 },
+    ];
+    for (let pass = 0; pass < 2; pass++) {
+      const ox = -(midOff % W) + pass * W;
+
+      // Buildings silhouette
+      for (const b of BLDGS) {
+        const bh  = b.h * GROUND_Y * 0.65;
+        const bx2 = ox + b.x * W;
+        const by2 = GROUND_Y - bh;
+        ctx.fillStyle = theme.bld1;
+        ctx.fillRect(bx2, by2, b.w * W, bh);
+        // Window glow dots
+        ctx.fillStyle = theme.win;
+        for (let wy = by2 + 8; wy < GROUND_Y - 10; wy += 14) {
+          for (let wx = bx2 + 5; wx < bx2 + b.w * W - 5; wx += 10) {
+            if (Math.sin(wx * 3.7 + wy * 1.3 + g.bgThemeIdx * 2.1) > 0.22) {
+              ctx.fillRect(wx, wy, 4, 6);
             }
           }
         }
+        // Rooftop neon edge
+        const fogClr = `rgba(${theme.fogR},${theme.fogG},${theme.fogB},${theme.fogA * 6})`;
+        ctx.fillStyle = fogClr;
+        ctx.fillRect(bx2, by2, b.w * W, 2);
+      }
+
+      // Palm trees with wind animation
+      for (const p of PALMS) {
+        const px   = ox + p.x * W;
+        const baseY = GROUND_Y;
+        const trunkH = p.h;
+        const wind   = Math.sin(ts * 0.0018 + p.x * 7.3) * 3; // gentle sway
+
+        // Trunk (curved quadratic)
+        ctx.strokeStyle = theme.palm;
+        ctx.lineWidth = 3.5;
+        ctx.globalAlpha = 0.85;
+        ctx.beginPath();
+        ctx.moveTo(px, baseY);
+        ctx.quadraticCurveTo(px + 6 + wind * 0.3, baseY - trunkH * 0.55, px + 4 + wind, baseY - trunkH);
+        ctx.stroke();
+
+        // Fronds (5 radiating arcs from top)
+        const topX = px + 4 + wind;
+        const topY = baseY - trunkH;
+        ctx.lineWidth = 1.8;
+        const frondAngles = [-0.85, -0.35, 0.05, 0.50, 0.95];
+        for (const a of frondAngles) {
+          const flen = 18 + Math.sin(ts * 0.002 + p.x * 5.1 + a) * 2.5;
+          ctx.beginPath();
+          ctx.moveTo(topX, topY);
+          ctx.lineTo(
+            topX + Math.cos(a) * flen * 1.4,
+            topY - Math.sin(Math.abs(a - 0.15) + 0.2) * flen
+          );
+          ctx.stroke();
+        }
+        ctx.globalAlpha = 1;
       }
     }
+
+    // Horizon atmospheric fog gradient (ties sky to road)
+    const horizFog = ctx.createLinearGradient(0, GROUND_Y - 35, 0, GROUND_Y + 12);
+    horizFog.addColorStop(0, 'transparent');
+    horizFog.addColorStop(1, `rgba(${theme.fogR},${theme.fogG},${theme.fogB},${theme.fogA})`);
+    ctx.fillStyle = horizFog;
+    ctx.fillRect(0, GROUND_Y - 35, W, 47);
 
     // Scanlines
     ctx.fillStyle = 'rgba(0,0,0,0.14)';
@@ -984,6 +1102,14 @@ export function ChallengeModal({ onClose }: Props) {
     g.charLaneY      = 0;   // init'd on first drawFrame
     g.lives          = 3;
     g.invincible     = 0;
+    // ── Theme selection ───────────────────────────────────────────────────────
+    const themeMode = config.bgTheme ?? 0;
+    if (themeMode === 0) {
+      // auto-rotate: advance to next theme each game
+      g.bgThemeIdx = (g.bgThemeIdx + 1) % BG_THEMES.length;
+    } else {
+      g.bgThemeIdx = Math.max(0, Math.min(BG_THEMES.length - 1, themeMode - 1));
+    }
     g.W = W; g.H = H;
 
     setScore(0);

@@ -39,7 +39,7 @@ router.get("/game/config", async (req: Request, res: Response) => {
       .select()
       .from(settingsTable)
       .where(
-        sql`${settingsTable.key} IN ('game_character_url','game_target_url','game_duration','game_background_url')`
+        sql`${settingsTable.key} IN ('game_character_url','game_target_url','game_duration','game_background_url','game_bg_theme')`
       );
 
     const map: Record<string, string> = {};
@@ -50,6 +50,7 @@ router.get("/game/config", async (req: Request, res: Response) => {
       targetUrl:     map["game_target_url"]     ?? "",
       duration:      parseInt(map["game_duration"] ?? "60", 10),
       backgroundUrl: map["game_background_url"] ?? "",
+      bgTheme:       parseInt(map["game_bg_theme"] ?? "0", 10),
     });
   } catch (err) {
     req.log.error({ err }, "game config fetch error");
@@ -59,11 +60,12 @@ router.get("/game/config", async (req: Request, res: Response) => {
 
 // ── PATCH /api/game/config ──────────────────────────────────────────────────
 router.patch("/game/config", async (req: Request, res: Response) => {
-  const { characterUrl, targetUrl, duration, backgroundUrl } = req.body as {
+  const { characterUrl, targetUrl, duration, backgroundUrl, bgTheme } = req.body as {
     characterUrl?:  string;
     targetUrl?:     string;
     duration?:      number;
     backgroundUrl?: string;
+    bgTheme?:       number;
   };
 
   try {
@@ -72,6 +74,7 @@ router.patch("/game/config", async (req: Request, res: Response) => {
     if (targetUrl     !== undefined) updates.push({ key: "game_target_url",     value: String(targetUrl)     });
     if (duration      !== undefined) updates.push({ key: "game_duration",       value: String(duration)      });
     if (backgroundUrl !== undefined) updates.push({ key: "game_background_url", value: String(backgroundUrl) });
+    if (bgTheme       !== undefined) updates.push({ key: "game_bg_theme",       value: String(bgTheme)       });
 
     for (const u of updates) {
       await db

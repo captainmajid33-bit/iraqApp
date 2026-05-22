@@ -5813,6 +5813,7 @@ function GameConfigTab({ toast }: { toast: ReturnType<typeof useToast> }) {
   const [targetUrl,      setTargetUrl]      = useState("");
   const [backgroundUrl,  setBackgroundUrl]  = useState("");
   const [duration,       setDuration]       = useState(60);
+  const [bgTheme,        setBgTheme]        = useState(0);
   const [loading,        setLoading]        = useState(true);
   const [saving,         setSaving]         = useState(false);
   const [uploadingChar,  setUploadingChar]  = useState(false);
@@ -5849,11 +5850,12 @@ function GameConfigTab({ toast }: { toast: ReturnType<typeof useToast> }) {
   }, []);
 
   useEffect(() => {
-    api.get("/api/game/config").then((d: { characterUrl: string; targetUrl: string; duration: number; backgroundUrl: string }) => {
+    api.get("/api/game/config").then((d: { characterUrl: string; targetUrl: string; duration: number; backgroundUrl: string; bgTheme: number }) => {
       setCharacterUrl(d.characterUrl   ?? "");
       setTargetUrl(d.targetUrl         ?? "");
       setBackgroundUrl(d.backgroundUrl ?? "");
       setDuration(d.duration           ?? 60);
+      setBgTheme(d.bgTheme             ?? 0);
     }).catch(() => {}).finally(() => setLoading(false));
 
     setBoardLoading(true);
@@ -5947,7 +5949,7 @@ function GameConfigTab({ toast }: { toast: ReturnType<typeof useToast> }) {
   const save = async () => {
     setSaving(true);
     try {
-      await api.patch("/api/game/config", { characterUrl, targetUrl, backgroundUrl, duration });
+      await api.patch("/api/game/config", { characterUrl, targetUrl, backgroundUrl, duration, bgTheme });
       toast.show("تم حفظ إعدادات اللعبة ✓", "success");
     } catch {
       toast.show("فشل الحفظ", "error");
@@ -6065,6 +6067,42 @@ function GameConfigTab({ toast }: { toast: ReturnType<typeof useToast> }) {
               onChange={e => setDuration(Number(e.target.value))}
               style={{ width: "120px", padding: "10px 14px", background: "#0a0d14", border: `1px solid ${C.border}`, borderRadius: "4px", color: C.text, fontFamily: "Orbitron, sans-serif", fontSize: "13px", outline: "none" }}
             />
+          </div>
+
+          {/* Background Theme */}
+          <div>
+            <label style={{ display: "block", fontSize: "11px", color: C.dim, letterSpacing: "0.08em", marginBottom: "8px", fontFamily: "Orbitron, sans-serif" }}>
+              🎨 ثيم خلفية اللعبة (Parallax Background Theme)
+            </label>
+            <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
+              {[
+                { val: 0, label: "🔄 تلقائي (دوراني)", color: C.blue },
+                { val: 1, label: "🌃 ليل المدينة",      color: "#cce0ff" },
+                { val: 2, label: "🌇 غروب الشمس",      color: "#ffaa55" },
+                { val: 3, label: "🔮 الفضاء البنفسجي", color: "#cc88ff" },
+                { val: 4, label: "🏜️ فجر الصحراء",     color: "#ffbb44" },
+                { val: 5, label: "💚 سايبر أخضر",      color: "#00ff88" },
+              ].map(opt => (
+                <button
+                  key={opt.val}
+                  onClick={() => setBgTheme(opt.val)}
+                  style={{
+                    padding: "8px 14px", borderRadius: "6px", fontSize: "12px",
+                    fontFamily: "Rajdhani, sans-serif", cursor: "pointer",
+                    border: `1.5px solid ${bgTheme === opt.val ? opt.color : C.border}`,
+                    background: bgTheme === opt.val ? `${opt.color}18` : "transparent",
+                    color: bgTheme === opt.val ? opt.color : C.dim,
+                    transition: "all 0.2s",
+                    boxShadow: bgTheme === opt.val ? `0 0 8px ${opt.color}44` : "none",
+                  }}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+            <div style={{ marginTop: "8px", fontSize: "11px", color: C.dim, fontFamily: "Rajdhani, sans-serif" }}>
+              {bgTheme === 0 ? "⬆ وضع التدوير التلقائي: يتغير الثيم مع كل لعبة جديدة" : `⬆ الثيم المحدد سيُطبَّق على جميع الألعاب`}
+            </div>
           </div>
 
           <button
