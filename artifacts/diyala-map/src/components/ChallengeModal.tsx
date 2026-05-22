@@ -9,7 +9,8 @@
  * - Leaderboard من GET /api/game/leaderboard
  */
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { auth } from '@/lib/firebase';
+import { auth, db } from '@/lib/firebase';
+import { doc, onSnapshot, runTransaction, increment } from 'firebase/firestore';
 
 // ── Types ───────────────────────────────────────────────────────────────────
 interface Props {
@@ -285,16 +286,24 @@ export function ChallengeModal({ onClose }: Props) {
     const user = auth.currentUser;
     if (!user) return;
     try {
-      const [profRes, walletRes] = await Promise.all([
-        fetch(`/api/game/profile/${user.uid}`),
-        fetch(`/api/game/wallet/${user.uid}`),
-      ]);
-      if (profRes.ok)   setProfile(await profRes.json());
-      if (walletRes.ok) { const w = await walletRes.json(); setWalletBal(w.balance ?? 0); }
+      const profRes = await fetch(`/api/game/profile/${user.uid}`);
+      if (profRes.ok) setProfile(await profRes.json());
     } catch { /* silent */ }
   }, []);
 
   useEffect(() => { loadProfile(); }, [loadProfile]);
+
+  // ── Live Firestore balance subscription (محفظة التطبيق الحقيقية) ───────────
+  useEffect(() => {
+    const uid = auth.currentUser?.uid;
+    if (!uid) return;
+    const unsub = onSnapshot(
+      doc(db, 'users', uid),
+      snap => { if (snap.exists()) setWalletBal(Number(snap.data()?.balance ?? 0)); },
+      () => { /* Firestore error — keep last known value */ }
+    );
+    return () => unsub();
+  }, []);
 
   // ── Load dynamic skins from DB ─────────────────────────────────────────────
   useEffect(() => {
@@ -519,8 +528,12 @@ export function ChallengeModal({ onClose }: Props) {
               : `❌ خسرت! نتيجة الفائز: ${d.winnerScore}`;
             setDuelResultMsg(msg);
             const u = auth.currentUser;
-            if (u) fetch(`/api/game/wallet/${u.uid}`).then(r => r.json())
-              .then((wd: { balance?: number }) => setWalletBal(wd.balance ?? 0)).catch(() => {});
+            if (u && d.youWon && d.prize) {
+              // Credit prize to Firestore balance (محفظة التطبيق)
+              runTransaction(db, async txn => {
+                txn.update(doc(db, 'users', u.uid), { balance: increment(d.prize!) });
+              }).catch(() => {});
+            }
           } else if (d.waiting) {
             setDuelResultMsg('⏳ تم تسجيل نتيجتك — بانتظار الخصم...');
           }
@@ -1191,16 +1204,33 @@ export function ChallengeModal({ onClose }: Props) {
     if (!duelJoinCode.trim()) { setDuelJoinErr('أدخل رمز التحدي'); return; }
     setDuelJoining(true); setDuelJoinErr('');
     try {
+      // Fetch room info to get bet amount
+      const roomRes = await fetch(`/api/game/duel/${duelJoinCode.trim().toUpperCase()}`);
+      if (!roomRes.ok) { setDuelJoinErr('رمز التحدي غير صحيح'); return; }
+      const room = await roomRes.json();
+      const bet  = room.bet as number;
+      // Deduct bet from Firestore balance
+      const userRef = doc(db, 'users', uid);
+      await runTransaction(db, async txn => {
+        const snap = await txn.get(userRef);
+        const bal  = Number(snap.data()?.balance ?? 0);
+        if (bal < bet) throw new Error(`رصيدك ${bal.toLocaleString()} د.ع — المطلوب ${bet.toLocaleString()} د.ع`);
+        txn.update(userRef, { balance: increment(-bet) });
+      });
+      // Activate room on server
       const r = await fetch('/api/game/duel/accept', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ firebaseUid: uid, duelId: duelJoinCode.trim().toUpperCase() }),
       });
       const d = await r.json();
-      if (!r.ok) { setDuelJoinErr(d.message ?? d.error ?? 'فشل الانضمام'); return; }
+      if (!r.ok) {
+        // Refund on server error
+        runTransaction(db, async txn => { txn.update(userRef, { balance: increment(bet) }); }).catch(() => {});
+        setDuelJoinErr(d.message ?? d.error ?? 'فشل الانضمام'); return;
+      }
       activeDuelIdRef.current = duelJoinCode.trim().toUpperCase();
-      if (typeof d.walletBalance === 'number') setWalletBal(d.walletBalance);
       startGame();
-    } catch { setDuelJoinErr('خطأ في الاتصال'); }
+    } catch (e: any) { setDuelJoinErr(e?.message ?? 'خطأ في الاتصال'); }
     finally  { setDuelJoining(false); }
   }, [duelJoinCode, startGame]);
 
@@ -1387,12 +1417,7 @@ export function ChallengeModal({ onClose }: Props) {
             </button>
 
             <button
-              onClick={() => {
-                setShopMsg(''); setPhase('shop');
-                const u = auth.currentUser;
-                if (u) fetch(`/api/game/wallet/${u.uid}`).then(r => r.json())
-                  .then((d: { balance?: number }) => setWalletBal(d.balance ?? 0)).catch(() => {});
-              }}
+              onClick={() => { setShopMsg(''); setPhase('shop'); }}
               style={{
                 padding: '14px', borderRadius: '6px',
                 background: `${C.purple}11`,
@@ -1730,17 +1755,27 @@ export function ChallengeModal({ onClose }: Props) {
                   if (!uid) return;
                   setDuelCreating(true);
                   try {
+                    // Deduct bet from Firestore balance first
+                    const userRef = doc(db, 'users', uid);
+                    await runTransaction(db, async txn => {
+                      const snap = await txn.get(userRef);
+                      const bal  = Number(snap.data()?.balance ?? 0);
+                      if (bal < duelBet) throw new Error(`رصيدك ${bal.toLocaleString()} د.ع — المطلوب ${duelBet.toLocaleString()} د.ع`);
+                      txn.update(userRef, { balance: increment(-duelBet) });
+                    });
+                    // Ask server to create room (no balance ops on server)
                     const r = await fetch('/api/game/duel/create', {
                       method: 'POST', headers: { 'Content-Type': 'application/json' },
                       body: JSON.stringify({ firebaseUid: uid, bet: duelBet }),
                     });
                     const data = await r.json();
-                    if (!r.ok) { setDuelJoinErr(data.message ?? data.error ?? 'فشل الإنشاء'); return; }
-                    if (data.duelId) {
-                      setDuelCode(data.duelId);
-                      if (typeof data.walletBalance === 'number') setWalletBal(data.walletBalance);
+                    if (!r.ok) {
+                      // Refund on server failure
+                      runTransaction(db, async txn => { txn.update(userRef, { balance: increment(duelBet) }); }).catch(() => {});
+                      setDuelJoinErr(data.message ?? data.error ?? 'فشل الإنشاء'); return;
                     }
-                  } catch { setDuelJoinErr('خطأ في الاتصال'); }
+                    if (data.duelId) setDuelCode(data.duelId);
+                  } catch (e: any) { setDuelJoinErr(e?.message ?? 'خطأ في الاتصال'); }
                   finally { setDuelCreating(false); }
                 }}
                 style={{
