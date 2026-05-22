@@ -117,15 +117,12 @@ const CHAR_H        = 64;
 const ITEM_W        = 48;
 const ITEM_H        = 48;
 const CHAR_SPEED    = 6;   // unused (kept for compat)
-const RUSH_SPEED    = 10;  // px/frame — character rushes right on press
-const RETURN_SPEED  = 7;   // px/frame — character snaps left on release
-const ITEM_SPD_MIN  = 4.0; // horizontal item speed (px/frame)
-const ITEM_SPD_VAR  = 3.0;
-const BG_SCROLL_RUN = 3.5; // parallax speed when pressing
-const BG_SCROLL_IDL = 1.0; // parallax speed when idle
-const GRAVITY       = 0.62;// jump gravity (px/frame²)
-const JUMP_VEL      = 16;  // single jump upward velocity
-const JUMP_VEL2     = 12;  // double jump velocity
+const RUSH_SPEED    = 12;  // px/frame — character rushes right on press
+const RETURN_SPEED  = 8;   // px/frame — character snaps left on release
+const ITEM_SPD_MIN  = 5.5; // horizontal item speed (px/frame)
+const ITEM_SPD_VAR  = 4.0;
+const BG_SCROLL_RUN = 6.0; // parallax speed when pressing (sprinting feel)
+const BG_SCROLL_IDL = 2.5; // parallax speed when idle (always running)
 const MAGNET_RAD    = 165; // magnet attraction radius (px)
 const MAGNET_DUR    = 5000;// magnet duration (ms)
 const DIFF_INTERVAL = 15000;// ms between difficulty steps
@@ -437,33 +434,7 @@ export function ChallengeModal({ onClose }: Props) {
     setPhase('gameover');
   }, []);
 
-  // ── Trigger jump (called on quick tap) ────────────────────────────────────
-  const triggerJump = useCallback(() => {
-    const g = gs.current;
-    if (!g.running) return;
-    const now = Date.now();
-    if (g.jumpCount === 0) {
-      g.jumpVelY  = JUMP_VEL;
-      g.jumpCount = 1;
-    } else if (g.jumpCount === 1 && (now - lastTapTsRef.current < 350)) {
-      g.jumpVelY  = JUMP_VEL2;
-      g.jumpCount = 2;
-    }
-    lastTapTsRef.current = now;
-    try {
-      if (!audioCtxRef.current) audioCtxRef.current = new AudioContext();
-      const actx = audioCtxRef.current;
-      const osc  = actx.createOscillator();
-      const gain = actx.createGain();
-      osc.connect(gain); gain.connect(actx.destination);
-      osc.frequency.value = g.jumpCount === 2 ? 800 : 660;
-      osc.type = 'sine';
-      gain.gain.setValueAtTime(0.12, actx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.001, actx.currentTime + 0.1);
-      osc.start(actx.currentTime);
-      osc.stop(actx.currentTime + 0.1);
-    } catch {}
-  }, []);
+  // Jump mechanic removed — horizontal-only runner
 
   // ── Draw one frame — Horizontal Runner ────────────────────────────────────
   const drawFrame = useCallback((ts: number) => {
@@ -479,17 +450,8 @@ export function ChallengeModal({ onClose }: Props) {
     const GROUND_Y = Math.round(H * 0.74);
     g.charY = GROUND_Y;
 
-    // ── Jump physics ──────────────────────────────────────────────────────────
-    if (g.jumpYOffset > 0 || g.jumpVelY > 0) {
-      g.jumpVelY   -= GRAVITY;
-      g.jumpYOffset = Math.max(0, g.jumpYOffset + g.jumpVelY);
-      if (g.jumpYOffset <= 0) {
-        g.jumpYOffset = 0;
-        g.jumpVelY   = 0;
-        g.jumpCount  = 0;
-      }
-    }
-    const charDrawY = g.charY - g.jumpYOffset;
+    // ── Character Y is always fixed at road level (no jump mechanic) ──────────
+    const charDrawY = g.charY;
 
     // ── Horizontal rush ───────────────────────────────────────────────────────
     if (g.pressing === 'right') {
@@ -530,18 +492,20 @@ export function ChallengeModal({ onClose }: Props) {
     }
 
     // ── Spawn items ───────────────────────────────────────────────────────────
-    const baseInterval  = Math.max(460, 980 - g.score * 7);
+    const baseInterval  = Math.max(400, 900 - g.score * 6);
     const spawnInterval = baseInterval / g.diffMultiplier;
     if (ts - g.lastSpawn > spawnInterval) {
       const isMagnet = (g.nextId > 3) && (Math.random() < 0.12);
       const rY = Math.random();
+      // All items at horizontally-moving heights (no falling)
+      // Three tiers: ground (55%), mid-air (30%), elevated (15%)
       const itemY = isMagnet
-        ? GROUND_Y + (Math.random() - 0.5) * 12
-        : rY < 0.60
-          ? GROUND_Y + (Math.random() - 0.5) * 16
-          : rY < 0.84
-            ? GROUND_Y - (68 + Math.random() * 40)
-            : GROUND_Y - (128 + Math.random() * 40);
+        ? GROUND_Y - (Math.random() * 10)
+        : rY < 0.55
+          ? GROUND_Y - (Math.random() * 22)        // ground tier — catchable
+          : rY < 0.85
+            ? GROUND_Y - (50 + Math.random() * 40) // mid-air tier
+            : GROUND_Y - (105 + Math.random() * 35);// elevated tier
       g.items.push({
         id:        g.nextId++,
         x:         W + ITEM_W,
@@ -559,7 +523,8 @@ export function ChallengeModal({ onClose }: Props) {
       item.x -= item.speed;
       const dx = Math.abs(item.x - g.charX);
       const dy = Math.abs(item.y - charDrawY);
-      if (dx < (CHAR_W / 2 + ITEM_W / 2) * 0.80 && dy < (CHAR_H / 2 + ITEM_H / 2) * 0.82) {
+      // Generous hitbox: wider dx + taller dy to compensate for no-jump mechanic
+      if (dx < (CHAR_W / 2 + ITEM_W / 2) * 0.88 && dy < (CHAR_H / 2 + ITEM_H / 2) * 1.30) {
         item.collected = true;
         if (item.type === 'magnet') {
           g.magnetActive = true;
@@ -643,7 +608,7 @@ export function ChallengeModal({ onClose }: Props) {
     // Parallax background
     if (bgImgRef.current) {
       ctx.save();
-      ctx.globalAlpha = 0.28;
+      ctx.globalAlpha = 0.62;
       const bx = -(g.bgScrollX % W);
       ctx.drawImage(bgImgRef.current, bx,     0, W, H);
       ctx.drawImage(bgImgRef.current, bx + W, 0, W, H);
@@ -771,21 +736,9 @@ export function ChallengeModal({ onClose }: Props) {
       ctx.restore();
     }
 
-    // Jump dotted line indicator
-    if (g.jumpYOffset > 5) {
-      ctx.save();
-      ctx.globalAlpha = 0.22;
-      ctx.strokeStyle = '#00f5d4';
-      ctx.lineWidth   = 1.5;
-      ctx.setLineDash([4, 6]);
-      ctx.beginPath(); ctx.moveTo(g.charX, g.charY); ctx.lineTo(g.charX, charDrawY); ctx.stroke();
-      ctx.setLineDash([]);
-      ctx.restore();
-    }
-
     // Character
     const rushing  = g.pressing === 'right';
-    const airborne = g.jumpYOffset > 5;
+    const airborne = false;
     ctx.save();
     ctx.shadowColor = rushing ? '#00d4ff88' : airborne ? '#f5c51888' : '#00f5d455';
     ctx.shadowBlur  = rushing ? 22 : airborne ? 18 : 12;
@@ -803,14 +756,13 @@ export function ChallengeModal({ onClose }: Props) {
     }
     ctx.restore();
 
-    // Ground shadow (shrinks while airborne)
-    const shadowScale = Math.max(0.2, 1 - g.jumpYOffset / 170);
+    // Ground shadow
     ctx.save();
-    ctx.globalAlpha = 0.35 * shadowScale;
-    const shGrad = ctx.createRadialGradient(g.charX, roadTop + 2, 0, g.charX, roadTop + 2, CHAR_W * 0.55 * shadowScale);
-    shGrad.addColorStop(0, '#00f5d444'); shGrad.addColorStop(1, 'transparent');
+    ctx.globalAlpha = rushing ? 0.45 : 0.28;
+    const shGrad = ctx.createRadialGradient(g.charX, roadTop + 2, 0, g.charX, roadTop + 2, CHAR_W * 0.60);
+    shGrad.addColorStop(0, rushing ? '#00d4ff55' : '#00f5d444'); shGrad.addColorStop(1, 'transparent');
     ctx.fillStyle = shGrad;
-    ctx.fillRect(g.charX - CHAR_W * 0.6 * shadowScale, roadTop - 2, CHAR_W * 1.2 * shadowScale, 8);
+    ctx.fillRect(g.charX - CHAR_W * 0.65, roadTop - 2, CHAR_W * 1.3, 8);
     ctx.restore();
   }, []);
 
@@ -1221,43 +1173,18 @@ export function ChallengeModal({ onClose }: Props) {
               fontFamily: 'Orbitron, sans-serif', fontSize: '10px',
               color: 'rgba(0,212,255,0.40)', letterSpacing: '0.06em',
             }}>
-              امسك → للانطلاق  •  اضغط سريعاً = قفزة  •  مزدوجة = قفزة عالية ☝
+              اضغط مستمراً ← للانطلاق يميناً  •  ارفع إصبعك ← للرجوع يساراً 🏃
             </div>
           )}
 
           <canvas
             ref={canvasRef}
-            onMouseDown={() => {
-              touchStartTsRef.current = Date.now();
-              holdTimerRef.current = setTimeout(() => { gs.current.pressing = 'right'; }, 180);
-            }}
-            onMouseUp={() => {
-              const dur = Date.now() - touchStartTsRef.current;
-              if (holdTimerRef.current) { clearTimeout(holdTimerRef.current); holdTimerRef.current = null; }
-              gs.current.pressing = null;
-              if (dur < 180) triggerJump();
-            }}
-            onMouseLeave={() => {
-              if (holdTimerRef.current) { clearTimeout(holdTimerRef.current); holdTimerRef.current = null; }
-              gs.current.pressing = null;
-            }}
-            onTouchStart={e => {
-              e.preventDefault();
-              touchStartTsRef.current = Date.now();
-              holdTimerRef.current = setTimeout(() => { gs.current.pressing = 'right'; }, 180);
-            }}
-            onTouchEnd={e => {
-              e.preventDefault();
-              const dur = Date.now() - touchStartTsRef.current;
-              if (holdTimerRef.current) { clearTimeout(holdTimerRef.current); holdTimerRef.current = null; }
-              gs.current.pressing = null;
-              if (dur < 180) triggerJump();
-            }}
-            onTouchCancel={e => {
-              e.preventDefault();
-              if (holdTimerRef.current) { clearTimeout(holdTimerRef.current); holdTimerRef.current = null; }
-              gs.current.pressing = null;
-            }}
+            onMouseDown={() => { gs.current.pressing = 'right'; }}
+            onMouseUp={() => { gs.current.pressing = null; }}
+            onMouseLeave={() => { gs.current.pressing = null; }}
+            onTouchStart={e => { e.preventDefault(); gs.current.pressing = 'right'; }}
+            onTouchEnd={e => { e.preventDefault(); gs.current.pressing = null; }}
+            onTouchCancel={e => { e.preventDefault(); gs.current.pressing = null; }}
             style={{
               flex: 1, width: '100%', display: 'block',
               touchAction: 'none', cursor: 'pointer',
