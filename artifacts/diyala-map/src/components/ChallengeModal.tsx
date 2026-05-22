@@ -24,6 +24,8 @@ interface GameProfile {
   gameCash:      number;
   unlockedSkins: string[];
   activeSkin:    string;
+  magnetLevel:   number;
+  comboLevel:    number;
 }
 
 interface SkinDef {
@@ -129,6 +131,12 @@ const MAGNET_DUR    = 5000;// magnet duration (ms)
 const DIFF_INTERVAL = 15000;// ms between difficulty steps
 const DIFF_BOOST    = 0.10; // 10% speed increase per step
 
+// ── Upgrade tables (indexed by level-1) ──────────────────────────────────────
+const MAGNET_DUR_LVL  = [5000, 7500, 11000, 16000, 23000]; // ms per magnet level
+const COMBO_WIN_LVL   = [2200, 2800,  3600,  4500,  6000]; // combo window ms per level
+const UPGRADE_COSTS   = { magnet: [1500, 3000, 5000, 8000], combo: [1500, 3000, 5000, 8000] }; // cost per step
+const MAX_UPG_LEVEL   = 5;
+
 // ── Component ────────────────────────────────────────────────────────────────
 export function ChallengeModal({ onClose }: Props) {
   const [phase,       setPhase]       = useState<Phase>('menu');
@@ -147,6 +155,8 @@ export function ChallengeModal({ onClose }: Props) {
   const [duelCode,     setDuelCode]     = useState<string | null>(null);
   const [duelBet,      setDuelBet]      = useState(500);
   const [duelCreating, setDuelCreating] = useState(false);
+  const [shopTab,      setShopTab]      = useState<'skins' | 'upgrades'>('skins');
+  const [upgrading,    setUpgrading]    = useState<string | null>(null);
   const [shopBuying,  setShopBuying]  = useState<string | null>(null);
   const [shopMsg,     setShopMsg]     = useState('');
   const [redeeming,   setRedeeming]   = useState(false);
@@ -192,13 +202,15 @@ export function ChallengeModal({ onClose }: Props) {
     lastCatchTs:  0,
     bgScrollX:      0,
     speedBoost:     0,
-    jumpYOffset:    0,   // pixels above ground (0 = grounded)
-    jumpVelY:       0,   // upward velocity (positive = going up)
-    jumpCount:      0,   // 0=grounded, 1=jumped, 2=double-jumped
+    jumpYOffset:    0,
+    jumpVelY:       0,
+    jumpCount:      0,
     magnetActive:   false,
     magnetEnd:      0,
-    diffMultiplier: 1.0, // progressive difficulty multiplier
-    lastDiffTime:   0,   // timestamp of last difficulty step
+    diffMultiplier: 1.0,
+    lastDiffTime:   0,
+    magnetLevel:    1,   // from profile upgrade
+    comboLevel:     1,   // from profile upgrade
   });
 
   const bgImgRef        = useRef<HTMLImageElement | null>(null);
@@ -368,6 +380,33 @@ export function ChallengeModal({ onClose }: Props) {
     finally  { setRedeeming(false); }
   }, []);
 
+  // ── Upgrade ability (magnet / combo) ──────────────────────────────────────
+  const upgradeAbility = useCallback(async (statType: 'magnet' | 'combo') => {
+    const user = auth.currentUser;
+    if (!user || !profile) { setShopMsg('يجب تسجيل الدخول أولاً'); return; }
+    const currentLevel = statType === 'magnet' ? profile.magnetLevel : profile.comboLevel;
+    if (currentLevel >= MAX_UPG_LEVEL) { setShopMsg('وصلت للحد الأقصى!'); return; }
+    setUpgrading(statType);
+    setShopMsg('');
+    try {
+      const r = await fetch('/api/game/shop/upgrade', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ firebaseUid: user.uid, statType }),
+      });
+      const d = await r.json();
+      if (!r.ok) { setShopMsg(d.message ?? 'فشل التطوير'); return; }
+      setProfile(p => p ? {
+        ...p,
+        gameCash:    d.gameCash,
+        magnetLevel: d.magnetLevel ?? p.magnetLevel,
+        comboLevel:  d.comboLevel  ?? p.comboLevel,
+      } : p);
+      const label = statType === 'magnet' ? 'المغناطيس' : 'الكومبو';
+      setShopMsg(`✓ تم ترقية ${label} إلى مستوى ${d.newLevel}! 🚀`);
+    } catch { setShopMsg('خطأ في الاتصال'); }
+    finally  { setUpgrading(null); }
+  }, [profile]);
+
   // ── Load leaderboard ───────────────────────────────────────────────────────
   const loadBoard = useCallback(async () => {
     setBoardLoading(true);
@@ -524,7 +563,7 @@ export function ChallengeModal({ onClose }: Props) {
         item.collected = true;
         if (item.type === 'magnet') {
           g.magnetActive = true;
-          g.magnetEnd    = Date.now() + MAGNET_DUR;
+          g.magnetEnd    = Date.now() + (MAGNET_DUR_LVL[g.magnetLevel - 1] ?? MAGNET_DUR);
           try {
             if (!audioCtxRef.current) audioCtxRef.current = new AudioContext();
             const actx = audioCtxRef.current;
@@ -545,7 +584,8 @@ export function ChallengeModal({ onClose }: Props) {
           comboTimerRef.current = setTimeout(() => setComboFlash(null), 1600);
         } else {
           const timeSinceLast = ts - g.lastCatchTs;
-          g.comboCount  = timeSinceLast < 2200 ? Math.min(g.comboCount + 1, 10) : 1;
+          const comboWin      = COMBO_WIN_LVL[g.comboLevel - 1] ?? 2200;
+          g.comboCount  = timeSinceLast < comboWin ? Math.min(g.comboCount + 1, 10) : 1;
           g.lastCatchTs = ts;
           const combo      = g.comboCount;
           const multiplier = combo >= 3 ? combo : 1;
@@ -840,6 +880,8 @@ export function ChallengeModal({ onClose }: Props) {
     g.magnetEnd      = 0;
     g.diffMultiplier = 1.0;
     g.lastDiffTime   = 0;
+    g.magnetLevel    = profile?.magnetLevel ?? 1;
+    g.comboLevel     = profile?.comboLevel  ?? 1;
     g.W = W; g.H = H;
 
     setScore(0);
@@ -1551,207 +1593,261 @@ export function ChallengeModal({ onClose }: Props) {
       {phase === 'shop' && (
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
 
-          {/* Shop header */}
+          {/* ── Header ── */}
           <div style={{
-            padding: '14px 18px 10px',
+            padding: '12px 16px 0', flexShrink: 0,
             display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-            flexShrink: 0,
           }}>
-            <div style={{
-              fontFamily: 'Orbitron, sans-serif', fontSize: '13px',
-              color: C.purple, letterSpacing: '0.1em', textShadow: neon(C.purple, 6),
-            }}>🛍 متجر السكنات</div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+            <div style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '13px', color: C.purple, letterSpacing: '0.1em', textShadow: neon(C.purple, 6) }}>
+              🛍 المتجر
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
               {profile && (
-                <div style={{
-                  fontFamily: 'Orbitron, sans-serif', fontSize: '11px',
-                  color: C.yellow, letterSpacing: '0.08em',
-                  background: `${C.yellow}11`, border: `1px solid ${C.yellow}33`,
-                  padding: '4px 10px', borderRadius: '20px',
-                }}>
-                  💰 {walletBal > 0 ? walletBal.toLocaleString() : profile.gameCash.toLocaleString()} د.ع
+                <div style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '11px', color: C.yellow, background: `${C.yellow}11`, border: `1px solid ${C.yellow}33`, padding: '3px 9px', borderRadius: '20px' }}>
+                  💰 {(walletBal > 0 ? walletBal : profile.gameCash).toLocaleString()} د.ع
                 </div>
               )}
-              <button
-                onClick={() => setPhase('menu')}
-                style={{ background: 'transparent', border: 'none', color: C.dim, fontSize: '12px', cursor: 'pointer', fontFamily: 'Orbitron, sans-serif', letterSpacing: '0.08em' }}
-              >← رجوع</button>
+              <button onClick={() => setPhase('menu')} style={{ background: 'transparent', border: 'none', color: C.dim, fontSize: '12px', cursor: 'pointer', fontFamily: 'Orbitron, sans-serif' }}>← رجوع</button>
             </div>
           </div>
 
-          <div style={{ flex: 1, overflowY: 'auto', padding: '0 14px 16px' }}>
+          {/* ── Tab bar ── */}
+          <div style={{ display: 'flex', gap: '0', padding: '10px 16px 0', flexShrink: 0 }}>
+            {(['skins', 'upgrades'] as const).map(tab => {
+              const active = shopTab === tab;
+              const label  = tab === 'skins' ? '🎭 الملابس' : '⚡ التطويرات';
+              return (
+                <button key={tab} onClick={() => { setShopTab(tab); setShopMsg(''); }} style={{
+                  flex: 1, padding: '9px 0', border: 'none',
+                  borderBottom: `2px solid ${active ? C.purple : 'transparent'}`,
+                  background: active ? `${C.purple}14` : 'transparent',
+                  color: active ? C.purple : C.dim,
+                  fontFamily: 'Orbitron, sans-serif', fontSize: '11px',
+                  letterSpacing: '0.08em', cursor: 'pointer',
+                  transition: 'all 0.2s',
+                }}>{label}</button>
+              );
+            })}
+          </div>
 
-            {/* ── Points stats bar ── */}
-            {profile && (
-              <div style={{
-                background: `${C.green}0a`, border: `1px solid ${C.green}22`,
-                borderRadius: '8px', padding: '12px 16px', marginBottom: '16px',
-                display: 'flex', alignItems: 'center', gap: '16px', flexWrap: 'wrap',
-              }}>
-                <div style={{ textAlign: 'center', flex: 1 }}>
-                  <div style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '20px', color: C.green, textShadow: neon(C.green, 6) }}>
-                    {profile.gamePoints.toLocaleString()}
-                  </div>
-                  <div style={{ fontSize: '10px', color: C.dim, marginTop: '2px' }}>نقاط اللعب</div>
-                </div>
-                <div style={{ width: '1px', height: '32px', background: C.border }} />
-                <div style={{ textAlign: 'center', flex: 1 }}>
-                  <div style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '20px', color: C.yellow, textShadow: neon(C.yellow, 6) }}>
-                    {walletBal > 0 ? walletBal.toLocaleString() : profile.gameCash.toLocaleString()}
-                  </div>
-                  <div style={{ fontSize: '10px', color: C.dim, marginTop: '2px' }}>
-                    {walletBal > 0 ? 'رصيد المحفظة' : 'دينار رصيد اللعبة'}
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* ── Redeem card ── */}
+          {/* ── Stats bar ── */}
+          {profile && (
             <div style={{
-              background: profile && profile.gamePoints >= 5000 ? `${C.green}0d` : 'rgba(255,255,255,0.02)',
-              border: `1px solid ${profile && profile.gamePoints >= 5000 ? C.green + '44' : C.border}`,
-              borderRadius: '10px', padding: '16px', marginBottom: '18px',
-              transition: 'all 0.3s',
+              margin: '10px 16px 0', borderRadius: '8px', padding: '10px 14px',
+              background: `${C.green}0a`, border: `1px solid ${C.green}22`,
+              display: 'flex', gap: '14px', alignItems: 'center', flexShrink: 0,
             }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', flexWrap: 'wrap' }}>
-                <div>
-                  <div style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '12px', color: C.green, letterSpacing: '0.08em', marginBottom: '4px' }}>
-                    🔄 استبدال النقاط
-                  </div>
-                  <div style={{ fontSize: '12px', color: C.dim, lineHeight: 1.5 }}>
-                    كل <strong style={{ color: 'rgba(255,255,255,0.7)' }}>5,000</strong> نقطة = <strong style={{ color: C.yellow }}>1,000</strong> دينار رصيد رحلات
-                  </div>
-                  {profile && profile.gamePoints < 5000 && (
-                    <div style={{ fontSize: '11px', color: C.red, marginTop: '4px' }}>
-                      تحتاج {(5000 - profile.gamePoints).toLocaleString()} نقطة إضافية
-                    </div>
-                  )}
+              <div style={{ flex: 1, textAlign: 'center' }}>
+                <div style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '17px', color: C.green, textShadow: neon(C.green, 5) }}>{profile.gamePoints.toLocaleString()}</div>
+                <div style={{ fontSize: '9px', color: C.dim, marginTop: '2px' }}>نقاط اللعب</div>
+              </div>
+              <div style={{ width: '1px', height: '28px', background: C.border }} />
+              <div style={{ flex: 1, textAlign: 'center' }}>
+                <div style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '17px', color: C.yellow, textShadow: neon(C.yellow, 5) }}>
+                  {(walletBal > 0 ? walletBal : profile.gameCash).toLocaleString()}
                 </div>
-                <button
-                  onClick={redeemPoints}
-                  disabled={redeeming || !profile || profile.gamePoints < 5000}
-                  style={{
-                    padding: '10px 18px', borderRadius: '6px', flexShrink: 0,
-                    background: profile && profile.gamePoints >= 5000 ? `${C.green}22` : 'rgba(255,255,255,0.04)',
-                    border: `1.5px solid ${profile && profile.gamePoints >= 5000 ? C.green + '66' : C.border}`,
-                    color: profile && profile.gamePoints >= 5000 ? C.green : C.dim,
-                    fontFamily: 'Orbitron, sans-serif', fontSize: '11px', letterSpacing: '0.08em',
-                    cursor: profile && profile.gamePoints >= 5000 ? 'pointer' : 'not-allowed',
-                    transition: 'all 0.2s', opacity: redeeming ? 0.6 : 1,
-                  }}
-                >
-                  {redeeming ? '⏳...' : '💱 استبدال'}
-                </button>
+                <div style={{ fontSize: '9px', color: C.dim, marginTop: '2px' }}>{walletBal > 0 ? 'رصيد المحفظة' : 'رصيد اللعبة'}</div>
               </div>
+              <div style={{ width: '1px', height: '28px', background: C.border }} />
+              <button onClick={redeemPoints} disabled={redeeming || profile.gamePoints < 5000} style={{
+                flex: 1, padding: '6px 4px', borderRadius: '5px',
+                background: profile.gamePoints >= 5000 ? `${C.green}1a` : 'transparent',
+                border: `1px solid ${profile.gamePoints >= 5000 ? C.green + '44' : C.border}`,
+                color: profile.gamePoints >= 5000 ? C.green : C.dim,
+                fontFamily: 'Orbitron, sans-serif', fontSize: '9px', letterSpacing: '0.04em',
+                cursor: profile.gamePoints >= 5000 ? 'pointer' : 'not-allowed', opacity: redeeming ? 0.6 : 1,
+              }}>{redeeming ? '⏳' : '💱 استبدال'}</button>
             </div>
+          )}
 
-            {/* ── Feedback message ── */}
-            {shopMsg && (
-              <div style={{
-                padding: '10px 14px', borderRadius: '6px', marginBottom: '14px',
-                background: shopMsg.startsWith('✓') ? `${C.green}15` : `${C.red}15`,
-                border: `1px solid ${shopMsg.startsWith('✓') ? C.green + '44' : C.red + '44'}`,
-                color: shopMsg.startsWith('✓') ? C.green : C.red,
-                fontFamily: 'Rajdhani, sans-serif', fontSize: '13px', textAlign: 'center',
-              }}>
-                {shopMsg}
-              </div>
-            )}
-
-            {/* ── Skins grid ── */}
+          {/* ── Feedback ── */}
+          {shopMsg && (
             <div style={{
-              fontFamily: 'Orbitron, sans-serif', fontSize: '11px', color: C.dim,
-              letterSpacing: '0.1em', marginBottom: '10px',
-            }}>
-              سكنات الشخصية
-            </div>
+              margin: '8px 16px 0', padding: '8px 12px', borderRadius: '6px',
+              background: shopMsg.startsWith('✓') ? `${C.green}15` : `${C.red}15`,
+              border: `1px solid ${shopMsg.startsWith('✓') ? C.green + '44' : C.red + '44'}`,
+              color: shopMsg.startsWith('✓') ? C.green : C.red,
+              fontFamily: 'Rajdhani, sans-serif', fontSize: '12px', textAlign: 'center',
+            }}>{shopMsg}</div>
+          )}
 
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
-              {SKINS.map(skin => {
-                const owned  = profile?.unlockedSkins?.includes(skin.id) ?? false;
-                const active = profile?.activeSkin === skin.id;
-                const canBuy = (profile?.gameCash ?? 0) >= skin.price;
-                const buying = shopBuying === skin.id;
+          <div style={{ flex: 1, overflowY: 'auto', padding: '12px 16px 16px' }}>
 
-                return (
-                  <div key={skin.id} style={{
-                    borderRadius: '10px', overflow: 'hidden',
-                    background: active ? `${skin.color}15` : owned ? `${skin.color}08` : 'rgba(255,255,255,0.02)',
-                    border: `1.5px solid ${active ? skin.color + '77' : owned ? skin.color + '33' : C.border}`,
-                    transition: 'all 0.25s',
-                    boxShadow: active ? neon(skin.color, 8) : 'none',
-                  }}>
-                    {/* Avatar */}
-                    <div style={{
-                      height: '90px', display: 'flex', alignItems: 'center', justifyContent: 'center',
-                      background: active ? `${skin.color}22` : `${skin.color}08`,
-                      position: 'relative',
+            {/* ══════════════════ SKINS TAB ══════════════════ */}
+            {shopTab === 'skins' && (
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+                {SKINS.map(skin => {
+                  const owned  = profile?.unlockedSkins?.includes(skin.id) ?? false;
+                  const active = profile?.activeSkin === skin.id;
+                  const canBuy = (walletBal > 0 ? walletBal : (profile?.gameCash ?? 0)) >= skin.price;
+                  const buying = shopBuying === skin.id;
+                  return (
+                    <div key={skin.id} style={{
+                      borderRadius: '10px', overflow: 'hidden',
+                      background: active ? `${skin.color}15` : owned ? `${skin.color}08` : 'rgba(255,255,255,0.02)',
+                      border: `1.5px solid ${active ? skin.color + '77' : owned ? skin.color + '33' : C.border}`,
+                      transition: 'all 0.25s', boxShadow: active ? neon(skin.color, 8) : 'none',
                     }}>
-                      <img
-                        src={skin.imageUrl}
-                        alt={skin.name}
-                        style={{ width: '64px', height: '64px', objectFit: 'contain', filter: active ? `drop-shadow(0 0 8px ${skin.color})` : 'none', transition: 'all 0.3s' }}
-                        onError={e => { (e.currentTarget as HTMLImageElement).style.display = 'none'; (e.currentTarget.nextElementSibling as HTMLElement).style.display = 'flex'; }}
-                      />
-                      <div style={{ display: 'none', fontSize: '40px', alignItems: 'center', justifyContent: 'center' }}>
-                        {skin.emoji}
+                      <div style={{ height: '86px', display: 'flex', alignItems: 'center', justifyContent: 'center', background: `${skin.color}${active ? '22' : '08'}`, position: 'relative' }}>
+                        <img src={skin.imageUrl} alt={skin.name}
+                          style={{ width: '60px', height: '60px', objectFit: 'contain', filter: active ? `drop-shadow(0 0 8px ${skin.color})` : 'none' }}
+                          onError={e => { (e.currentTarget as HTMLImageElement).style.display='none'; (e.currentTarget.nextElementSibling as HTMLElement).style.display='flex'; }}
+                        />
+                        <div style={{ display: 'none', fontSize: '38px', alignItems: 'center', justifyContent: 'center' }}>{skin.emoji}</div>
+                        {active && <div style={{ position: 'absolute', top: '5px', right: '5px', background: skin.color, color: '#000', fontSize: '8px', fontFamily: 'Orbitron, sans-serif', padding: '2px 4px', borderRadius: '3px', fontWeight: 700 }}>نشط</div>}
                       </div>
-                      {active && (
-                        <div style={{
-                          position: 'absolute', top: '6px', right: '6px',
-                          background: skin.color, color: '#000', fontSize: '9px',
-                          fontFamily: 'Orbitron, sans-serif', padding: '2px 5px', borderRadius: '4px',
-                          fontWeight: 700, letterSpacing: '0.05em',
-                        }}>نشط</div>
-                      )}
+                      <div style={{ padding: '8px 10px 10px' }}>
+                        <div style={{ fontFamily: 'Rajdhani, sans-serif', fontSize: '13px', fontWeight: 600, color: active ? skin.color : 'rgba(255,255,255,0.85)', marginBottom: '3px' }}>{skin.emoji} {skin.name}</div>
+                        <div style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '10px', color: C.yellow, marginBottom: '7px' }}>{skin.price.toLocaleString()} د.ع</div>
+                        {owned ? (
+                          <button onClick={() => equipSkin(skin)} disabled={active} style={{ width: '100%', padding: '6px', borderRadius: '5px', background: active ? `${skin.color}30` : `${skin.color}18`, border: `1px solid ${skin.color}${active ? '77' : '44'}`, color: skin.color, fontFamily: 'Orbitron, sans-serif', fontSize: '9px', letterSpacing: '0.08em', cursor: active ? 'default' : 'pointer' }}>
+                            {active ? '✓ مفعّل' : '▶ تفعيل'}
+                          </button>
+                        ) : (
+                          <button onClick={() => buySkin(skin)} disabled={buying || !canBuy || !profile} style={{ width: '100%', padding: '6px', borderRadius: '5px', background: canBuy ? `${C.yellow}18` : 'rgba(255,255,255,0.03)', border: `1px solid ${canBuy ? C.yellow+'55' : C.border}`, color: canBuy ? C.yellow : C.dim, fontFamily: 'Orbitron, sans-serif', fontSize: '9px', letterSpacing: '0.08em', cursor: canBuy && !buying ? 'pointer' : 'not-allowed', opacity: buying ? 0.6 : 1 }}>
+                            {buying ? '⏳...' : canBuy ? '🛒 شراء' : '🔒 رصيد غير كافٍ'}
+                          </button>
+                        )}
+                      </div>
                     </div>
+                  );
+                })}
+              </div>
+            )}
 
-                    {/* Info */}
-                    <div style={{ padding: '10px 10px 12px' }}>
-                      <div style={{ fontFamily: 'Rajdhani, sans-serif', fontSize: '14px', fontWeight: 600, color: active ? skin.color : 'rgba(255,255,255,0.85)', marginBottom: '4px', textShadow: active ? neon(skin.color, 4) : 'none' }}>
-                        {skin.emoji} {skin.name}
-                      </div>
-                      <div style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '10px', color: C.yellow, marginBottom: '8px' }}>
-                        {skin.price.toLocaleString()} د.ع
-                      </div>
+            {/* ══════════════════ UPGRADES TAB ══════════════════ */}
+            {shopTab === 'upgrades' && (() => {
+              const upgrades = [
+                {
+                  key:      'magnet' as const,
+                  icon:     '🧲',
+                  title:    'مستوى المغناطيس',
+                  color:    C.yellow,
+                  level:    profile?.magnetLevel ?? 1,
+                  effects:  MAGNET_DUR_LVL.map(ms => `${(ms/1000).toFixed(1)}ث`),
+                  effectLabel: 'مدة الجذب',
+                },
+                {
+                  key:      'combo' as const,
+                  icon:     '⚡',
+                  title:    'مضاعف الكومبو',
+                  color:    C.blue,
+                  level:    profile?.comboLevel ?? 1,
+                  effects:  COMBO_WIN_LVL.map(ms => `${(ms/1000).toFixed(1)}ث`),
+                  effectLabel: 'نافذة الكومبو',
+                },
+              ];
+              return (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                  {upgrades.map(upg => {
+                    const lvl      = upg.level;
+                    const maxed    = lvl >= MAX_UPG_LEVEL;
+                    const cost     = maxed ? 0 : UPGRADE_COSTS[upg.key][lvl - 1];
+                    const balance  = walletBal > 0 ? walletBal : (profile?.gameCash ?? 0);
+                    const canAfford = !maxed && balance >= cost;
+                    const isUpgrading = upgrading === upg.key;
 
-                      {owned ? (
+                    return (
+                      <div key={upg.key} style={{
+                        borderRadius: '12px', padding: '16px',
+                        background: `${upg.color}0a`,
+                        border: `1.5px solid ${upg.color}${maxed ? '66' : '33'}`,
+                        boxShadow: maxed ? neon(upg.color, 6) : 'none',
+                        transition: 'all 0.3s',
+                      }}>
+                        {/* Card header */}
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            <span style={{ fontSize: '22px' }}>{upg.icon}</span>
+                            <div>
+                              <div style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '12px', color: upg.color, letterSpacing: '0.08em', textShadow: neon(upg.color, 5) }}>{upg.title}</div>
+                              <div style={{ fontSize: '10px', color: C.dim, marginTop: '2px' }}>{upg.effectLabel}: <span style={{ color: 'rgba(255,255,255,0.8)' }}>{upg.effects[lvl - 1]}</span></div>
+                            </div>
+                          </div>
+                          {/* Level badge */}
+                          <div style={{
+                            fontFamily: 'Orbitron, sans-serif', fontSize: '14px', fontWeight: 700,
+                            color: upg.color, textShadow: neon(upg.color, 8),
+                            background: `${upg.color}18`, border: `1px solid ${upg.color}44`,
+                            padding: '4px 10px', borderRadius: '20px', letterSpacing: '0.08em',
+                          }}>
+                            {maxed ? 'MAX ✓' : `Lv.${lvl}`}
+                          </div>
+                        </div>
+
+                        {/* Level progress bar */}
+                        <div style={{ marginBottom: '12px' }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '5px' }}>
+                            {Array.from({ length: MAX_UPG_LEVEL }, (_, i) => (
+                              <div key={i} style={{
+                                flex: 1, height: '6px', borderRadius: '3px',
+                                background: i < lvl ? upg.color : `${upg.color}22`,
+                                margin: '0 2px',
+                                boxShadow: i < lvl ? neon(upg.color, 4) : 'none',
+                                transition: 'all 0.4s',
+                              }} />
+                            ))}
+                          </div>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', paddingLeft: '2px', paddingRight: '2px' }}>
+                            {Array.from({ length: MAX_UPG_LEVEL }, (_, i) => (
+                              <div key={i} style={{ flex: 1, textAlign: 'center', fontSize: '8px', color: i < lvl ? upg.color : C.dim, fontFamily: 'Orbitron, sans-serif' }}>
+                                {i + 1}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+
+                        {/* Next level preview */}
+                        {!maxed && (
+                          <div style={{ fontSize: '11px', color: C.dim, marginBottom: '10px' }}>
+                            المستوى التالي: <span style={{ color: upg.color }}>{upg.effects[lvl]}</span>
+                            <span style={{ marginRight: '8px', color: 'rgba(255,255,255,0.4)' }}>•</span>
+                            التكلفة: <span style={{ color: C.yellow }}>{cost.toLocaleString()} د.ع</span>
+                          </div>
+                        )}
+
+                        {/* Upgrade button */}
                         <button
-                          onClick={() => equipSkin(skin)}
-                          disabled={active}
+                          disabled={maxed || isUpgrading || !canAfford || !profile}
+                          onClick={() => upgradeAbility(upg.key)}
                           style={{
-                            width: '100%', padding: '7px', borderRadius: '5px',
-                            background: active ? `${skin.color}30` : `${skin.color}18`,
-                            border: `1px solid ${skin.color}${active ? '77' : '44'}`,
-                            color: skin.color,
-                            fontFamily: 'Orbitron, sans-serif', fontSize: '10px', letterSpacing: '0.08em',
-                            cursor: active ? 'default' : 'pointer', transition: 'all 0.2s',
+                            width: '100%', padding: '10px', borderRadius: '7px',
+                            background: maxed
+                              ? `${upg.color}22`
+                              : canAfford ? `${upg.color}22` : 'rgba(255,255,255,0.04)',
+                            border: `1.5px solid ${maxed ? upg.color+'66' : canAfford ? upg.color+'55' : C.border}`,
+                            color: maxed ? upg.color : canAfford ? upg.color : C.dim,
+                            fontFamily: 'Orbitron, sans-serif', fontSize: '11px', letterSpacing: '0.08em',
+                            cursor: (!maxed && canAfford && !isUpgrading) ? 'pointer' : 'not-allowed',
+                            textShadow: canAfford || maxed ? neon(upg.color, 5) : 'none',
+                            transition: 'all 0.2s', opacity: isUpgrading ? 0.6 : 1,
                           }}
                         >
-                          {active ? '✓ مفعّل' : '▶ تفعيل'}
+                          {maxed
+                            ? '🏆 وصلت للحد الأقصى!'
+                            : isUpgrading
+                              ? '⏳ جاري الترقية...'
+                              : canAfford
+                                ? `⬆ ترقية إلى Lv.${lvl + 1} — ${cost.toLocaleString()} د.ع`
+                                : `🔒 رصيد غير كافٍ (${cost.toLocaleString()} د.ع)`
+                          }
                         </button>
-                      ) : (
-                        <button
-                          onClick={() => buySkin(skin)}
-                          disabled={buying || !canBuy || !profile}
-                          style={{
-                            width: '100%', padding: '7px', borderRadius: '5px',
-                            background: canBuy ? `${C.yellow}18` : 'rgba(255,255,255,0.03)',
-                            border: `1px solid ${canBuy ? C.yellow + '55' : C.border}`,
-                            color: canBuy ? C.yellow : C.dim,
-                            fontFamily: 'Orbitron, sans-serif', fontSize: '10px', letterSpacing: '0.08em',
-                            cursor: canBuy && !buying ? 'pointer' : 'not-allowed',
-                            transition: 'all 0.2s', opacity: buying ? 0.6 : 1,
-                          }}
-                        >
-                          {buying ? '⏳...' : canBuy ? '🛒 شراء' : '🔒 رصيد غير كافٍ'}
-                        </button>
-                      )}
+                      </div>
+                    );
+                  })}
+
+                  {/* Info box */}
+                  <div style={{ borderRadius: '8px', padding: '12px 14px', background: 'rgba(255,255,255,0.02)', border: `1px solid ${C.border}` }}>
+                    <div style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '10px', color: C.dim, letterSpacing: '0.06em', marginBottom: '6px' }}>💡 كيف تعمل التطويرات؟</div>
+                    <div style={{ fontSize: '11px', color: 'rgba(255,255,255,0.45)', lineHeight: 1.7 }}>
+                      • <strong style={{ color: C.yellow }}>المغناطيس</strong>: كل مستوى يمدد وقت الجذب التلقائي للأكل<br/>
+                      • <strong style={{ color: C.blue }}>الكومبو</strong>: يوسّع النافذة الزمنية لتراكم مضاعفات الكومبو<br/>
+                      • يُخصم السعر من محفظة الرحلات أو رصيد اللعبة تلقائياً
                     </div>
                   </div>
-                );
-              })}
-            </div>
+                </div>
+              );
+            })()}
           </div>
         </div>
       )}

@@ -664,6 +664,82 @@ router.post("/game/session/catch", async (req: Request, res: Response) => {
   }
 });
 
+// ── POST /api/game/shop/upgrade ──────────────────────────────────────────────
+// Upgrade magnet duration or combo window using wallet or gameCash.
+// Body: { firebaseUid: string, statType: 'magnet' | 'combo' }
+const UPG_COSTS: Record<string, number[]> = {
+  magnet: [1500, 3000, 5000, 8000], // index = current level - 1 (L1→L2 costs [0], etc.)
+  combo:  [1500, 3000, 5000, 8000],
+};
+const MAX_UPG = 5;
+
+router.post("/game/shop/upgrade", async (req: Request, res: Response) => {
+  const { firebaseUid, statType } = req.body as { firebaseUid?: string; statType?: string };
+  if (!firebaseUid || !['magnet', 'combo'].includes(statType ?? '')) {
+    res.status(400).json({ error: "invalid_params" }); return;
+  }
+  try {
+    const profile = await upsertProfile(firebaseUid);
+    if (!profile) { res.status(404).json({ error: "profile_not_found" }); return; }
+
+    const currentLevel = statType === 'magnet' ? profile.magnetLevel : profile.comboLevel;
+    if (currentLevel >= MAX_UPG) {
+      res.status(409).json({ error: "max_level", message: "وصلت للحد الأقصى من التطوير!" }); return;
+    }
+
+    const cost = UPG_COSTS[statType!][currentLevel - 1];
+
+    // Try real wallet first
+    const [walletUser] = await db
+      .select({ id: usersTable.id, balance: usersTable.balance })
+      .from(usersTable)
+      .where(eq(usersTable.firebaseUid, firebaseUid));
+
+    let source: 'wallet' | 'gameCash';
+    if (walletUser && walletUser.balance >= cost) {
+      await db.update(usersTable)
+        .set({ balance: walletUser.balance - cost })
+        .where(eq(usersTable.id, walletUser.id));
+      source = 'wallet';
+    } else if (profile.gameCash >= cost) {
+      source = 'gameCash';
+    } else {
+      res.status(402).json({
+        error:         "insufficient_balance",
+        message:       `رصيدك غير كافٍ — المطلوب: ${cost.toLocaleString()} د.ع`,
+        walletBalance: walletUser?.balance ?? 0,
+        gameCash:      profile.gameCash,
+        required:      cost,
+      }); return;
+    }
+
+    const newLevel = currentLevel + 1;
+    const setData  = statType === 'magnet'
+      ? { magnetLevel: newLevel, updatedAt: new Date(), ...(source === 'gameCash' ? { gameCash: profile.gameCash - cost } : {}) }
+      : { comboLevel:  newLevel, updatedAt: new Date(), ...(source === 'gameCash' ? { gameCash: profile.gameCash - cost } : {}) };
+
+    const [updated] = await db
+      .update(gameProfilesTable)
+      .set(setData)
+      .where(eq(gameProfilesTable.firebaseUid, firebaseUid))
+      .returning();
+
+    res.json({
+      ok:            true,
+      statType,
+      newLevel,
+      source,
+      walletBalance: source === 'wallet' ? (walletUser!.balance - cost) : (walletUser?.balance ?? 0),
+      gameCash:      updated.gameCash,
+      magnetLevel:   updated.magnetLevel,
+      comboLevel:    updated.comboLevel,
+    });
+  } catch (err) {
+    req.log.error({ err }, "upgrade error");
+    res.status(500).json({ error: "internal" });
+  }
+});
+
 // ── Friendly Duels (UI prep — in-memory, cleared on restart) ─────────────────
 const duelRooms = new Map<string, { creatorId: string; bet: number; createdAt: number }>();
 
