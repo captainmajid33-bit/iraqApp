@@ -1,7 +1,7 @@
 import type { CapacitorConfig } from '@capacitor/cli';
 
 const config: CapacitorConfig = {
-  appId: 'com.diyalamap.app',
+  appId: 'com.diyala.gas',
   appName: 'المعدل',
   webDir: 'dist/public',
 

@@ -1,16 +1,15 @@
+/**
+ * firebase.ts — Firebase Initialization
+ * ──────────────────────────────────────────────────────────────────────────────
+ * يستورد الإعدادات من firebaseConfig.ts المعزول ويُهيّئ الـ SDK.
+ * لتغيير أي إعداد (API Key, Project ID…) عدّل firebaseConfig.ts فقط.
+ */
+
 import { initializeApp, getApps } from "firebase/app";
 import { getAuth } from "firebase/auth";
 import { getFirestore } from "firebase/firestore";
 import { getStorage } from "firebase/storage";
-
-const firebaseConfig = {
-  apiKey:            "AIzaSyA79tDp7uQBGW8ye-M3_cQSj7xbNUr52uo",
-  authDomain:        "diyalaapp.firebaseapp.com",
-  projectId:         "diyalaapp",
-  storageBucket:     "diyalaapp.firebasestorage.app",
-  messagingSenderId: "904460783186",
-  appId:             "1:904460783186:web:07b20dda77ed306ceb198b",
-};
+import { firebaseConfig } from "./firebaseConfig";
 
 const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
 

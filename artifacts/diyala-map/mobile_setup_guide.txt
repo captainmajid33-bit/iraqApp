@@ -1,0 +1,213 @@
+══════════════════════════════════════════════════════════════════════════════
+   دليل تحويل تطبيق "المعدل" إلى تطبيق موبايل (Android / iOS)
+   Package Name: com.diyala.gas   |   App Name: المعدل
+   Firebase Project: diyalaapp
+══════════════════════════════════════════════════════════════════════════════
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  المرحلة الأولى: تحضير الجهاز (مرة واحدة فقط)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[ 1 ] تثبيت Node.js (v18 أو أحدث)
+      https://nodejs.org
+
+[ 2 ] تثبيت pnpm
+      npm install -g pnpm
+
+[ 3 ] تثبيت Java 17 (مطلوب لـ Android)
+      https://adoptium.net  → اختر Temurin 17 LTS
+
+[ 4 ] تثبيت Android Studio
+      https://developer.android.com/studio
+      بعد التثبيت:
+        • افتح Android Studio → More Actions → SDK Manager
+        • تأكد من تثبيت:  Android SDK 34 (أو أحدث)
+                          Android SDK Build-Tools
+                          Android Emulator
+
+[ 5 ] (لـ iOS فقط — macOS) تثبيت Xcode من App Store + CocoaPods:
+      sudo gem install cocoapods
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  المرحلة الثانية: تنزيل المشروع وتثبيت الحزم
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[ 1 ] نزّل المشروع من Replit:
+        Shell → الزر العلوي → "Download as ZIP"
+      أو عبر Git:
+        git clone https://replit.com/@YOUR_USERNAME/YOUR_REPL.git
+
+[ 2 ] افتح Terminal داخل مجلد المشروع وثبّت الحزم:
+        pnpm install
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  المرحلة الثالثة: إضافة ملف Firebase لـ Android
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[ 1 ] افتح Firebase Console: https://console.firebase.google.com
+        → اختر مشروع "diyalaapp"
+
+[ 2 ] أضف تطبيق Android جديد:
+        Project Settings → Your Apps → Add App → Android
+
+[ 3 ] في حقل "Android package name" اكتب بالضبط:
+        com.diyala.gas
+      (يجب أن يطابق تماماً ما في capacitor.config.ts)
+
+[ 4 ] اكمل الخطوات وحمّل ملف:
+        google-services.json
+
+[ 5 ] ضع الملف في المسار الصحيح داخل المشروع:
+        artifacts/diyala-map/android/app/google-services.json
+      ⚠️  مجلد "android" لن يظهر إلا بعد تشغيل "cap add android" في الخطوة التالية
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  المرحلة الرابعة: توليد مجلدات Native وفتح Android Studio
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+افتح Terminal داخل مجلد:  artifacts/diyala-map
+
+[ 1 ] ابنِ ملفات الويب النهائية:
+        pnpm build:mobile
+
+[ 2 ] أضف منصة Android (مرة واحدة فقط):
+        pnpm cap:add:android
+
+[ 3 ] انسخ google-services.json الآن إلى:
+        android/app/google-services.json
+
+[ 4 ] زامن الملفات مع الـ Native:
+        npx cap sync android
+
+[ 5 ] افتح Android Studio:
+        pnpm cap:open:android
+      سيفتح مشروع Android تلقائياً في Android Studio
+
+[ 6 ] داخل Android Studio — انتظر حتى ينتهي Gradle Sync تلقائياً
+      (شريط التقدم في الأسفل — قد يستغرق 2-5 دقائق أول مرة)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  المرحلة الخامسة: إعدادات Android Studio المهمة
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[ 1 ] تأكد من Package Name:
+        app → manifests → AndroidManifest.xml
+        ابحث عن: package="com.diyala.gas"
+
+[ 2 ] أضف صلاحيات GPS في AndroidManifest.xml (إن لم تكن موجودة):
+        <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+        <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+
+[ 3 ] أضف صلاحية الإنترنت (مطلوبة للخريطة وFirebase):
+        <uses-permission android:name="android.permission.INTERNET" />
+
+[ 4 ] Splash Screen — ضع صورة الشعار في:
+        android/app/src/main/res/drawable/splash.png
+        (مقاس مقترح: 1242×2688 بكسل — خلفية #05080f)
+
+[ 5 ] App Icon — ضع الأيقونة في:
+        android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png   (192×192)
+        android/app/src/main/res/mipmap-xxhdpi/ic_launcher.png    (144×144)
+        android/app/src/main/res/mipmap-xhdpi/ic_launcher.png     (96×96)
+        android/app/src/main/res/mipmap-hdpi/ic_launcher.png      (72×72)
+        android/app/src/main/res/mipmap-mdpi/ic_launcher.png      (48×48)
+      أو استخدم: Android Studio → File → New → Image Asset (الطريقة الأسهل)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  المرحلة السادسة: اختبار التطبيق
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[ A ] على محاكي (Emulator):
+        Android Studio → Run → Run 'app' → اختر محاكياً من القائمة
+
+[ B ] على جهاز حقيقي (أسرع وأدق):
+        1. فعّل "وضع المطور" في هاتفك:
+           الإعدادات → حول الهاتف → اضغط 7 مرات على "رقم البناء"
+        2. فعّل "USB Debugging"
+        3. وصّل الهاتف بـ USB
+        4. Android Studio → Run → Run 'app' → اختر هاتفك
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  المرحلة السابعة: رفع التطبيق على Google Play
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[ 1 ] توليد ملف AAB (Android App Bundle) الموقّع:
+        Android Studio → Build → Generate Signed Bundle/APK
+        → اختر "Android App Bundle"
+        → أنشئ Keystore جديد أو استخدم موجوداً
+        → Build Type: release
+
+[ 2 ] ارفع الملف على Google Play Console:
+        https://play.google.com/console
+        → Create App → اختر تطبيقاً جديداً
+        → Production → Create new release → ارفع ملف AAB
+
+[ 3 ] أكمل متطلبات المتجر:
+        • وصف التطبيق (عربي + إنجليزي)
+        • لقطات شاشة (على الأقل 2 لكل حجم شاشة)
+        • أيقونة التطبيق (512×512 PNG)
+        • سياسة الخصوصية (URL)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  سكربتات الـ npm المتاحة (في مجلد artifacts/diyala-map)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  pnpm build:mobile          بناء ملفات الويب النهائية (dist/public)
+  pnpm cap:add:android       إضافة منصة Android (مرة واحدة)
+  pnpm cap:add:ios           إضافة منصة iOS (مرة واحدة، macOS فقط)
+  pnpm cap:sync              بناء + مزامنة مع النيتيف
+  pnpm cap:open:android      فتح مشروع Android Studio
+  pnpm cap:open:ios          فتح مشروع Xcode
+  pnpm cap:run:android       بناء + مزامنة + تشغيل على Android مباشرة
+  pnpm cap:run:ios           بناء + مزامنة + تشغيل على iOS مباشرة
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  مسارات الملفات المهمة في المشروع
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  capacitor.config.ts                    إعدادات Capacitor (AppID, Plugins)
+  src/lib/firebaseConfig.ts              إعدادات Firebase Web (API Keys)
+  src/lib/firebase.ts                    تهيئة Firebase (لا تعدّله)
+  src/lib/adsManager.ts                  إدارة الإعلانات (MOBILE SWAP POINT)
+  src/lib/capacitorPlugins.ts            GPS + Push + Back Button + Splash
+  vite.config.mobile.ts                  إعدادات البناء للموبايل
+
+  android/app/google-services.json       ← ضعه هنا بعد cap add android
+  ios/App/App/GoogleService-Info.plist   ← ضعه هنا بعد cap add ios
+  dist/public/                           ← ملفات الويب النهائية (مُولَّدة)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  تفعيل AdMob للإعلانات الحقيقية (بعد نشر التطبيق)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[ 1 ] أنشئ حساب AdMob: https://admob.google.com
+[ 2 ] أضف تطبيقك → App ID: com.diyala.gas
+[ 3 ] أنشئ Ad Unit من نوع "Rewarded"
+[ 4 ] ثبّت المكتبة:
+        pnpm --filter @workspace/diyala-map add @capacitor-community/admob
+        npx cap sync
+[ 5 ] في ملف src/lib/adsManager.ts:
+        • ضع معرّفات الإعلانات في AD_UNIT_IDS
+        • استبدل body الدالة showRewardedAd() بالكود الموجود في
+          تعليق "MOBILE SWAP POINT"
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ملاحظات مهمة
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ⚠  Package Name (com.diyala.gas) لا يمكن تغييره بعد نشر التطبيق على المتجر
+  ⚠  احتفظ بنسخة آمنة من ملف Keystore — فقدانه يعني عدم القدرة على التحديث
+  ⚠  ملف google-services.json يحتوي معلومات حساسة — لا ترفعه على GitHub
+  ✓  Capacitor نسخة 8 متوافقة مع Android API 26+ (Android 8.0 Oreo فأعلى)
+  ✓  يمكن اختبار التطبيق على المتصفح العادي في Replit (وضع Mock للإعلانات)
+══════════════════════════════════════════════════════════════════════════════
