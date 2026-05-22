@@ -50,7 +50,8 @@ interface FallingItem {
   y:         number;
   speed:     number;
   collected: boolean;
-  type:      'food' | 'magnet';
+  type:      'food' | 'magnet' | 'obstacle';
+  lane:      number;
 }
 
 interface LeaderEntry {
@@ -155,6 +156,12 @@ export function ChallengeModal({ onClose }: Props) {
   const [duelCode,     setDuelCode]     = useState<string | null>(null);
   const [duelBet,      setDuelBet]      = useState(500);
   const [duelCreating, setDuelCreating] = useState(false);
+  const [duelTab,      setDuelTab]      = useState<'create' | 'join'>('create');
+  const [duelJoinCode, setDuelJoinCode] = useState('');
+  const [duelJoining,  setDuelJoining]  = useState(false);
+  const [duelJoinErr,  setDuelJoinErr]  = useState('');
+  const [duelResultMsg,setDuelResultMsg]= useState('');
+  const activeDuelIdRef = useRef<string | null>(null);
   const [shopTab,      setShopTab]      = useState<'skins' | 'upgrades'>('skins');
   const [upgrading,    setUpgrading]    = useState<string | null>(null);
   const [shopBuying,  setShopBuying]  = useState<string | null>(null);
@@ -212,6 +219,10 @@ export function ChallengeModal({ onClose }: Props) {
     lastDiffTime:   0,
     magnetLevel:    1,   // from profile upgrade
     comboLevel:     1,   // from profile upgrade
+    charLane:       1,   // 0=top 1=mid 2=ground
+    charLaneY:      0,   // animated Y toward LANE_Y[charLane]; init on first frame
+    lives:          3,   // player lives (obstacles reduce this)
+    invincible:     0,   // ms timestamp — invincibility until
   });
 
   const bgImgRef        = useRef<HTMLImageElement | null>(null);
@@ -454,8 +465,32 @@ export function ChallengeModal({ onClose }: Props) {
     gs.current.running = false;
     cancelAnimationFrame(rafRef.current);
     if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
-    setScore(gs.current.score);
+    const finalScore = gs.current.score;
+    setScore(finalScore);
+    setDuelResultMsg('');
     setPhase('gameover');
+    const duelId = activeDuelIdRef.current;
+    const uid    = userUidRef.current;
+    if (duelId && uid) {
+      fetch('/api/game/duel/score', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ firebaseUid: uid, duelId, score: finalScore }),
+      }).then(r => r.ok ? r.json() : null)
+        .then((d: { done?: boolean; youWon?: boolean; winnerScore?: number; loserScore?: number; prize?: number; waiting?: boolean } | null) => {
+          if (!d) return;
+          if (d.done) {
+            const msg = d.youWon
+              ? `🏆 فزت! ربحت ${(d.prize ?? 0).toLocaleString()} د.ع`
+              : `❌ خسرت! نتيجة الفائز: ${d.winnerScore}`;
+            setDuelResultMsg(msg);
+            const u = auth.currentUser;
+            if (u) fetch(`/api/game/wallet/${u.uid}`).then(r => r.json())
+              .then((wd: { balance?: number }) => setWalletBal(wd.balance ?? 0)).catch(() => {});
+          } else if (d.waiting) {
+            setDuelResultMsg('⏳ تم تسجيل نتيجتك — بانتظار الخصم...');
+          }
+        }).catch(() => {});
+    }
   }, []);
 
   // Jump mechanic removed — horizontal-only runner
@@ -472,10 +507,10 @@ export function ChallengeModal({ onClose }: Props) {
     const BASE_X   = Math.round(W * 0.16);
     const MAX_X    = Math.round(W * 0.60);
     const GROUND_Y = Math.round(H * 0.74);
-    g.charY = GROUND_Y;
-
-    // ── Character Y is always fixed at road level (no jump mechanic) ──────────
-    const charDrawY = g.charY;
+    const LANE_Y   = [GROUND_Y - 100, GROUND_Y - 50, GROUND_Y] as [number, number, number];
+    if (g.charLaneY === 0) g.charLaneY = LANE_Y[g.charLane]; // first-frame init
+    g.charLaneY += (LANE_Y[g.charLane] - g.charLaneY) * 0.22;
+    const charDrawY = Math.round(g.charLaneY);
 
     // ── Horizontal rush ───────────────────────────────────────────────────────
     if (g.pressing === 'right') {
@@ -515,40 +550,59 @@ export function ChallengeModal({ onClose }: Props) {
       g.magnetActive = false;
     }
 
-    // ── Spawn items ───────────────────────────────────────────────────────────
+    // ── Spawn items + obstacles (3 lanes) ────────────────────────────────────
     const baseInterval  = Math.max(400, 900 - g.score * 6);
     const spawnInterval = baseInterval / g.diffMultiplier;
     if (ts - g.lastSpawn > spawnInterval) {
-      const isMagnet = (g.nextId > 3) && (Math.random() < 0.12);
-      const rY = Math.random();
-      // All items at horizontally-moving heights (no falling)
-      // Three tiers: ground (55%), mid-air (30%), elevated (15%)
-      const itemY = isMagnet
-        ? GROUND_Y - (Math.random() * 10)
-        : rY < 0.55
-          ? GROUND_Y - (Math.random() * 22)        // ground tier — catchable
-          : rY < 0.85
-            ? GROUND_Y - (50 + Math.random() * 40) // mid-air tier
-            : GROUND_Y - (105 + Math.random() * 35);// elevated tier
+      const isMagnet   = (g.nextId > 3) && (Math.random() < 0.10);
+      const isObstacle = !isMagnet && (Math.random() < 0.22);
+      const lane       = isMagnet ? 2 : Math.floor(Math.random() * 3); // 0=top 1=mid 2=ground
+      const itemY      = LANE_Y[lane];
       g.items.push({
         id:        g.nextId++,
         x:         W + ITEM_W,
         y:         itemY,
+        lane,
         speed:     (ITEM_SPD_MIN + Math.random() * ITEM_SPD_VAR + g.speedBoost) * g.diffMultiplier,
         collected: false,
-        type:      isMagnet ? 'magnet' : 'food',
+        type:      isMagnet ? 'magnet' : isObstacle ? 'obstacle' : 'food',
       });
       g.lastSpawn = ts;
     }
 
     // ── Update items + collision ──────────────────────────────────────────────
+    const now_ms = Date.now();
     for (const item of g.items) {
       if (item.collected) continue;
       item.x -= item.speed;
       const dx = Math.abs(item.x - g.charX);
       const dy = Math.abs(item.y - charDrawY);
-      // Generous hitbox: wider dx + taller dy to compensate for no-jump mechanic
-      if (dx < (CHAR_W / 2 + ITEM_W / 2) * 0.88 && dy < (CHAR_H / 2 + ITEM_H / 2) * 1.30) {
+      if (dx < (CHAR_W / 2 + ITEM_W / 2) * 0.82 && dy < (CHAR_H / 2 + ITEM_H / 2) * 1.10) {
+        if (item.type === 'obstacle') {
+          if (now_ms > g.invincible) {
+            item.collected = true;
+            g.lives      = Math.max(0, g.lives - 1);
+            g.invincible = now_ms + 1500;
+            g.comboCount = 0;
+            try {
+              if (!audioCtxRef.current) audioCtxRef.current = new AudioContext();
+              const actx = audioCtxRef.current;
+              const osc  = actx.createOscillator();
+              const gain = actx.createGain();
+              osc.connect(gain); gain.connect(actx.destination);
+              osc.type = 'sawtooth'; osc.frequency.value = 90;
+              gain.gain.setValueAtTime(0.35, actx.currentTime);
+              gain.gain.exponentialRampToValueAtTime(0.001, actx.currentTime + 0.38);
+              osc.start(actx.currentTime); osc.stop(actx.currentTime + 0.38);
+            } catch {}
+            if (comboTimerRef.current) clearTimeout(comboTimerRef.current);
+            const livesStr = '❤'.repeat(Math.max(0, g.lives));
+            setComboFlash(g.lives > 0 ? `💥 اصطدام! ${livesStr}` : '💀 انتهت الحياة!');
+            comboTimerRef.current = setTimeout(() => setComboFlash(null), 1400);
+            if (g.lives <= 0) { g.running = false; }
+          }
+          continue;
+        }
         item.collected = true;
         if (item.type === 'magnet') {
           g.magnetActive = true;
@@ -741,7 +795,14 @@ export function ChallengeModal({ onClose }: Props) {
       if (item.collected) continue;
       const bob = Math.sin(ts * 0.006 + item.id) * 4;
       ctx.save();
-      if (item.type === 'magnet') {
+      if (item.type === 'obstacle') {
+        const obFlash = g.invincible > Date.now() && Math.floor(ts / 130) % 2 === 0;
+        ctx.globalAlpha = obFlash ? 0.22 : 1;
+        ctx.shadowColor = '#ff2d78cc'; ctx.shadowBlur = 20;
+        ctx.font = '38px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        const obstEmojis = ['🚗', '🚧', '🛑', '🚌'];
+        ctx.fillText(obstEmojis[item.id % 4], item.x, item.y + bob);
+      } else if (item.type === 'magnet') {
         ctx.shadowColor = '#f5c518cc'; ctx.shadowBlur = 20;
         ctx.font = '36px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
         ctx.fillText('🧲', item.x, item.y + bob);
@@ -760,25 +821,29 @@ export function ChallengeModal({ onClose }: Props) {
       ctx.restore();
     }
 
-    // Character
-    const rushing  = g.pressing === 'right';
-    const airborne = false;
-    ctx.save();
-    ctx.shadowColor = rushing ? '#00d4ff88' : airborne ? '#f5c51888' : '#00f5d455';
-    ctx.shadowBlur  = rushing ? 22 : airborne ? 18 : 12;
-    if (charImgRef.current) {
-      if (rushing) {
-        ctx.translate(g.charX + CHAR_W / 2, 0);
-        ctx.scale(-1, 1);
-        ctx.drawImage(charImgRef.current, -CHAR_W / 2, charDrawY - CHAR_H / 2, CHAR_W, CHAR_H);
+    // Character (flashes when invincible)
+    const rushing      = g.pressing === 'right';
+    const isInvincible = g.invincible > Date.now();
+    const charVisible  = !isInvincible || (Math.floor(ts / 110) % 2 === 0);
+    if (charVisible) {
+      ctx.save();
+      ctx.shadowColor = isInvincible ? '#ff2d7888' : rushing ? '#00d4ff88' : '#00f5d455';
+      ctx.shadowBlur  = rushing ? 22 : 12;
+      ctx.globalAlpha = isInvincible ? 0.65 : 1;
+      if (charImgRef.current) {
+        if (rushing) {
+          ctx.translate(g.charX + CHAR_W / 2, 0);
+          ctx.scale(-1, 1);
+          ctx.drawImage(charImgRef.current, -CHAR_W / 2, charDrawY - CHAR_H / 2, CHAR_W, CHAR_H);
+        } else {
+          ctx.drawImage(charImgRef.current, g.charX - CHAR_W / 2, charDrawY - CHAR_H / 2, CHAR_W, CHAR_H);
+        }
       } else {
-        ctx.drawImage(charImgRef.current, g.charX - CHAR_W / 2, charDrawY - CHAR_H / 2, CHAR_W, CHAR_H);
+        ctx.font = '44px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText(rushing ? '🏃' : '🧍', g.charX, charDrawY);
       }
-    } else {
-      ctx.font = '44px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.fillText(rushing ? '🏃' : airborne ? '🦅' : '🧍', g.charX, charDrawY);
+      ctx.restore();
     }
-    ctx.restore();
 
     // Ground shadow
     ctx.save();
@@ -788,7 +853,29 @@ export function ChallengeModal({ onClose }: Props) {
     ctx.fillStyle = shGrad;
     ctx.fillRect(g.charX - CHAR_W * 0.65, roadTop - 2, CHAR_W * 1.3, 8);
     ctx.restore();
-  }, []);
+
+    // ── Lives HUD (top-left) ─────────────────────────────────────────────────
+    for (let i = 0; i < 3; i++) {
+      ctx.save();
+      ctx.globalAlpha = i < g.lives ? 1 : 0.18;
+      ctx.shadowColor = i < g.lives ? '#ff2d78cc' : 'transparent';
+      ctx.shadowBlur  = i < g.lives ? 8 : 0;
+      ctx.font = '17px sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+      ctx.fillText('❤', 10 + i * 22, 10);
+      ctx.restore();
+    }
+
+    // ── Lane indicator dots (top-right) ─────────────────────────────────────
+    for (let li = 0; li < 3; li++) {
+      ctx.save();
+      ctx.globalAlpha = li === g.charLane ? 0.55 : 0.12;
+      ctx.fillStyle   = li === g.charLane ? '#00f5d4' : '#ffffff';
+      ctx.shadowColor = li === g.charLane ? '#00f5d4cc' : 'transparent';
+      ctx.shadowBlur  = li === g.charLane ? 6 : 0;
+      ctx.beginPath(); ctx.arc(W - 14, 14 + li * 16, 4, 0, Math.PI * 2); ctx.fill();
+      ctx.restore();
+    }
+  }, [endGame]);
 
   // ── Start game ─────────────────────────────────────────────────────────────
   const startGame = useCallback(async () => {
@@ -858,6 +945,10 @@ export function ChallengeModal({ onClose }: Props) {
     g.lastDiffTime   = 0;
     g.magnetLevel    = profile?.magnetLevel ?? 1;
     g.comboLevel     = profile?.comboLevel  ?? 1;
+    g.charLane       = 1;   // start in middle lane
+    g.charLaneY      = 0;   // init'd on first drawFrame
+    g.lives          = 3;
+    g.invincible     = 0;
     g.W = W; g.H = H;
 
     setScore(0);
@@ -876,7 +967,10 @@ export function ChallengeModal({ onClose }: Props) {
 
     // RAF game loop
     const loop = (ts: number) => {
-      if (!gs.current.running) return;
+      if (!gs.current.running) {
+        if (gs.current.lives <= 0) endGame();
+        return;
+      }
       drawFrame(ts);
       rafRef.current = requestAnimationFrame(loop);
     };
@@ -913,6 +1007,27 @@ export function ChallengeModal({ onClose }: Props) {
   const pressLeft  = useCallback(() => { gs.current.pressing = 'left';  }, []);
   const pressRight = useCallback(() => { gs.current.pressing = 'right'; }, []);
   const pressStop  = useCallback(() => { gs.current.pressing = null;     }, []);
+  const laneUp     = useCallback(() => { gs.current.charLane = Math.max(0, gs.current.charLane - 1); }, []);
+  const laneDown   = useCallback(() => { gs.current.charLane = Math.min(2, gs.current.charLane + 1); }, []);
+
+  const acceptDuel = useCallback(async () => {
+    const uid = auth.currentUser?.uid;
+    if (!uid) { setDuelJoinErr('يجب تسجيل الدخول أولاً'); return; }
+    if (!duelJoinCode.trim()) { setDuelJoinErr('أدخل رمز التحدي'); return; }
+    setDuelJoining(true); setDuelJoinErr('');
+    try {
+      const r = await fetch('/api/game/duel/accept', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ firebaseUid: uid, duelId: duelJoinCode.trim().toUpperCase() }),
+      });
+      const d = await r.json();
+      if (!r.ok) { setDuelJoinErr(d.message ?? d.error ?? 'فشل الانضمام'); return; }
+      activeDuelIdRef.current = duelJoinCode.trim().toUpperCase();
+      if (typeof d.walletBalance === 'number') setWalletBal(d.walletBalance);
+      startGame();
+    } catch { setDuelJoinErr('خطأ في الاتصال'); }
+    finally  { setDuelJoining(false); }
+  }, [duelJoinCode, startGame]);
 
   // Medal helper
   const medal = (rank: number) => rank === 1 ? '🥇' : rank === 2 ? '🥈' : rank === 3 ? '🥉' : `#${rank}`;
@@ -1097,7 +1212,12 @@ export function ChallengeModal({ onClose }: Props) {
             </button>
 
             <button
-              onClick={() => { setShopMsg(''); setPhase('shop'); }}
+              onClick={() => {
+                setShopMsg(''); setPhase('shop');
+                const u = auth.currentUser;
+                if (u) fetch(`/api/game/wallet/${u.uid}`).then(r => r.json())
+                  .then((d: { balance?: number }) => setWalletBal(d.balance ?? 0)).catch(() => {});
+              }}
               style={{
                 padding: '14px', borderRadius: '6px',
                 background: `${C.purple}11`,
@@ -1109,15 +1229,20 @@ export function ChallengeModal({ onClose }: Props) {
               }}
             >
               🛍 المتجر
-              {profile && (
-                <span style={{ fontSize: '10px', background: `${C.purple}33`, padding: '2px 7px', borderRadius: '10px' }}>
-                  {profile.gameCash.toLocaleString()} د.ع
+              {(
+                <span style={{ fontSize: '10px', background: `${C.yellow}22`, padding: '2px 7px', borderRadius: '10px', color: C.yellow }}>
+                  💰 {walletBal.toLocaleString()} د.ع
                 </span>
               )}
             </button>
 
             <button
-              onClick={() => { setDuelCode(null); setDuelBet(500); setPhase('duel'); }}
+              onClick={() => {
+                setDuelCode(null); setDuelBet(500);
+                setDuelTab('create'); setDuelJoinCode(''); setDuelJoinErr('');
+                activeDuelIdRef.current = null;
+                setPhase('duel');
+              }}
               style={{
                 padding: '14px', borderRadius: '6px',
                 background: `${C.red}11`,
@@ -1197,16 +1322,34 @@ export function ChallengeModal({ onClose }: Props) {
               fontFamily: 'Orbitron, sans-serif', fontSize: '10px',
               color: 'rgba(0,212,255,0.40)', letterSpacing: '0.06em',
             }}>
-              اضغط مستمراً ← للانطلاق يميناً  •  ارفع إصبعك ← للرجوع يساراً 🏃
+              اضغط أعلى ← مسار علوي  •  وسط ← انطلاق  •  أسفل ← مسار سفلي 🏃
             </div>
           )}
 
           <canvas
             ref={canvasRef}
-            onMouseDown={() => { gs.current.pressing = 'right'; }}
+            onMouseDown={e => {
+              const canvas = canvasRef.current;
+              if (!canvas) { gs.current.pressing = 'right'; return; }
+              const rect = canvas.getBoundingClientRect();
+              const relY = (e.clientY - rect.top) / rect.height;
+              if      (relY < 0.32) laneUp();
+              else if (relY > 0.68) laneDown();
+              else gs.current.pressing = 'right';
+            }}
             onMouseUp={() => { gs.current.pressing = null; }}
             onMouseLeave={() => { gs.current.pressing = null; }}
-            onTouchStart={e => { e.preventDefault(); gs.current.pressing = 'right'; }}
+            onTouchStart={e => {
+              e.preventDefault();
+              const canvas = canvasRef.current;
+              if (!canvas) { gs.current.pressing = 'right'; return; }
+              const rect  = canvas.getBoundingClientRect();
+              const touch = e.touches[0];
+              const relY  = (touch.clientY - rect.top) / rect.height;
+              if      (relY < 0.32) laneUp();
+              else if (relY > 0.68) laneDown();
+              else gs.current.pressing = 'right';
+            }}
             onTouchEnd={e => { e.preventDefault(); gs.current.pressing = null; }}
             onTouchCancel={e => { e.preventDefault(); gs.current.pressing = null; }}
             style={{
@@ -1233,6 +1376,16 @@ export function ChallengeModal({ onClose }: Props) {
               textShadow: neon(C.green, 8), marginBottom: '6px',
             }}>انتهت اللعبة!</div>
             <div style={{ color: C.dim, fontSize: '13px' }}>نتيجتك النهائية</div>
+            {duelResultMsg && (
+              <div style={{
+                marginTop: '8px', padding: '8px 16px', borderRadius: '8px',
+                background: duelResultMsg.startsWith('🏆') ? `${C.yellow}18` : duelResultMsg.startsWith('⏳') ? `${C.blue}18` : `${C.red}18`,
+                border: `1px solid ${duelResultMsg.startsWith('🏆') ? C.yellow + '55' : duelResultMsg.startsWith('⏳') ? C.blue + '55' : C.red + '55'}`,
+                color: duelResultMsg.startsWith('🏆') ? C.yellow : duelResultMsg.startsWith('⏳') ? C.blue : C.red,
+                fontFamily: 'Orbitron, sans-serif', fontSize: '12px', letterSpacing: '0.06em',
+                textShadow: duelResultMsg.startsWith('🏆') ? neon(C.yellow, 6) : 'none',
+              }}>{duelResultMsg}</div>
+            )}
           </div>
 
           {/* Big score display */}
@@ -1324,20 +1477,41 @@ export function ChallengeModal({ onClose }: Props) {
             </div>
           </div>
 
-          {!duelCode ? (
+          {/* ── Tab bar: Create / Join ────────────────────────────────────── */}
+          {!duelCode && (
+            <div style={{ display: 'flex', gap: '8px', width: '100%', maxWidth: '300px' }}>
+              {(['create', 'join'] as const).map(tab => (
+                <button key={tab} onClick={() => { setDuelTab(tab); setDuelJoinErr(''); }}
+                  style={{
+                    flex: 1, padding: '9px 0', borderRadius: '6px',
+                    background: duelTab === tab ? `${C.red}22` : 'transparent',
+                    border: `1.5px solid ${duelTab === tab ? C.red + '88' : C.red + '33'}`,
+                    color: duelTab === tab ? C.red : C.dim,
+                    fontFamily: 'Orbitron, sans-serif', fontSize: '11px',
+                    letterSpacing: '0.08em', cursor: 'pointer', transition: 'all 0.2s',
+                  }}>
+                  {tab === 'create' ? '🔗 أنشئ تحدياً' : '⚔ انضم لتحدٍ'}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {!duelCode && duelTab === 'create' ? (
             <div style={{
               width: '100%', maxWidth: '300px',
               background: `${C.red}0d`, border: `1px solid ${C.red}33`,
               borderRadius: '10px', padding: '20px 18px',
               display: 'flex', flexDirection: 'column', gap: '14px',
             }}>
+              <div style={{ fontSize: '10px', color: C.dim, textAlign: 'center' }}>
+                رصيدك: <span style={{ color: C.yellow }}>{walletBal.toLocaleString()} د.ع</span>
+              </div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
                 <label style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '11px', color: C.dim, letterSpacing: '0.08em' }}>
                   مبلغ الرهان (دينار عراقي)
                 </label>
                 <input
-                  type="number"
-                  min={100} max={50000} step={100}
+                  type="number" min={100} max={50000} step={100}
                   value={duelBet}
                   onChange={e => setDuelBet(Math.max(100, Number(e.target.value)))}
                   style={{
@@ -1345,11 +1519,11 @@ export function ChallengeModal({ onClose }: Props) {
                     borderRadius: '6px', padding: '10px 14px',
                     color: C.red, fontFamily: 'Orbitron, sans-serif',
                     fontSize: '16px', textAlign: 'center', outline: 'none',
-                    width: '100%', boxSizing: 'border-box',
+                    width: '100%', boxSizing: 'border-box' as const,
                   }}
                 />
               </div>
-              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' as const }}>
                 {[500, 1000, 2000, 5000].map(v => (
                   <button key={v} onClick={() => setDuelBet(v)} style={{
                     flex: 1, padding: '6px 0', borderRadius: '5px',
@@ -1360,35 +1534,100 @@ export function ChallengeModal({ onClose }: Props) {
                   }}>{v.toLocaleString()}</button>
                 ))}
               </div>
+              {duelBet > walletBal && (
+                <div style={{ fontSize: '11px', color: C.red, textAlign: 'center', fontFamily: 'Rajdhani, sans-serif' }}>
+                  ⚠ الرهان أكبر من رصيدك ({walletBal.toLocaleString()} د.ع)
+                </div>
+              )}
               <button
-                disabled={duelCreating}
+                disabled={duelCreating || duelBet > walletBal}
                 onClick={async () => {
+                  const uid = auth.currentUser?.uid;
+                  if (!uid) return;
                   setDuelCreating(true);
                   try {
-                    const uid = auth.currentUser?.uid ?? 'guest';
                     const r = await fetch('/api/game/duel/create', {
                       method: 'POST', headers: { 'Content-Type': 'application/json' },
                       body: JSON.stringify({ firebaseUid: uid, bet: duelBet }),
                     });
                     const data = await r.json();
-                    if (data.duelId) setDuelCode(data.duelId);
-                  } catch { /* ignore */ } finally { setDuelCreating(false); }
+                    if (!r.ok) { setDuelJoinErr(data.message ?? data.error ?? 'فشل الإنشاء'); return; }
+                    if (data.duelId) {
+                      setDuelCode(data.duelId);
+                      if (typeof data.walletBalance === 'number') setWalletBal(data.walletBalance);
+                    }
+                  } catch { setDuelJoinErr('خطأ في الاتصال'); }
+                  finally { setDuelCreating(false); }
                 }}
                 style={{
                   padding: '14px', borderRadius: '6px',
-                  background: duelCreating ? `${C.red}11` : `linear-gradient(135deg, ${C.red}33, ${C.red}18)`,
+                  background: (duelCreating || duelBet > walletBal) ? `${C.red}0d` : `linear-gradient(135deg, ${C.red}33, ${C.red}18)`,
                   border: `1.5px solid ${C.red}88`,
                   color: C.red, fontFamily: 'Orbitron, sans-serif',
                   fontSize: '13px', letterSpacing: '0.1em',
-                  cursor: duelCreating ? 'not-allowed' : 'pointer',
+                  cursor: (duelCreating || duelBet > walletBal) ? 'not-allowed' : 'pointer',
                   textShadow: neon(C.red, 6), boxShadow: neon(C.red, 5),
+                  transition: 'all 0.2s', opacity: duelBet > walletBal ? 0.5 : 1,
+                }}
+              >
+                {duelCreating ? '⏳ جاري الإنشاء...' : '🔗 أنشئ التحدي وادفع الرهان'}
+              </button>
+              {duelJoinErr && (
+                <div style={{ fontSize: '11px', color: C.red, textAlign: 'center', fontFamily: 'Rajdhani, sans-serif' }}>
+                  {duelJoinErr}
+                </div>
+              )}
+            </div>
+          ) : !duelCode && duelTab === 'join' ? (
+            <div style={{
+              width: '100%', maxWidth: '300px',
+              background: `${C.blue}0d`, border: `1px solid ${C.blue}33`,
+              borderRadius: '10px', padding: '20px 18px',
+              display: 'flex', flexDirection: 'column', gap: '14px',
+            }}>
+              <div style={{ fontSize: '10px', color: C.dim, textAlign: 'center' }}>
+                رصيدك: <span style={{ color: C.yellow }}>{walletBal.toLocaleString()} د.ع</span>
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                <label style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '11px', color: C.dim, letterSpacing: '0.08em' }}>
+                  رمز التحدي (6 أحرف)
+                </label>
+                <input
+                  type="text" maxLength={6} value={duelJoinCode}
+                  onChange={e => { setDuelJoinCode(e.target.value.toUpperCase()); setDuelJoinErr(''); }}
+                  placeholder="مثال: AB3XY7"
+                  style={{
+                    background: '#0a0f1c', border: `1px solid ${C.blue}44`,
+                    borderRadius: '6px', padding: '10px 14px',
+                    color: C.blue, fontFamily: 'Orbitron, sans-serif',
+                    fontSize: '20px', textAlign: 'center', outline: 'none',
+                    width: '100%', boxSizing: 'border-box' as const, letterSpacing: '0.22em',
+                  }}
+                />
+              </div>
+              {duelJoinErr && (
+                <div style={{ fontSize: '11px', color: C.red, textAlign: 'center', fontFamily: 'Rajdhani, sans-serif' }}>
+                  {duelJoinErr}
+                </div>
+              )}
+              <button
+                disabled={duelJoining || !duelJoinCode.trim()}
+                onClick={acceptDuel}
+                style={{
+                  padding: '14px', borderRadius: '6px',
+                  background: duelJoining ? `${C.blue}0d` : `linear-gradient(135deg, ${C.blue}33, ${C.blue}18)`,
+                  border: `1.5px solid ${C.blue}88`,
+                  color: C.blue, fontFamily: 'Orbitron, sans-serif',
+                  fontSize: '13px', letterSpacing: '0.1em',
+                  cursor: (duelJoining || !duelJoinCode.trim()) ? 'not-allowed' : 'pointer',
+                  textShadow: neon(C.blue, 6), boxShadow: neon(C.blue, 5),
                   transition: 'all 0.2s',
                 }}
               >
-                {duelCreating ? '⏳ جاري الإنشاء...' : '🔗 أنشئ رابط التحدي'}
+                {duelJoining ? '⏳ جاري الانضمام...' : '⚔ انضم وادفع الرهان'}
               </button>
             </div>
-          ) : (
+          ) : duelCode ? (
             <div style={{
               width: '100%', maxWidth: '300px',
               background: `${C.green}0d`, border: `1px solid ${C.green}44`,
@@ -1397,7 +1636,7 @@ export function ChallengeModal({ onClose }: Props) {
               textAlign: 'center',
             }}>
               <div style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '12px', color: C.dim }}>
-                رمز التحدي
+                رمز التحدي — شاركه مع خصمك
               </div>
               <div style={{
                 fontFamily: 'Orbitron, sans-serif', fontSize: '28px',
@@ -1406,13 +1645,13 @@ export function ChallengeModal({ onClose }: Props) {
               }}>{duelCode}</div>
               <div style={{ fontSize: '11px', color: C.dim }}>
                 الرهان: <span style={{ color: C.yellow }}>{duelBet.toLocaleString()} د.ع</span>
+                {'  '}<span style={{ color: C.dim, fontSize: '9px' }}>تم خصمه من رصيدك</span>
               </div>
               <button
                 onClick={() => {
-                  const link = `${window.location.origin}?duel=${duelCode}`;
-                  navigator.clipboard?.writeText(link).catch(() => {});
+                  navigator.clipboard?.writeText(duelCode).catch(() => {});
                   if (comboTimerRef.current) clearTimeout(comboTimerRef.current);
-                  setComboFlash('✅ تم نسخ الرابط!');
+                  setComboFlash('✅ تم نسخ الرمز!');
                   comboTimerRef.current = setTimeout(() => setComboFlash(null), 1800);
                 }}
                 style={{
@@ -1423,9 +1662,9 @@ export function ChallengeModal({ onClose }: Props) {
                   cursor: 'pointer', textShadow: neon(C.green, 5),
                 }}
               >
-                📋 انسخ رابط التحدي
+                📋 انسخ الرمز
               </button>
-              <button onClick={startGame} style={{
+              <button onClick={() => { activeDuelIdRef.current = duelCode; startGame(); }} style={{
                 padding: '14px', borderRadius: '6px',
                 background: `linear-gradient(135deg, ${C.yellow}22, ${C.yellow}11)`,
                 border: `1.5px solid ${C.yellow}88`,
@@ -1437,7 +1676,7 @@ export function ChallengeModal({ onClose }: Props) {
                 ▶ ابدأ وسجّل نتيجتك
               </button>
             </div>
-          )}
+          ) : null}
 
           <button onClick={() => setPhase('menu')} style={{
             background: 'transparent', border: 'none',
@@ -1555,7 +1794,7 @@ export function ChallengeModal({ onClose }: Props) {
             <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
               {profile && (
                 <div style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '11px', color: C.yellow, background: `${C.yellow}11`, border: `1px solid ${C.yellow}33`, padding: '3px 9px', borderRadius: '20px' }}>
-                  💰 {(walletBal > 0 ? walletBal : profile.gameCash).toLocaleString()} د.ع
+                  💰 {walletBal.toLocaleString()} د.ع
                 </div>
               )}
               <button onClick={() => setPhase('menu')} style={{ background: 'transparent', border: 'none', color: C.dim, fontSize: '12px', cursor: 'pointer', fontFamily: 'Orbitron, sans-serif' }}>← رجوع</button>
@@ -1595,9 +1834,9 @@ export function ChallengeModal({ onClose }: Props) {
               <div style={{ width: '1px', height: '28px', background: C.border }} />
               <div style={{ flex: 1, textAlign: 'center' }}>
                 <div style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '17px', color: C.yellow, textShadow: neon(C.yellow, 5) }}>
-                  {(walletBal > 0 ? walletBal : profile.gameCash).toLocaleString()}
+                  {walletBal.toLocaleString()}
                 </div>
-                <div style={{ fontSize: '9px', color: C.dim, marginTop: '2px' }}>{walletBal > 0 ? 'رصيد المحفظة' : 'رصيد اللعبة'}</div>
+                <div style={{ fontSize: '9px', color: C.dim, marginTop: '2px' }}>رصيد المحفظة</div>
               </div>
               <div style={{ width: '1px', height: '28px', background: C.border }} />
               <button onClick={redeemPoints} disabled={redeeming || profile.gamePoints < 5000} style={{
@@ -1630,7 +1869,7 @@ export function ChallengeModal({ onClose }: Props) {
                 {(dynSkins.length > 0 ? dynSkins : SKINS).map(skin => {
                   const owned  = profile?.unlockedSkins?.includes(skin.id) ?? false;
                   const active = profile?.activeSkin === skin.id;
-                  const canBuy = (walletBal > 0 ? walletBal : (profile?.gameCash ?? 0)) >= skin.price;
+                  const canBuy = walletBal >= skin.price;
                   const buying = shopBuying === skin.id;
                   return (
                     <div key={skin.id} style={{
@@ -1694,7 +1933,7 @@ export function ChallengeModal({ onClose }: Props) {
                     const lvl      = upg.level;
                     const maxed    = lvl >= MAX_UPG_LEVEL;
                     const cost     = maxed ? 0 : UPGRADE_COSTS[upg.key][lvl - 1];
-                    const balance  = walletBal > 0 ? walletBal : (profile?.gameCash ?? 0);
+                    const balance  = walletBal;
                     const canAfford = !maxed && balance >= cost;
                     const isUpgrading = upgrading === upg.key;
 

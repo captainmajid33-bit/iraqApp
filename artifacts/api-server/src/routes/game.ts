@@ -740,35 +740,127 @@ router.post("/game/shop/upgrade", async (req: Request, res: Response) => {
   }
 });
 
-// ── Friendly Duels (UI prep — in-memory, cleared on restart) ─────────────────
-const duelRooms = new Map<string, { creatorId: string; bet: number; createdAt: number }>();
+// ── Friendly Duels — wallet-locked matchmaking ───────────────────────────────
+interface DuelRoom {
+  creatorId:     string;
+  creatorDbId:   number;
+  joinerId?:     string;
+  joinerDbId?:   number;
+  bet:           number;
+  createdAt:     number;
+  status:        'waiting' | 'active' | 'done';
+  creatorScore?: number;
+  joinerScore?:  number;
+}
+const duelRooms = new Map<string, DuelRoom>();
 
+// Helper: look up DB user by Firebase UID
+async function getDuelWalletUser(firebaseUid: string) {
+  const [u] = await db
+    .select({ id: usersTable.id, balance: usersTable.balance })
+    .from(usersTable)
+    .where(eq(usersTable.firebaseUid, firebaseUid));
+  return u ?? null;
+}
+
+// POST /api/game/duel/create — deducts bet from creator, returns duelId
 router.post("/game/duel/create", async (req: Request, res: Response) => {
+  const { firebaseUid, bet } = req.body as { firebaseUid?: string; bet?: number };
+  if (!firebaseUid || typeof bet !== 'number' || bet < 100) {
+    res.status(400).json({ error: "invalid_params" }); return;
+  }
   try {
-    const { firebaseUid, bet } = req.body as { firebaseUid?: string; bet?: number };
-    if (!firebaseUid || typeof bet !== 'number' || bet < 100) {
-      res.status(400).json({ error: "invalid_params" }); return;
+    const walletUser = await getDuelWalletUser(firebaseUid);
+    if (!walletUser) {
+      res.status(400).json({ error: "wallet_not_linked", message: "المحفظة غير مربوطة — سجّل الدخول أولاً" }); return;
     }
-    // Generate a short human-readable code (6 uppercase alphanum chars)
-    const chars  = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-    let duelId   = '';
+    if (walletUser.balance < bet) {
+      res.status(400).json({ error: "insufficient_balance", walletBalance: walletUser.balance,
+        message: `رصيدك ${walletUser.balance.toLocaleString()} د.ع — المطلوب ${bet.toLocaleString()} د.ع` }); return;
+    }
+    await db.update(usersTable).set({ balance: walletUser.balance - bet }).where(eq(usersTable.id, walletUser.id));
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    let duelId  = '';
     for (let i = 0; i < 6; i++) duelId += chars[Math.floor(Math.random() * chars.length)];
-    duelRooms.set(duelId, { creatorId: firebaseUid, bet, createdAt: Date.now() });
-    // Clean rooms older than 24h
     const cutoff = Date.now() - 86_400_000;
     for (const [k, v] of duelRooms) if (v.createdAt < cutoff) duelRooms.delete(k);
-    res.json({ duelId, bet });
+    duelRooms.set(duelId, { creatorId: firebaseUid, creatorDbId: walletUser.id, bet, createdAt: Date.now(), status: 'waiting' });
+    res.json({ duelId, bet, walletBalance: walletUser.balance - bet });
   } catch (err) {
     req.log.error({ err }, "duel create error");
     res.status(500).json({ error: "internal" });
   }
 });
 
+// GET /api/game/duel/:duelId — get room info
 router.get("/game/duel/:duelId", async (req: Request, res: Response) => {
   const duelId = (req.params.duelId ?? '').toUpperCase();
   const room   = duelRooms.get(duelId);
   if (!room) { res.status(404).json({ error: "not_found" }); return; }
-  res.json({ duelId, ...room });
+  res.json({ duelId, bet: room.bet, status: room.status, hasJoiner: !!room.joinerId });
+});
+
+// POST /api/game/duel/accept — joiner pays bet and activates room
+router.post("/game/duel/accept", async (req: Request, res: Response) => {
+  const { firebaseUid, duelId } = req.body as { firebaseUid?: string; duelId?: string };
+  if (!firebaseUid || !duelId) { res.status(400).json({ error: "invalid_params" }); return; }
+  const roomKey = duelId.toUpperCase();
+  const room    = duelRooms.get(roomKey);
+  if (!room)                            { res.status(404).json({ error: "not_found" }); return; }
+  if (room.status !== 'waiting')        { res.status(400).json({ error: "duel_not_waiting", message: "التحدي بدأ أو انتهى بالفعل" }); return; }
+  if (room.creatorId === firebaseUid)   { res.status(400).json({ error: "cannot_join_own_duel", message: "لا يمكنك الانضمام لتحديك الخاص" }); return; }
+  try {
+    const walletUser = await getDuelWalletUser(firebaseUid);
+    if (!walletUser) { res.status(400).json({ error: "wallet_not_linked", message: "المحفظة غير مربوطة" }); return; }
+    if (walletUser.balance < room.bet) {
+      res.status(400).json({ error: "insufficient_balance", walletBalance: walletUser.balance,
+        message: `رصيدك ${walletUser.balance.toLocaleString()} د.ع — المطلوب ${room.bet.toLocaleString()} د.ع` }); return;
+    }
+    await db.update(usersTable).set({ balance: walletUser.balance - room.bet }).where(eq(usersTable.id, walletUser.id));
+    room.joinerId   = firebaseUid;
+    room.joinerDbId = walletUser.id;
+    room.status     = 'active';
+    res.json({ duelId: roomKey, bet: room.bet, walletBalance: walletUser.balance - room.bet });
+  } catch (err) {
+    req.log.error({ err }, "duel accept error");
+    res.status(500).json({ error: "internal" });
+  }
+});
+
+// POST /api/game/duel/score — submit score; pays winner when both submitted
+router.post("/game/duel/score", async (req: Request, res: Response) => {
+  const { firebaseUid, duelId, score } = req.body as { firebaseUid?: string; duelId?: string; score?: number };
+  if (!firebaseUid || !duelId || typeof score !== 'number') {
+    res.status(400).json({ error: "invalid_params" }); return;
+  }
+  const roomKey = duelId.toUpperCase();
+  const room    = duelRooms.get(roomKey);
+  if (!room) { res.status(404).json({ error: "not_found" }); return; }
+  if (room.status === 'done') { res.json({ done: true, alreadyPaid: true }); return; }
+
+  let isCreator = false;
+  if      (room.creatorId === firebaseUid) { room.creatorScore = score; isCreator = true; }
+  else if (room.joinerId  === firebaseUid) { room.joinerScore  = score; }
+  else { res.status(403).json({ error: "not_in_duel" }); return; }
+
+  if (room.creatorScore !== undefined && room.joinerScore !== undefined) {
+    const creatorWon  = room.creatorScore >= room.joinerScore;
+    const winnerDbId  = creatorWon ? room.creatorDbId : room.joinerDbId!;
+    const winnerScore = Math.max(room.creatorScore, room.joinerScore);
+    const loserScore  = Math.min(room.creatorScore, room.joinerScore);
+    const prize       = room.bet * 2;
+    try {
+      await db.update(usersTable).set({ balance: sql`balance + ${prize}` }).where(eq(usersTable.id, winnerDbId));
+      room.status = 'done';
+      const youWon = (isCreator && creatorWon) || (!isCreator && !creatorWon);
+      res.json({ done: true, youWon, winnerScore, loserScore, prize });
+    } catch (err) {
+      req.log.error({ err }, "duel payout error");
+      res.status(500).json({ error: "payout_failed" });
+    }
+  } else {
+    res.json({ done: false, waiting: true, submitted: isCreator ? 'creator' : 'joiner' });
+  }
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
