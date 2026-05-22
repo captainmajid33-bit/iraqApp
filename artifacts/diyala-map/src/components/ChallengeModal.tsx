@@ -128,6 +128,9 @@ const MAGNET_RAD    = 165; // magnet attraction radius (px)
 const MAGNET_DUR    = 5000;// magnet duration (ms)
 const DIFF_INTERVAL = 15000;// ms between difficulty steps
 const DIFF_BOOST    = 0.10; // 10% speed increase per step
+const JUMP_VEL         = -17;   // initial upward velocity (px/frame, negative = up)
+const DOUBLE_JUMP_VEL  = -13;   // second jump initial velocity
+const JUMP_GRAVITY     = 0.82;  // gravity applied each frame (px/frame²)
 
 // ── Upgrade tables (indexed by level-1) ──────────────────────────────────────
 const MAGNET_DUR_LVL  = [5000, 7500, 11000, 16000, 23000]; // ms per magnet level
@@ -507,10 +510,20 @@ export function ChallengeModal({ onClose }: Props) {
     const BASE_X   = Math.round(W * 0.16);
     const MAX_X    = Math.round(W * 0.60);
     const GROUND_Y = Math.round(H * 0.74);
-    const LANE_Y   = [GROUND_Y - 100, GROUND_Y - 50, GROUND_Y] as [number, number, number];
-    if (g.charLaneY === 0) g.charLaneY = LANE_Y[g.charLane]; // first-frame init
-    g.charLaneY += (LANE_Y[g.charLane] - g.charLaneY) * 0.22;
-    const charDrawY = Math.round(g.charLaneY);
+    const LANE_Y   = [GROUND_Y - 110, GROUND_Y - 55, GROUND_Y] as [number, number, number];
+    const BASE_Y   = LANE_Y[2]; // character always anchored to ground lane
+
+    // ── Jump physics (gravity arc) ───────────────────────────────────────────
+    if (g.jumpYOffset < 0 || g.jumpVelY < 0) {
+      g.jumpVelY   += JUMP_GRAVITY;
+      g.jumpYOffset += g.jumpVelY;
+      if (g.jumpYOffset >= 0) {
+        g.jumpYOffset = 0;
+        g.jumpVelY   = 0;
+        g.jumpCount  = 0; // reset jumps on landing
+      }
+    }
+    const charDrawY = Math.round(BASE_Y + g.jumpYOffset);
 
     // ── Horizontal rush ───────────────────────────────────────────────────────
     if (g.pressing === 'right') {
@@ -823,25 +836,45 @@ export function ChallengeModal({ onClose }: Props) {
 
     // Character (flashes when invincible)
     const rushing      = g.pressing === 'right';
+    const airborne     = g.jumpYOffset < -6;
     const isInvincible = g.invincible > Date.now();
     const charVisible  = !isInvincible || (Math.floor(ts / 110) % 2 === 0);
     if (charVisible) {
       ctx.save();
-      ctx.shadowColor = isInvincible ? '#ff2d7888' : rushing ? '#00d4ff88' : '#00f5d455';
-      ctx.shadowBlur  = rushing ? 22 : 12;
+      ctx.shadowColor = isInvincible ? '#ff2d7888'
+                      : airborne     ? '#f5c51888'
+                      : rushing      ? '#00d4ff88'
+                      :                '#00f5d455';
+      ctx.shadowBlur  = airborne ? 20 : rushing ? 22 : 12;
       ctx.globalAlpha = isInvincible ? 0.65 : 1;
       if (charImgRef.current) {
-        if (rushing) {
+        if (rushing || airborne) {
+          ctx.save();
           ctx.translate(g.charX + CHAR_W / 2, 0);
           ctx.scale(-1, 1);
           ctx.drawImage(charImgRef.current, -CHAR_W / 2, charDrawY - CHAR_H / 2, CHAR_W, CHAR_H);
+          ctx.restore();
         } else {
           ctx.drawImage(charImgRef.current, g.charX - CHAR_W / 2, charDrawY - CHAR_H / 2, CHAR_W, CHAR_H);
         }
       } else {
         ctx.font = '44px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-        ctx.fillText(rushing ? '🏃' : '🧍', g.charX, charDrawY);
+        const emoji = airborne ? (g.jumpCount >= 2 ? '🦋' : '🦅') : rushing ? '🏃' : '🧍';
+        ctx.fillText(emoji, g.charX, charDrawY);
       }
+      ctx.restore();
+    }
+
+    // Jump arc shadow (ellipse on ground when airborne)
+    if (airborne) {
+      ctx.save();
+      const shadowY   = BASE_Y + 4;
+      const shadowAmt = Math.max(0, 1 + g.jumpYOffset / 110); // fade as rising
+      ctx.globalAlpha = shadowAmt * 0.30;
+      const shG = ctx.createRadialGradient(g.charX, shadowY, 0, g.charX, shadowY, CHAR_W * 0.75);
+      shG.addColorStop(0, '#f5c51866'); shG.addColorStop(1, 'transparent');
+      ctx.fillStyle = shG;
+      ctx.fillRect(g.charX - CHAR_W, shadowY - 5, CHAR_W * 2, 10);
       ctx.restore();
     }
 
@@ -865,14 +898,16 @@ export function ChallengeModal({ onClose }: Props) {
       ctx.restore();
     }
 
-    // ── Lane indicator dots (top-right) ─────────────────────────────────────
-    for (let li = 0; li < 3; li++) {
+    // ── Jump charge indicator (top-right: 2 triangles = available jumps) ────
+    for (let ji = 0; ji < 2; ji++) {
+      const used = ji < g.jumpCount; // used = grayed out
       ctx.save();
-      ctx.globalAlpha = li === g.charLane ? 0.55 : 0.12;
-      ctx.fillStyle   = li === g.charLane ? '#00f5d4' : '#ffffff';
-      ctx.shadowColor = li === g.charLane ? '#00f5d4cc' : 'transparent';
-      ctx.shadowBlur  = li === g.charLane ? 6 : 0;
-      ctx.beginPath(); ctx.arc(W - 14, 14 + li * 16, 4, 0, Math.PI * 2); ctx.fill();
+      ctx.globalAlpha = used ? 0.14 : 0.82;
+      ctx.fillStyle   = used ? '#555' : '#f5c518';
+      ctx.shadowColor = used ? 'transparent' : '#f5c518cc';
+      ctx.shadowBlur  = used ? 0 : 9;
+      ctx.font = '13px sans-serif'; ctx.textAlign = 'right'; ctx.textBaseline = 'top';
+      ctx.fillText('▲', W - 8, 8 + ji * 17);
       ctx.restore();
     }
   }, [endGame]);
@@ -1007,8 +1042,22 @@ export function ChallengeModal({ onClose }: Props) {
   const pressLeft  = useCallback(() => { gs.current.pressing = 'left';  }, []);
   const pressRight = useCallback(() => { gs.current.pressing = 'right'; }, []);
   const pressStop  = useCallback(() => { gs.current.pressing = null;     }, []);
-  const laneUp     = useCallback(() => { gs.current.charLane = Math.max(0, gs.current.charLane - 1); }, []);
-  const laneDown   = useCallback(() => { gs.current.charLane = Math.min(2, gs.current.charLane + 1); }, []);
+  const triggerJump = useCallback(() => {
+    const g   = gs.current;
+    const now = Date.now();
+    const isDouble = now - lastTapTsRef.current < 320 && g.jumpCount === 1;
+    lastTapTsRef.current = now;
+    if (isDouble) {
+      // Double jump — give a fresh upward boost in mid-air
+      g.jumpVelY   = DOUBLE_JUMP_VEL;
+      g.jumpCount  = 2;
+    } else if (g.jumpCount === 0) {
+      // First jump from ground
+      g.jumpVelY    = JUMP_VEL;
+      g.jumpYOffset = -1; // nudge off ground so physics starts
+      g.jumpCount   = 1;
+    }
+  }, []);
 
   const acceptDuel = useCallback(async () => {
     const uid = auth.currentUser?.uid;
@@ -1322,36 +1371,45 @@ export function ChallengeModal({ onClose }: Props) {
               fontFamily: 'Orbitron, sans-serif', fontSize: '10px',
               color: 'rgba(0,212,255,0.40)', letterSpacing: '0.06em',
             }}>
-              اضغط أعلى ← مسار علوي  •  وسط ← انطلاق  •  أسفل ← مسار سفلي 🏃
+              اضغط سريعاً ← قفز  •  اضغط مرتين ← قفزة مزدوجة  •  اضغط مطوّلاً ← انطلاق 🏃
             </div>
           )}
 
           <canvas
             ref={canvasRef}
-            onMouseDown={e => {
-              const canvas = canvasRef.current;
-              if (!canvas) { gs.current.pressing = 'right'; return; }
-              const rect = canvas.getBoundingClientRect();
-              const relY = (e.clientY - rect.top) / rect.height;
-              if      (relY < 0.32) laneUp();
-              else if (relY > 0.68) laneDown();
-              else gs.current.pressing = 'right';
+            onMouseDown={() => {
+              touchStartTsRef.current = Date.now();
+              if (holdTimerRef.current) clearTimeout(holdTimerRef.current);
+              holdTimerRef.current = setTimeout(() => { gs.current.pressing = 'right'; }, 180);
             }}
-            onMouseUp={() => { gs.current.pressing = null; }}
-            onMouseLeave={() => { gs.current.pressing = null; }}
+            onMouseUp={() => {
+              const dur = Date.now() - touchStartTsRef.current;
+              if (holdTimerRef.current) { clearTimeout(holdTimerRef.current); holdTimerRef.current = null; }
+              gs.current.pressing = null;
+              if (dur < 180) triggerJump();
+            }}
+            onMouseLeave={() => {
+              if (holdTimerRef.current) { clearTimeout(holdTimerRef.current); holdTimerRef.current = null; }
+              gs.current.pressing = null;
+            }}
             onTouchStart={e => {
               e.preventDefault();
-              const canvas = canvasRef.current;
-              if (!canvas) { gs.current.pressing = 'right'; return; }
-              const rect  = canvas.getBoundingClientRect();
-              const touch = e.touches[0];
-              const relY  = (touch.clientY - rect.top) / rect.height;
-              if      (relY < 0.32) laneUp();
-              else if (relY > 0.68) laneDown();
-              else gs.current.pressing = 'right';
+              touchStartTsRef.current = Date.now();
+              if (holdTimerRef.current) clearTimeout(holdTimerRef.current);
+              holdTimerRef.current = setTimeout(() => { gs.current.pressing = 'right'; }, 180);
             }}
-            onTouchEnd={e => { e.preventDefault(); gs.current.pressing = null; }}
-            onTouchCancel={e => { e.preventDefault(); gs.current.pressing = null; }}
+            onTouchEnd={e => {
+              e.preventDefault();
+              const dur = Date.now() - touchStartTsRef.current;
+              if (holdTimerRef.current) { clearTimeout(holdTimerRef.current); holdTimerRef.current = null; }
+              gs.current.pressing = null;
+              if (dur < 180) triggerJump();
+            }}
+            onTouchCancel={e => {
+              e.preventDefault();
+              if (holdTimerRef.current) { clearTimeout(holdTimerRef.current); holdTimerRef.current = null; }
+              gs.current.pressing = null;
+            }}
             style={{
               flex: 1, width: '100%', display: 'block',
               touchAction: 'none', cursor: 'pointer',
