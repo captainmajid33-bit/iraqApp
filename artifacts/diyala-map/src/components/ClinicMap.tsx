@@ -2810,18 +2810,18 @@ export function ClinicMap({
 
     if (agentPhones === null && driverPhones === null)
       return { phones: null, source: 'REST-only (both gates null)' };
-    if (driverPhones === null)
-      return { phones: agentPhones, source: 'approved_agents only' };
-    if (agentPhones === null)
-      return { phones: driverPhones, source: 'drivers col only' };
 
-    // Both available → INTERSECTION (must pass both gates)
-    const intersection = new Set<string>();
-    agentPhones.forEach(p => { if (driverPhones.has(p)) intersection.add(p); });
-    return {
-      phones: intersection,
-      source: `intersection (${agentPhones.size}×${driverPhones.size}→${intersection.size})`,
-    };
+    // ── drivers collection is the authoritative source (partner app writes here directly).
+    // If it has online/available drivers, use it as-is — no cross-check needed.
+    if (driverPhones !== null && driverPhones.size > 0)
+      return { phones: driverPhones, source: `drivers col (${driverPhones.size})` };
+
+    // drivers col is empty/null → fall back to approved_agents
+    if (agentPhones !== null && agentPhones.size > 0)
+      return { phones: agentPhones, source: `approved_agents fallback (${agentPhones.size})` };
+
+    // Both empty sets (not null) → no online drivers confirmed by either gate
+    return { phones: new Set<string>(), source: 'both gates empty' };
   }, []);
 
   // ── Sync Firestore order doc — called after REST/SSE status change ─────────
