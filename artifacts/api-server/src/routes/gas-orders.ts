@@ -1,4 +1,5 @@
 import { Router, type IRouter } from "express";
+import { sql } from "drizzle-orm";
 import { db } from "@workspace/db";
 import { gasOrdersTable, insertGasOrderSchema, gasOrderMessagesTable, insertGasOrderMessageSchema } from "@workspace/db";
 import { and, eq, desc, asc } from "drizzle-orm";
@@ -6,6 +7,29 @@ import { requireAdmin } from "./admin";
 import { broadcastGasOrderUpdate, broadcastGasNewMessage } from "../lib/sse";
 
 const router: IRouter = Router();
+
+// ── Auth helper ───────────────────────────────────────────────────────────────
+function isAuthorised(req: any): boolean {
+  const partnerKey  = req.headers["x-partner-key"]    as string | undefined;
+  const merchantKey = req.headers["x-merchant-key"]   as string | undefined;
+  const adminPass   = req.headers["x-admin-password"] as string | undefined;
+  return (
+    adminPass === process.env.ADMIN_PASSWORD ||
+    adminPass === "Admin2026" ||
+    !!partnerKey || !!merchantKey
+  );
+}
+
+// ── Resolve agentId from request (body.agentId → header key → "unknown") ─────
+function resolveAgentId(req: any): string {
+  return String(
+    req.body?.agentId ??
+    req.body?.uid ??
+    req.headers["x-partner-key"] ??
+    req.headers["x-merchant-key"] ??
+    "unknown"
+  );
+}
 
 // ── System message helper ─────────────────────────────────────────────────────
 const STATUS_MESSAGES: Record<string, string> = {
@@ -36,7 +60,7 @@ async function insertSystemMsg(gasOrderId: number, content: string) {
   }
 }
 
-// ── Haversine distance (km) between two lat/lng points ───────────────────────
+// ── Haversine distance (km) ───────────────────────────────────────────────────
 function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): number {
   const R = 6371;
   const dLat = (lat2 - lat1) * Math.PI / 180;
@@ -48,8 +72,7 @@ function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): nu
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-// ── POST /api/gas-orders — public: create order, broadcast to ALL agents ──────
-// Broadcast includes lat/lng so each agent can filter by distance client-side.
+// ── POST /api/gas-orders — public: create order ───────────────────────────────
 router.post("/gas-orders", async (req, res) => {
   try {
     const parsed = insertGasOrderSchema.safeParse(req.body);
@@ -61,12 +84,12 @@ router.post("/gas-orders", async (req, res) => {
     console.log(
       `[POST /gas-orders] #${order.id} | user:${parsed.data.userName ?? "?"} | phone:${parsed.data.phone} | lat:${order.lat} lng:${order.lng}`
     );
-    // Broadcast includes lat/lng → agents filter by distance on their side
     broadcastGasOrderUpdate({
       id: order.id, status: order.status,
       userName: order.userName, phone: order.phone,
       locationAddress: order.locationAddress,
       lat: order.lat, lng: order.lng,
+      declinedByAgents: order.declinedByAgents ?? [],
     });
     res.status(201).json({ ok: true, orderId: order.id });
   } catch (err: any) {
@@ -76,34 +99,22 @@ router.post("/gas-orders", async (req, res) => {
 });
 
 // ── GET /api/gas-orders/pending — agents only ─────────────────────────────────
-// Supports geo-filtering: ?lat=X&lng=Y&radiusKm=3 (default 3 km).
-// If lat+lng provided → only returns orders within radius of the agent's position.
-// Without lat/lng → returns all pending (for admin dashboards).
+// Supports:
+//   ?lat=X&lng=Y&radiusKm=3  — geo-filter (default 3 km)
+//   ?agentId=xxx             — exclude orders already declined by this agent
 //
-// Partner app usage:
-//   GET /api/gas-orders/pending?lat=33.748&lng=44.622
-//   Header: x-partner-key: <key>
-//   → returns only orders within 3 km of the agent
-//
-// For real-time stream: listen to SSE event 'gas_order_update'.
-// Each event includes { order: { id, status, lat, lng, ... } }.
-// Agent app should compute haversineKm(agentLat, agentLng, order.lat, order.lng)
-// and only show the order if distance ≤ radiusKm (3 by default).
+// SSE clients (partner hub) receive real-time 'gas_order_update' events that
+// include declinedByAgents[].  The agent app MUST also filter client-side:
+//   if (order.declinedByAgents.includes(myAgentId)) skip;
 router.get("/gas-orders/pending", async (req, res) => {
-  const partnerKey  = req.headers["x-partner-key"]    as string | undefined;
-  const merchantKey = req.headers["x-merchant-key"]   as string | undefined;
-  const adminPass   = req.headers["x-admin-password"] as string | undefined;
-  const valid =
-    adminPass === process.env.ADMIN_PASSWORD ||
-    adminPass === "Admin2026" ||
-    !!partnerKey || !!merchantKey;
-  if (!valid) { res.status(403).json({ error: "غير مصرح" }); return; }
+  if (!isAuthorised(req)) { res.status(403).json({ error: "غير مصرح" }); return; }
 
-  // Optional geo params
-  const agentLat  = req.query.lat       ? Number(req.query.lat)      : null;
-  const agentLng  = req.query.lng       ? Number(req.query.lng)      : null;
-  const radiusKm  = req.query.radiusKm  ? Number(req.query.radiusKm) : 3;
-  // Only apply geo-filter when coordinates are valid AND non-zero (0,0 = no GPS fix yet)
+  const agentLat  = req.query.lat      ? Number(req.query.lat)      : null;
+  const agentLng  = req.query.lng      ? Number(req.query.lng)      : null;
+  const radiusKm  = req.query.radiusKm ? Number(req.query.radiusKm) : 3;
+  const agentId   = typeof req.query.agentId === "string" && req.query.agentId.trim()
+    ? req.query.agentId.trim() : null;
+
   const geoFilter = agentLat !== null && agentLng !== null &&
                     Number.isFinite(agentLat) && Number.isFinite(agentLng) &&
                     (Math.abs(agentLat) > 0.001 || Math.abs(agentLng) > 0.001);
@@ -115,17 +126,24 @@ router.get("/gas-orders/pending", async (req, res) => {
       .where(eq(gasOrdersTable.status, "pending"))
       .orderBy(desc(gasOrdersTable.createdAt));
 
-    // Apply distance filter when agent location is provided
-    const filtered = geoFilter
+    let filtered = geoFilter
       ? rows.filter(r => {
-          if (r.lat === null || r.lng === null) return true; // no customer coords → include
+          if (r.lat === null || r.lng === null) return true;
           return haversineKm(agentLat!, agentLng!, r.lat, r.lng) <= radiusKm;
         })
       : rows;
 
-    if (geoFilter) {
+    // Exclude orders this agent already declined
+    if (agentId) {
+      filtered = filtered.filter(r => {
+        const declined = r.declinedByAgents ?? [];
+        return !declined.includes(agentId);
+      });
+    }
+
+    if (geoFilter || agentId) {
       console.log(
-        `[GET /gas-orders/pending] geo-filter: agent(${agentLat},${agentLng}) r=${radiusKm}km → ${filtered.length}/${rows.length} orders`
+        `[GET /gas-orders/pending] geo=${geoFilter ? `(${agentLat},${agentLng}) r=${radiusKm}km` : "off"} agentId=${agentId ?? "none"} → ${filtered.length}/${rows.length}`
       );
     }
 
@@ -136,9 +154,7 @@ router.get("/gas-orders/pending", async (req, res) => {
   }
 });
 
-// ── POST /api/gas-orders/:id/cancel — PUBLIC: customer cancels their own order ─
-// No auth required — orderId itself serves as the access token.
-// Only works when status is still 'pending' (not accepted/done).
+// ── POST /api/gas-orders/:id/cancel — PUBLIC: customer cancels ───────────────
 router.post("/gas-orders/:id/cancel", async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) { res.status(400).json({ error: "id غير صالح" }); return; }
@@ -151,7 +167,6 @@ router.post("/gas-orders/:id/cancel", async (req, res) => {
 
     if (!order) { res.status(404).json({ error: "الطلب غير موجود" }); return; }
 
-    // Allow cancel only while pending (not already accepted / done)
     const CANCELLABLE = new Set(["pending", "accepted"]);
     if (!CANCELLABLE.has(order.status)) {
       res.status(409).json({ error: "لا يمكن إلغاء هذا الطلب في وضعه الحالي" }); return;
@@ -166,7 +181,7 @@ router.post("/gas-orders/:id/cancel", async (req, res) => {
     if (!updated) { res.status(404).json({ error: "الطلب غير موجود" }); return; }
 
     console.log(`[CANCEL /gas-orders/${id}] customer cancelled`);
-    broadcastGasOrderUpdate({ id: updated.id, status: updated.status, agentId: updated.agentId });
+    broadcastGasOrderUpdate({ id: updated.id, status: updated.status, agentId: updated.agentId, declinedByAgents: updated.declinedByAgents ?? [] });
     void insertSystemMsg(id, STATUS_MESSAGES.cancelled);
     res.json({ ok: true });
   } catch (err: any) {
@@ -175,8 +190,7 @@ router.post("/gas-orders/:id/cancel", async (req, res) => {
   }
 });
 
-// ── DELETE /api/gas-orders/:id — PUBLIC: customer permanently deletes their order ─
-// Broadcasts 'cancelled' SSE first so agent removes it from live list, then hard-deletes.
+// ── DELETE /api/gas-orders/:id — PUBLIC: customer permanently deletes ─────────
 router.delete("/gas-orders/:id", async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id) || id <= 0) { res.status(400).json({ error: "id غير صالح" }); return; }
@@ -189,10 +203,7 @@ router.delete("/gas-orders/:id", async (req, res) => {
 
     if (!order) { res.status(404).json({ error: "الطلب غير موجود" }); return; }
 
-    // 1) Broadcast cancellation so agent's live stream removes the order immediately
-    broadcastGasOrderUpdate({ id, status: "cancelled", agentId: order.agentId ?? null });
-
-    // 2) Hard-delete from DB
+    broadcastGasOrderUpdate({ id, status: "cancelled", agentId: order.agentId ?? null, declinedByAgents: [] });
     await db.delete(gasOrdersTable).where(eq(gasOrdersTable.id, id));
 
     console.log(`[DELETE /gas-orders/${id}] permanently deleted by customer`);
@@ -203,30 +214,74 @@ router.delete("/gas-orders/:id", async (req, res) => {
   }
 });
 
-// ── POST /api/gas-orders/:id/accept — atomic first-claim (no race condition) ──
-// Conditional UPDATE on status='pending' — PostgreSQL serialises concurrent
-// UPDATEs on the same row; second caller gets 0 rows → 409.
-router.post("/gas-orders/:id/accept", async (req, res) => {
-  const partnerKey  = req.headers["x-partner-key"]    as string | undefined;
-  const merchantKey = req.headers["x-merchant-key"]   as string | undefined;
-  const adminPass   = req.headers["x-admin-password"] as string | undefined;
-  const valid =
-    adminPass === process.env.ADMIN_PASSWORD ||
-    adminPass === "Admin2026" ||
-    !!partnerKey || !!merchantKey;
-  if (!valid) { res.status(403).json({ error: "غير مصرح" }); return; }
+// ── POST /api/gas-orders/:id/reject — agent: decline without cancelling ───────
+// ▸ Appends agentId to declinedByAgents[] — order stays 'pending'.
+// ▸ SSE broadcasts updated declinedByAgents so partner hub hides it only for
+//   this agent; all other agents in range still see and can accept it.
+// ▸ Customer sees NO change — their screen stays in "awaiting" mode.
+router.post("/gas-orders/:id/reject", async (req, res) => {
+  if (!isAuthorised(req)) { res.status(403).json({ error: "غير مصرح" }); return; }
 
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) { res.status(400).json({ error: "id غير صالح" }); return; }
 
-  const agentId = String(req.body?.agentId ?? partnerKey ?? merchantKey ?? "unknown");
+  const agentId = resolveAgentId(req);
 
-  // Optional: agent provides their location for distance validation
+  try {
+    const [order] = await db
+      .select({ status: gasOrdersTable.status, declinedByAgents: gasOrdersTable.declinedByAgents })
+      .from(gasOrdersTable)
+      .where(eq(gasOrdersTable.id, id));
+
+    if (!order) { res.status(404).json({ error: "الطلب غير موجود" }); return; }
+    if (order.status !== "pending") {
+      // Already accepted / completed — nothing to decline
+      res.status(409).json({ error: "الطلب لم يعد معلقاً" }); return;
+    }
+
+    // Append agentId to declined_by_agents array (PostgreSQL array_append)
+    const [updated] = await db
+      .update(gasOrdersTable)
+      .set({
+        declinedByAgents: sql`array_append(declined_by_agents, ${agentId}::text)`,
+      })
+      .where(and(eq(gasOrdersTable.id, id), eq(gasOrdersTable.status, "pending")))
+      .returning();
+
+    if (!updated) { res.status(404).json({ error: "الطلب غير موجود أو لم يعد معلقاً" }); return; }
+
+    console.log(`[REJECT /gas-orders/${id}] agent=${agentId} declined — order stays pending. declined=[${(updated.declinedByAgents ?? []).join(",")}]`);
+
+    // Broadcast the updated declinedByAgents list — partner hub hides order
+    // only for the declining agent; customers and other agents are unaffected.
+    broadcastGasOrderUpdate({
+      id:               updated.id,
+      status:           updated.status,           // still 'pending'
+      agentId:          updated.agentId,
+      declinedByAgents: updated.declinedByAgents ?? [],
+      lat:              updated.lat,
+      lng:              updated.lng,
+    });
+
+    res.json({ ok: true, declinedByAgents: updated.declinedByAgents ?? [] });
+  } catch (err: any) {
+    console.error(`[REJECT /gas-orders/${id}] error:`, err);
+    res.status(500).json({ error: "فشل رفض الطلب", detail: err?.message });
+  }
+});
+
+// ── POST /api/gas-orders/:id/accept — atomic first-claim ─────────────────────
+router.post("/gas-orders/:id/accept", async (req, res) => {
+  if (!isAuthorised(req)) { res.status(403).json({ error: "غير مصرح" }); return; }
+
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) { res.status(400).json({ error: "id غير صالح" }); return; }
+
+  const agentId  = resolveAgentId(req);
   const agentLat = req.body?.agentLat ? Number(req.body.agentLat) : null;
   const agentLng = req.body?.agentLng ? Number(req.body.agentLng) : null;
 
   try {
-    // Distance guard — prevent an out-of-range agent from accepting
     if (agentLat !== null && agentLng !== null && Number.isFinite(agentLat) && Number.isFinite(agentLng)) {
       const [order] = await db
         .select({ lat: gasOrdersTable.lat, lng: gasOrdersTable.lng, status: gasOrdersTable.status })
@@ -257,9 +312,8 @@ router.post("/gas-orders/:id/accept", async (req, res) => {
       return;
     }
 
-    console.log(`[ACCEPT /gas-orders/${id}] agent=${agentId}` +
-      (agentLat ? ` loc=(${agentLat},${agentLng})` : ""));
-    broadcastGasOrderUpdate({ id: updated.id, status: updated.status, agentId: updated.agentId });
+    console.log(`[ACCEPT /gas-orders/${id}] agent=${agentId}` + (agentLat ? ` loc=(${agentLat},${agentLng})` : ""));
+    broadcastGasOrderUpdate({ id: updated.id, status: updated.status, agentId: updated.agentId, declinedByAgents: updated.declinedByAgents ?? [] });
     void insertSystemMsg(id, STATUS_MESSAGES.accepted);
     res.json({ ok: true, order: updated });
   } catch (err: any) {
@@ -268,14 +322,20 @@ router.post("/gas-orders/:id/accept", async (req, res) => {
   }
 });
 
-// ── GET /api/gas-orders/:id — public: client polls for own order status ───────
+// ── GET /api/gas-orders/:id — public: customer polls for status ───────────────
 router.get("/gas-orders/:id", async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) { res.status(400).json({ error: "id غير صالح" }); return; }
   try {
     const [order] = await db.select().from(gasOrdersTable).where(eq(gasOrdersTable.id, id));
     if (!order) { res.status(404).json({ error: "الطلب غير موجود" }); return; }
-    res.json({ id: order.id, status: order.status, agentId: order.agentId, createdAt: order.createdAt });
+    res.json({
+      id:               order.id,
+      status:           order.status,
+      agentId:          order.agentId,
+      declinedByAgents: order.declinedByAgents ?? [],
+      createdAt:        order.createdAt,
+    });
   } catch (err: any) {
     console.error(`[GET /gas-orders/${id}] error:`, err);
     res.status(500).json({ error: "فشل جلب الطلب" });
@@ -283,15 +343,11 @@ router.get("/gas-orders/:id", async (req, res) => {
 });
 
 // ── PATCH /api/gas-orders/:id — agent/admin: update status ───────────────────
+// ⚠ REJECT INTERCEPT: if status='rejected' is sent via PATCH (partner hub legacy),
+//   redirect to the reject logic — do NOT write 'rejected' to the DB status.
+//   This keeps the order 'pending' and only marks this agent as declined.
 router.patch("/gas-orders/:id", async (req, res) => {
-  const partnerKey  = req.headers["x-partner-key"]    as string | undefined;
-  const merchantKey = req.headers["x-merchant-key"]   as string | undefined;
-  const adminPass   = req.headers["x-admin-password"] as string | undefined;
-  const valid =
-    adminPass === process.env.ADMIN_PASSWORD ||
-    adminPass === "Admin2026" ||
-    !!partnerKey || !!merchantKey;
-  if (!valid) { res.status(403).json({ error: "غير مصرح" }); return; }
+  if (!isAuthorised(req)) { res.status(403).json({ error: "غير مصرح" }); return; }
 
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) { res.status(400).json({ error: "id غير صالح" }); return; }
@@ -299,6 +355,50 @@ router.patch("/gas-orders/:id", async (req, res) => {
   const { status } = req.body ?? {};
   if (!status) { res.status(400).json({ error: "status مطلوب" }); return; }
 
+  // ── Intercept 'rejected' — redirect to soft-decline, NOT DB status change ──
+  if (String(status) === "rejected" || String(status) === "declined") {
+    const agentId = resolveAgentId(req);
+    try {
+      const [order] = await db
+        .select({ status: gasOrdersTable.status })
+        .from(gasOrdersTable)
+        .where(eq(gasOrdersTable.id, id));
+
+      if (!order) { res.status(404).json({ error: "الطلب غير موجود" }); return; }
+      if (order.status !== "pending") {
+        res.status(409).json({ error: "الطلب لم يعد معلقاً" }); return;
+      }
+
+      const [updated] = await db
+        .update(gasOrdersTable)
+        .set({
+          declinedByAgents: sql`array_append(declined_by_agents, ${agentId}::text)`,
+        })
+        .where(and(eq(gasOrdersTable.id, id), eq(gasOrdersTable.status, "pending")))
+        .returning();
+
+      if (!updated) { res.status(404).json({ error: "الطلب غير موجود أو لم يعد معلقاً" }); return; }
+
+      console.log(`[PATCH→REJECT /gas-orders/${id}] agent=${agentId} soft-declined — order stays pending`);
+
+      broadcastGasOrderUpdate({
+        id:               updated.id,
+        status:           updated.status,           // still 'pending'
+        agentId:          updated.agentId,
+        declinedByAgents: updated.declinedByAgents ?? [],
+        lat:              updated.lat,
+        lng:              updated.lng,
+      });
+
+      res.json({ ok: true, softDeclined: true, declinedByAgents: updated.declinedByAgents ?? [] });
+    } catch (err: any) {
+      console.error(`[PATCH→REJECT /gas-orders/${id}] error:`, err);
+      res.status(500).json({ error: "فشل رفض الطلب", detail: err?.message });
+    }
+    return;
+  }
+
+  // ── Normal status update (accepted, arrived, completed, cancelled) ──────────
   try {
     const [updated] = await db
       .update(gasOrdersTable)
@@ -307,7 +407,7 @@ router.patch("/gas-orders/:id", async (req, res) => {
       .returning();
     if (!updated) { res.status(404).json({ error: "الطلب غير موجود" }); return; }
     console.log(`[PATCH /gas-orders/${id}] status → ${status}`);
-    broadcastGasOrderUpdate({ id: updated.id, status: updated.status, agentId: updated.agentId });
+    broadcastGasOrderUpdate({ id: updated.id, status: updated.status, agentId: updated.agentId, declinedByAgents: updated.declinedByAgents ?? [] });
     const sysMsg = STATUS_MESSAGES[String(status)];
     if (sysMsg) void insertSystemMsg(id, sysMsg);
     res.json({ ok: true, order: updated });
@@ -317,7 +417,7 @@ router.patch("/gas-orders/:id", async (req, res) => {
   }
 });
 
-// ── GET /api/gas-orders/:id/messages — public: fetch chat messages ────────────
+// ── GET /api/gas-orders/:id/messages — fetch chat ────────────────────────────
 router.get("/gas-orders/:id/messages", async (req, res) => {
   const gasOrderId = Number(req.params.id);
   if (!Number.isFinite(gasOrderId)) { res.status(400).json({ error: "id غير صالح" }); return; }
@@ -338,7 +438,7 @@ router.get("/gas-orders/:id/messages", async (req, res) => {
   }
 });
 
-// ── POST /api/gas-orders/:id/messages — public: send a message ───────────────
+// ── POST /api/gas-orders/:id/messages — send message ────────────────────────
 router.post("/gas-orders/:id/messages", async (req, res) => {
   const gasOrderId = Number(req.params.id);
   if (!Number.isFinite(gasOrderId)) { res.status(400).json({ error: "id غير صالح" }); return; }
@@ -354,7 +454,6 @@ router.post("/gas-orders/:id/messages", async (req, res) => {
     }
 
     const [msg] = await db.insert(gasOrderMessagesTable).values(parsed.data).returning();
-
     broadcastGasNewMessage({
       id:          msg.id,
       gasOrderId:  msg.gasOrderId,
