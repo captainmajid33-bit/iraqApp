@@ -5571,15 +5571,15 @@ function GameConfigTab({ toast }: { toast: ReturnType<typeof useToast> }) {
   const startSession = async () => {
     setSessionBusy(true);
     try {
-      const s = await fetch("/api/game/session", {
+      const s = await fetch("/api/game/admin/start-session", {
         method: "POST",
         headers: admHeaders(),
         body: JSON.stringify({ totalItems: sessionItems, itemType: sessionType }),
       }).then(r => r.json());
       setSession(s);
-      toast.show(`✓ بدأت جلسة جديدة — ${sessionItems} عنصر`, "success");
+      toast.show(`✓ جولة البث الموحد بدأت — ${sessionItems} عنصر للجميع 🚀`, "success");
     } catch {
-      toast.show("فشل بدء الجلسة", "error");
+      toast.show("فشل بدء الجولة", "error");
     } finally {
       setSessionBusy(false);
     }
@@ -5733,7 +5733,7 @@ function GameConfigTab({ toast }: { toast: ReturnType<typeof useToast> }) {
       {/* ── Global Game Session Control ───────────────────────────────────── */}
       <div style={{ background: C.surface, border: `1px solid ${session ? C.green + "66" : C.border}`, borderRadius: "8px", padding: "24px", transition: "border-color 0.4s" }}>
         <div style={{ fontFamily: "Orbitron, sans-serif", fontSize: "12px", color: C.green, letterSpacing: "0.12em", marginBottom: "20px", textShadow: neon(C.green, 6), display: "flex", alignItems: "center", gap: "12px" }}>
-          🎯 جلسة اللعبة الجماعية المباشرة
+          🎯 إدارة الجولة الحية للعبة — Live Game Session
           {session && (
             <span style={{ fontSize: "10px", background: `${C.green}22`, border: `1px solid ${C.green}44`, borderRadius: "12px", padding: "3px 10px", color: C.green, animation: "pulse 1.2s ease-in-out infinite alternate" }}>
               ● نشطة
@@ -5784,11 +5784,11 @@ function GameConfigTab({ toast }: { toast: ReturnType<typeof useToast> }) {
           {!session && (
             <>
               <div>
-                <label style={{ display: "block", fontSize: "10px", color: C.dim, fontFamily: "Orbitron, sans-serif", letterSpacing: "0.07em", marginBottom: "6px" }}>عدد العناصر</label>
+                <label style={{ display: "block", fontSize: "10px", color: C.dim, fontFamily: "Orbitron, sans-serif", letterSpacing: "0.07em", marginBottom: "6px" }}>العدد الإجمالي المتاح للكل</label>
                 <input
-                  type="number" min={5} max={1000} value={sessionItems}
+                  type="number" min={5} max={10000} value={sessionItems}
                   onChange={e => setSessionItems(Number(e.target.value))}
-                  style={{ width: "100px", padding: "9px 12px", background: "#0a0d14", border: `1px solid ${C.border}`, borderRadius: "4px", color: C.text, fontFamily: "Orbitron, sans-serif", fontSize: "12px", outline: "none" }}
+                  style={{ width: "120px", padding: "9px 12px", background: "#0a0d14", border: `1px solid ${C.green}55`, borderRadius: "4px", color: C.green, fontFamily: "Orbitron, sans-serif", fontSize: "14px", outline: "none", textAlign: "center", fontWeight: 700 }}
                 />
               </div>
               <div>
@@ -5797,14 +5797,26 @@ function GameConfigTab({ toast }: { toast: ReturnType<typeof useToast> }) {
                   value={sessionType}
                   onChange={e => setSessionType(e.target.value)}
                   placeholder="burger / drink / pizza..."
-                  style={{ width: "150px", padding: "9px 12px", background: "#0a0d14", border: `1px solid ${C.border}`, borderRadius: "4px", color: C.text, fontFamily: "Rajdhani, sans-serif", fontSize: "13px", outline: "none" }}
+                  style={{ width: "160px", padding: "9px 12px", background: "#0a0d14", border: `1px solid ${C.border}`, borderRadius: "4px", color: C.text, fontFamily: "Rajdhani, sans-serif", fontSize: "13px", outline: "none" }}
                 />
               </div>
               <button
                 onClick={startSession} disabled={sessionBusy || sessionItems < 1}
-                style={{ padding: "9px 22px", background: `${C.green}22`, border: `1.5px solid ${C.green}66`, color: C.green, fontFamily: "Orbitron, sans-serif", fontSize: "11px", letterSpacing: "0.09em", cursor: sessionBusy ? "not-allowed" : "pointer", borderRadius: "4px", transition: "all 0.2s", textShadow: neon(C.green, 5), boxShadow: neon(C.green, 4), opacity: sessionBusy ? 0.6 : 1 }}
+                style={{
+                  padding: "11px 28px",
+                  background: sessionBusy ? `${C.green}11` : `linear-gradient(135deg, ${C.green}33, ${C.green}18)`,
+                  border: `2px solid ${C.green}88`,
+                  color: C.green, fontFamily: "Orbitron, sans-serif",
+                  fontSize: "12px", letterSpacing: "0.1em",
+                  cursor: sessionBusy ? "not-allowed" : "pointer",
+                  borderRadius: "6px", transition: "all 0.2s",
+                  textShadow: neon(C.green, 8),
+                  boxShadow: sessionBusy ? "none" : `0 0 18px ${C.green}44, 0 0 6px ${C.green}33`,
+                  opacity: sessionBusy ? 0.6 : 1,
+                  fontWeight: 700,
+                }}
               >
-                {sessionBusy ? "⏳ جاري البدء..." : "▶ ابدأ الجلسة"}
+                {sessionBusy ? "⏳ جاري البث..." : "▶ بدأ جولة البث الموحد"}
               </button>
             </>
           )}

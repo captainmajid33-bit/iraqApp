@@ -461,6 +461,60 @@ router.patch("/game/session", async (req: Request, res: Response) => {
   }
 });
 
+// ── POST /api/game/admin/start-session ───────────────────────────────────────
+// Dedicated admin endpoint — start (or restart) the global live game session.
+// Body: { totalItems: number, itemType?: string, imageUrl?: string }
+// Broadcasts game_session_update to ALL connected clients immediately.
+router.post("/game/admin/start-session", async (req: Request, res: Response) => {
+  if (!isAdmin(req)) { res.status(401).json({ error: "unauthorized" }); return; }
+
+  const { totalItems = 50, itemType = "burger", imageUrl = "" } = req.body as {
+    totalItems?: number;
+    itemType?:   string;
+    imageUrl?:   string;
+  };
+
+  if (totalItems < 1 || totalItems > 10000) {
+    res.status(400).json({ error: "totalItems must be between 1 and 10000" });
+    return;
+  }
+
+  try {
+    // Deactivate any existing active sessions
+    await db
+      .update(gameCurrentSessionTable)
+      .set({ isActive: false, updatedAt: new Date() })
+      .where(eq(gameCurrentSessionTable.isActive, true));
+
+    const [session] = await db
+      .insert(gameCurrentSessionTable)
+      .values({
+        sessionId:  randomUUID(),
+        totalItems: Math.floor(totalItems),
+        itemsLeft:  Math.floor(totalItems),
+        itemType,
+        imageUrl,
+        isActive:   true,
+      })
+      .returning();
+
+    // Broadcast to ALL connected clients immediately
+    broadcastGameSessionUpdate({
+      sessionId:  session.sessionId,
+      totalItems: session.totalItems,
+      itemsLeft:  session.itemsLeft,
+      itemType:   session.itemType,
+      imageUrl:   session.imageUrl,
+      isActive:   session.isActive,
+    });
+
+    res.status(201).json(session);
+  } catch (err) {
+    req.log.error({ err }, "game admin start-session error");
+    res.status(500).json({ error: "internal" });
+  }
+});
+
 // ── POST /api/game/session/catch ─────────────────────────────────────────────
 // Player catches one item. Atomically decrements itemsLeft.
 // Awards 1 gamePoint to the player's profile.
