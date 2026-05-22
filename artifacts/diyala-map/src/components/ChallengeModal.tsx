@@ -131,11 +131,22 @@ export function ChallengeModal({ onClose }: Props) {
   const [shopMsg,     setShopMsg]     = useState('');
   const [redeeming,   setRedeeming]   = useState(false);
 
-  const canvasRef  = useRef<HTMLCanvasElement>(null);
-  const rafRef     = useRef<number>(0);
-  const timerRef   = useRef<ReturnType<typeof setInterval> | null>(null);
-  const charImgRef = useRef<HTMLImageElement | null>(null);
-  const itemImgRef = useRef<HTMLImageElement | null>(null);
+  // ── Global session state ────────────────────────────────────────────────────
+  const [sessionItemsLeft, setSessionItemsLeft] = useState<number | null>(null);
+  const [sessionActive,    setSessionActive]    = useState(false);
+  const [sessionTotal,     setSessionTotal]     = useState<number>(100);
+
+  const canvasRef       = useRef<HTMLCanvasElement>(null);
+  const rafRef          = useRef<number>(0);
+  const timerRef        = useRef<ReturnType<typeof setInterval> | null>(null);
+  const charImgRef      = useRef<HTMLImageElement | null>(null);
+  const itemImgRef      = useRef<HTMLImageElement | null>(null);
+  // refs accessible inside RAF loop without closure issues
+  const userUidRef      = useRef<string | null>(null);
+  const userNameRef     = useRef<string>('لاعب');
+  const sessionItemsRef = useRef<number | null>(null);
+  const sessionActiveRef= useRef<boolean>(false);
+  const sseRef          = useRef<EventSource | null>(null);
 
   // All mutable game state in a single ref (no re-render per frame)
   const gs = useRef({
@@ -175,6 +186,51 @@ export function ChallengeModal({ onClose }: Props) {
   }, []);
 
   useEffect(() => { loadProfile(); }, [loadProfile]);
+
+  // ── Session fetch + SSE listener ────────────────────────────────────────────
+  useEffect(() => {
+    // Cache user info in refs (accessible inside RAF without closure)
+    const user = auth.currentUser;
+    if (user) {
+      userUidRef.current  = user.uid;
+      userNameRef.current = user.displayName ?? 'لاعب';
+    }
+
+    // Fetch current active session
+    fetch('/api/game/session')
+      .then(r => r.ok ? r.json() : null)
+      .then((s: { sessionId: string; totalItems: number; itemsLeft: number; isActive: boolean } | null) => {
+        if (s && s.isActive) {
+          setSessionActive(true);
+          setSessionTotal(s.totalItems);
+          setSessionItemsLeft(s.itemsLeft);
+          sessionItemsRef.current  = s.itemsLeft;
+          sessionActiveRef.current = true;
+        }
+      })
+      .catch(() => {});
+
+    // Open SSE stream and listen for game_session_update
+    const es = new EventSource('/api/events');
+    sseRef.current = es;
+    es.addEventListener('game_session_update', (e: MessageEvent) => {
+      try {
+        const { session } = JSON.parse(e.data) as {
+          session: { sessionId: string; totalItems: number; itemsLeft: number; isActive: boolean };
+        };
+        setSessionActive(session.isActive);
+        setSessionTotal(session.totalItems);
+        setSessionItemsLeft(session.itemsLeft);
+        sessionItemsRef.current  = session.itemsLeft;
+        sessionActiveRef.current = session.isActive;
+      } catch { /* ignore malformed event */ }
+    });
+
+    return () => {
+      es.close();
+      sseRef.current = null;
+    };
+  }, []);
 
   // ── Shop: buy a skin ───────────────────────────────────────────────────────
   const buySkin = useCallback(async (skin: SkinDef) => {
@@ -302,6 +358,17 @@ export function ChallengeModal({ onClose }: Props) {
         item.collected = true;
         g.score++;
         setScore(g.score);
+        // ── Global session: fire-and-forget atomic catch ──────────────────────
+        const uid = userUidRef.current;
+        if (uid && sessionActiveRef.current && (sessionItemsRef.current ?? 1) > 0) {
+          // Optimistically decrement local ref so RAF doesn't double-fire
+          if (sessionItemsRef.current !== null) sessionItemsRef.current = Math.max(0, sessionItemsRef.current - 1);
+          fetch('/api/game/session/catch', {
+            method:  'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body:    JSON.stringify({ firebaseUid: uid, userName: userNameRef.current }),
+          }).catch(() => {});
+        }
       }
     }
     g.items = g.items.filter(it => !it.collected && it.y < H + ITEM_H);
@@ -506,13 +573,13 @@ export function ChallengeModal({ onClose }: Props) {
         </div>
 
         {phase === 'playing' && (
-          <div style={{ display: 'flex', gap: '20px', alignItems: 'center' }}>
+          <div style={{ display: 'flex', gap: '14px', alignItems: 'center' }}>
             <div style={{
               fontFamily: 'Orbitron, sans-serif', fontSize: '13px',
               color: C.green, letterSpacing: '0.08em',
               textShadow: neon(C.green, 6),
             }}>
-              النقاط: <strong>{score}</strong>
+              ✦ <strong>{score}</strong>
             </div>
             <div style={{
               fontFamily: 'Orbitron, sans-serif', fontSize: '13px',
@@ -523,6 +590,20 @@ export function ChallengeModal({ onClose }: Props) {
             }}>
               ⏱ {timeLeft}ث
             </div>
+            {sessionActive && sessionItemsLeft !== null && (
+              <div style={{
+                fontFamily: 'Orbitron, sans-serif', fontSize: '11px',
+                color: sessionItemsLeft === 0 ? C.red : C.yellow,
+                letterSpacing: '0.06em',
+                textShadow: neon(sessionItemsLeft === 0 ? C.red : C.yellow, 5),
+                background: `rgba(0,0,0,0.3)`,
+                padding: '3px 8px', borderRadius: '10px',
+                border: `1px solid ${sessionItemsLeft === 0 ? C.red : C.yellow}33`,
+                transition: 'all 0.3s',
+              }}>
+                🎯 {sessionItemsLeft}/{sessionTotal}
+              </div>
+            )}
           </div>
         )}
 

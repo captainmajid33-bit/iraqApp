@@ -60,6 +60,11 @@ export function broadcastGasNewMessage(message: Record<string, unknown>) {
   broadcast("gas_new_message", { message });
 }
 
+/** Fired when a global game session state changes (item caught, session started/ended) */
+export function broadcastGameSessionUpdate(session: Record<string, unknown>) {
+  broadcast("game_session_update", { session });
+}
+
 export function sseClientCount() {
   return clients.size;
 }
