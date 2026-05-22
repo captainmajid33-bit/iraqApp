@@ -1,15 +1,13 @@
 /**
- * BountyShortcutButton — زر "مهمة" العائم مع سيستم إعلانات المكافأة
+ * BountyShortcutButton — زر "مهمة" العائم
  *
  * ══════════════════════════════════════════════════════════════════════
- * بنية الإعلانات:
- *   Web → Google Publisher Tag (GPT) Rewarded Ads
- *          (المعادل الرسمي من غوغل لـ AdMob على المتصفح)
+ * بنية الإعلانات (موحّدة عبر adsManager):
+ *   جميع استدعاءات الإعلانات تمر عبر adsManager.ts الذي يُعدّ نقطة
+ *   التغيير الوحيدة عند التحول إلى موبايل (AdMob / Capacitor).
  *
- * للتشغيل بإعلانات حقيقية:
- *   1. أنشئ وحدة إعلان مكافأة في Google Ad Manager
- *   2. ضع مسار الوحدة في REAL_AD_UNIT_PATH أدناه
- *   3. غيّر TEST_MODE إلى false
+ *   Web Mock  → SimulatedAdOverlay (countdown UI) + adsManager promise
+ *   Mobile    → AdMob SDK (adsManager.ts هو المكان الوحيد للتغيير)
  * ══════════════════════════════════════════════════════════════════════
  */
 
@@ -21,21 +19,11 @@ import {
   collection, query, where, getDocs, Timestamp,
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
-
-// ── Ad Configuration ────────────────────────────────────────────────────────
-/**
- * TEST_MODE = true  → simulated ad overlay (no network calls)
- * TEST_MODE = false → real Google Publisher Tag Rewarded Ad
- *
- * لتفعيل الإعلانات الحقيقية:
- *   1. سجّل في Google Ad Manager (ads.google.com/intl/ar/home/products/ad-manager)
- *   2. أنشئ وحدة إعلانية نوع "Out-of-page / Rewarded"
- *   3. انسخ مسار الوحدة إلى REAL_AD_UNIT_PATH (مثال: '/21775744923/rewarded_web_unit')
- *   4. غيّر TEST_MODE إلى false
- */
-const TEST_MODE       = true;
-const REAL_AD_UNIT_PATH = '/YOUR_NETWORK_CODE/YOUR_REWARDED_UNIT'; // ← استبدل عند الإنتاج
-const AD_WATCH_SECONDS  = 15; // مدة الإعلان التجريبي بالثواني
+import {
+  showRewardedAd as showAd,
+  isAdsEnabled,
+  AD_WATCH_SECONDS,
+} from '@/lib/adsManager';
 
 // ── Types ───────────────────────────────────────────────────────────────────
 interface ActiveBounty {
@@ -74,102 +62,6 @@ const C = {
   dim:     'rgba(255,255,255,0.38)',
 };
 
-// ── Declare GPT global (loaded via script tag) ───────────────────────────────
-declare global {
-  interface Window {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    googletag: any;
-  }
-}
-
-// ════════════════════════════════════════════════════════════════════════════
-// ── useRewardedAd — GPT Rewarded Ad Hook ─────────────────────────────────
-// ════════════════════════════════════════════════════════════════════════════
-function useRewardedAd() {
-  const rewardEarnedRef = useRef(false);
-  const slotRef         = useRef<any>(null);
-  const gptLoadedRef    = useRef(false);
-
-  /**
-   * Load the GPT script once.
-   * In TEST_MODE this is a no-op.
-   */
-  const ensureGPT = useCallback((): Promise<void> => {
-    if (TEST_MODE || gptLoadedRef.current) return Promise.resolve();
-    return new Promise<void>((resolve) => {
-      if (window.googletag?.cmd) { gptLoadedRef.current = true; resolve(); return; }
-      const script = document.createElement('script');
-      script.src   = 'https://securepubads.g.doubleclick.net/tag/js/gpt.js';
-      script.async = true;
-      script.onload = () => { gptLoadedRef.current = true; resolve(); };
-      document.head.appendChild(script);
-    });
-  }, []);
-
-  /**
-   * Show the rewarded ad.
-   * @param onRewarded  — called when user earns the reward (watched completely)
-   * @param onClosed    — called when ad is closed (reward may or may not be earned)
-   */
-  const showRewardedAd = useCallback(
-    (onRewarded: () => void, onClosed: (earned: boolean) => void) => {
-      rewardEarnedRef.current = false;
-
-      if (TEST_MODE) {
-        // ── TEST MODE: resolve immediately so UI can show the simulated overlay ──
-        // The caller (component) manages the simulated countdown.
-        // We just expose the reward/closed callbacks.
-        return { onRewarded, onClosed };
-      }
-
-      // ── PRODUCTION MODE: Google Publisher Tag Rewarded Ad ──────────────────
-      ensureGPT().then(() => {
-        const gt = window.googletag;
-        gt.cmd.push(() => {
-          // Define the rewarded out-of-page slot
-          slotRef.current = gt.defineOutOfPageSlot(
-            REAL_AD_UNIT_PATH,
-            gt.enums.OutOfPageFormat.REWARDED,
-          );
-          if (!slotRef.current) {
-            console.warn('[RewardedAd] Slot definition failed (unsupported env)');
-            onClosed(false);
-            return;
-          }
-          slotRef.current.addService(gt.pubads());
-
-          // ── Slot Ready: the ad is loaded, make it visible ──────────────────
-          gt.pubads().addEventListener('rewardedSlotReady', (evt: any) => {
-            evt.makeRewardedVisible();
-          });
-
-          // ── Reward Granted: user watched completely ────────────────────────
-          gt.pubads().addEventListener('rewardedSlotGranted', () => {
-            rewardEarnedRef.current = true;
-            onRewarded();
-          });
-
-          // ── Slot Closed: ad dismissed ──────────────────────────────────────
-          gt.pubads().addEventListener('rewardedSlotClosed', () => {
-            // Clean up the slot
-            gt.destroySlots([slotRef.current]);
-            slotRef.current = null;
-            onClosed(rewardEarnedRef.current);
-          });
-
-          gt.enableServices();
-          gt.display(slotRef.current);
-        });
-      });
-
-      return { onRewarded, onClosed };
-    },
-    [ensureGPT],
-  );
-
-  return { showRewardedAd };
-}
-
 // ════════════════════════════════════════════════════════════════════════════
 // ── Countdown Ticker ─────────────────────────────────────────────────────
 // ════════════════════════════════════════════════════════════════════════════
@@ -196,36 +88,32 @@ function Countdown({ expiresAt }: { expiresAt: Timestamp | null }) {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// ── SimulatedAdOverlay — TEST_MODE وهمي الإعلان ──────────────────────────
+// ── SimulatedAdOverlay — واجهة محاكاة الإعلان (Display-only)
+// ── المكافأة تُمنح عبر adsManager.showRewardedAd() Promise
+// ── زر "إغلاق" يستدعي onSkip فقط — لا auto-reward داخلي
 // ════════════════════════════════════════════════════════════════════════════
 function SimulatedAdOverlay({
-  onRewardEarned,
-  onClosedEarly,
+  onSkip,
 }: {
-  onRewardEarned: () => void;
-  onClosedEarly:  () => void;
+  onSkip: () => void;
 }) {
   const [remaining, setRemaining] = useState(AD_WATCH_SECONDS);
   const [canClose,  setCanClose]  = useState(false);
-  const [bars,      setBars]      = useState(0); // simulated ad bars
+  const [bars,      setBars]      = useState(0);
 
-  // Countdown
+  // Countdown (display only — reward is fired by adsManager Promise)
   useEffect(() => {
     const iv = setInterval(() => {
       setRemaining(p => {
-        if (p <= 1) {
-          clearInterval(iv);
-          onRewardEarned();
-          return 0;
-        }
+        if (p <= 1) { clearInterval(iv); return 0; }
         return p - 1;
       });
       setBars(p => Math.min(p + 1, 8));
     }, 1000);
-    // Allow close button after half the duration
+    // Allow skip button after half the duration
     const t = setTimeout(() => setCanClose(true), (AD_WATCH_SECONDS / 2) * 1000);
     return () => { clearInterval(iv); clearTimeout(t); };
-  }, [onRewardEarned]);
+  }, []);
 
   const progress = ((AD_WATCH_SECONDS - remaining) / AD_WATCH_SECONDS) * 100;
 
@@ -345,7 +233,7 @@ function SimulatedAdOverlay({
         {/* Close button (appears at half-time) */}
         {canClose && (
           <button
-            onClick={onClosedEarly}
+            onClick={onSkip}
             style={{
               padding: '8px 20px',
               background: 'rgba(255,255,255,0.06)',
@@ -357,7 +245,7 @@ function SimulatedAdOverlay({
               animation: 'bsb-fade-in 0.4s ease',
             }}
           >
-            إغلاق الإعلان
+            تخطي الإعلان (ستخسر المكافأة)
           </button>
         )}
       </div>
@@ -451,13 +339,18 @@ function MissionCard({
 // ── Main Component ────────────────────────────────────────────────────────
 // ════════════════════════════════════════════════════════════════════════════
 export function BountyShortcutButton({ mapRef, isDay = false, onUnlock, bottomOffset = 0 }: Props) {
-  const [phase,    setPhase]    = useState<Phase>('idle');
-  const [bounties, setBounties] = useState<ActiveBounty[]>([]);
-  const [pressed,  setPressed]  = useState(false);
-  const noMissionTimerRef       = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const rewardEarnedRef         = useRef(false);
+  const [phase,      setPhase]      = useState<Phase>('idle');
+  const [bounties,   setBounties]   = useState<ActiveBounty[]>([]);
+  const [pressed,    setPressed]    = useState(false);
+  const [adsEnabled, setAdsEnabled] = useState(true); // optimistic default
+  const noMissionTimerRef           = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const rewardEarnedRef             = useRef(false);
+  const adCancelledRef              = useRef(false); // set true when user skips early
 
-  const { showRewardedAd } = useRewardedAd();
+  // ── Check ads enabled on mount ────────────────────────────────────────────
+  useEffect(() => {
+    isAdsEnabled().then(v => setAdsEnabled(v));
+  }, []);
 
   // ── Fetch active bounties ─────────────────────────────────────────────────
   const fetchBounties = useCallback(async (): Promise<ActiveBounty[]> => {
@@ -497,47 +390,44 @@ export function BountyShortcutButton({ mapRef, isDay = false, onUnlock, bottomOf
         noMissionTimerRef.current = setTimeout(() => setPhase('idle'), 4500);
       } else {
         setBounties(docs);
-        setPhase('ad-prompt'); // ← Show "watch ad" prompt first
+        // If ads are disabled by admin → skip ad, go straight to missions
+        if (!adsEnabled) {
+          rewardEarnedRef.current = true;
+          onUnlock?.();
+          setPhase('missions');
+        } else {
+          setPhase('ad-prompt');
+        }
       }
     } catch (err) {
       console.warn('[BountyShortcut] fetchBounties:', err);
       setPhase('idle');
     }
-  }, [phase, fetchBounties]);
+  }, [phase, fetchBounties, adsEnabled, onUnlock]);
 
-  // ── "Watch Ad" button → start ad ──────────────────────────────────────────
-  const handleWatchAd = useCallback(() => {
+  // ── "Watch Ad" button → calls adsManager (single swap point for mobile) ───
+  const handleWatchAd = useCallback(async () => {
     rewardEarnedRef.current = false;
+    adCancelledRef.current  = false;
     setPhase('ad-watching');
-
-    if (!TEST_MODE) {
-      // Production: GPT handles the overlay itself
-      showRewardedAd(
-        () => {
-          rewardEarnedRef.current = true;
-          onUnlock?.();   // ← فكّ قفل الماركرات عند منح المكافأة (GPT)
-        },
-        (earned) => {
-          if (earned) {
-            setPhase('missions');
-          } else {
-            setPhase('ad-skip-warn');
-          }
-        },
-      );
+    try {
+      const result = await showAd('mission_button');
+      if (adCancelledRef.current) return; // user already skipped — phase changed
+      if (result.success) {
+        rewardEarnedRef.current = true;
+        onUnlock?.();
+        setPhase('missions');
+      } else {
+        setPhase('ad-skip-warn');
+      }
+    } catch {
+      if (!adCancelledRef.current) setPhase('ad-skip-warn');
     }
-    // TEST_MODE: SimulatedAdOverlay is rendered based on phase === 'ad-watching'
-  }, [showRewardedAd]);
-
-  // ── Simulated ad: reward earned (watched to end) ──────────────────────────
-  const handleSimRewardEarned = useCallback(() => {
-    rewardEarnedRef.current = true;
-    onUnlock?.();           // ← فكّ قفل الماركرات على الخريطة فوراً
-    setPhase('missions');
   }, [onUnlock]);
 
-  // ── Simulated ad: user closed early ───────────────────────────────────────
-  const handleSimClosedEarly = useCallback(() => {
+  // ── User skipped early (SimulatedAdOverlay skip button) ───────────────────
+  const handleAdSkipped = useCallback(() => {
+    adCancelledRef.current = true;
     setPhase('ad-skip-warn');
   }, []);
 
@@ -703,12 +593,12 @@ export function BountyShortcutButton({ mapRef, isDay = false, onUnlock, bottomOf
       )}
 
       {/* ══════════════════════════════════════════════════════════════════════
-          ── Simulated Ad Overlay (TEST_MODE only, while ad-watching) ────────
+          ── Ad Overlay — shown while ad is "playing" (web mock UI)
+          ── On mobile: adsManager calls AdMob natively, no overlay needed
       ══════════════════════════════════════════════════════════════════════ */}
-      {TEST_MODE && phase === 'ad-watching' && (
+      {phase === 'ad-watching' && (
         <SimulatedAdOverlay
-          onRewardEarned={handleSimRewardEarned}
-          onClosedEarly={handleSimClosedEarly}
+          onSkip={handleAdSkipped}
         />
       )}
 
@@ -886,9 +776,7 @@ export function BountyShortcutButton({ mapRef, isDay = false, onUnlock, bottomOf
               textAlign:   'center',
               lineHeight:  1.5,
             }}>
-              {TEST_MODE
-                ? '🧪 وضع الاختبار — لا يوجد إعلان حقيقي الآن'
-                : 'الإعلان يدعم خدمة الخريطة ويبقيها مجانية للجميع'}
+              الإعلان يدعم خدمة الخريطة ويبقيها مجانية للجميع
             </div>
           </div>
         </div>

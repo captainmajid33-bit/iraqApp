@@ -1898,7 +1898,7 @@ export function ChallengeModal({ onClose }: Props) {
                   onClick={async () => {
                     setAdLoading(true);
                     try {
-                      const result = await showRewardedAd();
+                      const result = await showRewardedAd('challenge_gameover');
                       if (result.success && result.reward) {
                         const bonus = result.reward.amount;
                         const uid = auth.currentUser?.uid;
