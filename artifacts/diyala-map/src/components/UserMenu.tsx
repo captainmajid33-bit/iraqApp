@@ -1195,6 +1195,14 @@ export function UserMenu() {
                 يُعدّ الحذف فورياً وغير قابل للتراجع.
               </p>
 
+              <p style={{ color:'#00d4ff', fontWeight:700, marginBottom:'4px' }}>سياسة الإعلانات</p>
+              <p style={{ marginBottom:'14px', color:'rgba(200,220,255,0.75)' }}>
+                قد يعرض التطبيق إعلانات فيديو مكافأة اختيارية (Rewarded Ads) في شاشة نهاية اللعبة.
+                مشاهدة هذه الإعلانات <strong style={{ color:'#00f5d4' }}>طوعية بالكامل</strong> وتمنحك نقاطاً مكافأة.
+                لا تُجمع بيانات شخصية لأغراض الاستهداف الإعلاني. إعلاناتنا مُشغَّلة عبر Google AdMob
+                وتخضع لـ <a href="https://policies.google.com/privacy" target="_blank" rel="noopener noreferrer" style={{ color:'#00d4ff' }}>سياسة خصوصية Google</a>.
+              </p>
+
               <p style={{ color:'#00d4ff', fontWeight:700, marginBottom:'4px' }}>التواصل</p>
               <p style={{ marginBottom:'0', color:'rgba(200,220,255,0.75)' }}>
                 للاستفسارات المتعلقة بالخصوصية، تواصل مع فريق الدعم عبر الواتساب المتاح في التطبيق.

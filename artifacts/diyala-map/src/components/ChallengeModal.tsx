@@ -11,6 +11,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { auth, db } from '@/lib/firebase';
 import { doc, onSnapshot, runTransaction, increment } from 'firebase/firestore';
+import { showRewardedAd, isAdsEnabled } from '@/lib/adsManager';
 
 // ── Types ───────────────────────────────────────────────────────────────────
 interface Props {
@@ -201,6 +202,10 @@ export function ChallengeModal({ onClose }: Props) {
   const [redeeming,   setRedeeming]   = useState(false);
   const [dynSkins,    setDynSkins]    = useState<DynSkinDef[]>([]);
   const [showCharge,  setShowCharge]  = useState(false);
+  const [adsEnabled,  setAdsEnabled]  = useState(false);
+  const [adWatched,   setAdWatched]   = useState(false);
+  const [adLoading,   setAdLoading]   = useState(false);
+  const [adBonusMsg,  setAdBonusMsg]  = useState('');
 
   // ── Global session state ────────────────────────────────────────────────────
   const [sessionItemsLeft,  setSessionItemsLeft]  = useState<number | null>(null);
@@ -296,6 +301,11 @@ export function ChallengeModal({ onClose }: Props) {
   }, []);
 
   useEffect(() => { loadProfile(); }, [loadProfile]);
+
+  // ── Ads enabled check (fetched once on mount) ────────────────────────────────
+  useEffect(() => {
+    isAdsEnabled().then(v => setAdsEnabled(v));
+  }, []);
 
   // ── Live Firestore balance subscription (محفظة التطبيق الحقيقية) ───────────
   useEffect(() => {
@@ -1870,6 +1880,60 @@ export function ChallengeModal({ onClose }: Props) {
               textShadow: neon(C.yellow, 14),
             }}>{score}</div>
           </div>
+
+          {/* ── Watch Ad button — grants +50 pts bonus ────────────────────── */}
+          {adsEnabled && !adWatched && !activeDuelIdRef.current && (
+            <div style={{ width: '100%', maxWidth: '300px' }}>
+              {adBonusMsg ? (
+                <div style={{
+                  padding: '12px 16px', borderRadius: '8px',
+                  background: `${C.green}12`, border: `1px solid ${C.green}44`,
+                  color: C.green, textAlign: 'center',
+                  fontFamily: 'Orbitron, sans-serif', fontSize: '11px', letterSpacing: '0.08em',
+                  textShadow: neon(C.green, 6),
+                }}>{adBonusMsg}</div>
+              ) : (
+                <button
+                  disabled={adLoading}
+                  onClick={async () => {
+                    setAdLoading(true);
+                    try {
+                      const result = await showRewardedAd();
+                      if (result.success && result.reward) {
+                        const bonus = result.reward.amount;
+                        const uid = auth.currentUser?.uid;
+                        if (uid) {
+                          await runTransaction(db, async tx => {
+                            const ref = doc(db, 'game_profiles', uid);
+                            const snap = await tx.get(ref);
+                            if (snap.exists()) {
+                              tx.update(ref, { gamePoints: increment(bonus) });
+                            }
+                          });
+                          setProfile(p => p ? { ...p, gamePoints: (p.gamePoints ?? 0) + bonus } : p);
+                        }
+                        setAdWatched(true);
+                        setAdBonusMsg(`🎁 تم إضافة ${bonus} نقطة مكافأة!`);
+                      }
+                    } catch { /* silent */ }
+                    setAdLoading(false);
+                  }}
+                  style={{
+                    width: '100%', padding: '13px', borderRadius: '6px',
+                    background: adLoading ? 'rgba(245,197,24,0.05)' : `${C.yellow}15`,
+                    border: `1px solid ${C.yellow}55`,
+                    color: C.yellow, fontFamily: 'Orbitron, sans-serif',
+                    fontSize: '11px', letterSpacing: '0.08em',
+                    cursor: adLoading ? 'not-allowed' : 'pointer',
+                    transition: 'all 0.2s', textShadow: neon(C.yellow, 6),
+                    opacity: adLoading ? 0.6 : 1,
+                  }}
+                >
+                  {adLoading ? '⏳ جاري تحميل الإعلان...' : '🎬 شاهد إعلاناً واحصل على +50 نقطة'}
+                </button>
+              )}
+            </div>
+          )}
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', width: '100%', maxWidth: '300px' }}>
             <button

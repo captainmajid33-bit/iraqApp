@@ -958,13 +958,30 @@ function SettingsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
   const [previewType,    setPreviewType]    = useState<"image" | "video" | "youtube">("image");
   const fileInputRef     = useRef<HTMLInputElement>(null);
   const previewVideoRef  = useRef<HTMLVideoElement>(null);
+  const [adsEnabled,     setAdsEnabled]     = useState(false);
+  const [adsSaving,      setAdsSaving]      = useState(false);
 
   // Load on mount
   useEffect(() => {
     api.get("/api/settings/top_banner").then(d => {
       if (d?.value) setItems(parseMediaItems(d.value));
     });
+    api.get("/api/settings/ads_enabled").then(d => {
+      setAdsEnabled(d?.value === "true");
+    });
   }, []);
+
+  const toggleAds = async (enabled: boolean) => {
+    setAdsSaving(true);
+    const r = await api.patch("/api/settings/ads_enabled", { value: enabled ? "true" : "false" });
+    setAdsSaving(false);
+    if (r.ok) {
+      setAdsEnabled(enabled);
+      toast.show(enabled ? "✓ تم تفعيل الإعلانات" : "⏸ تم إيقاف الإعلانات");
+    } else {
+      toast.show(r.error ?? "فشل الحفظ", false);
+    }
+  };
 
   // ── Persist full array ────────────────────────────────────────────────────
   const persistItems = async (next: MediaItem[], successMsg?: string) => {
@@ -1065,6 +1082,83 @@ function SettingsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
 
   return (
     <div style={{ maxWidth: "760px" }}>
+
+      {/* ── Ads Management Section ─────────────────────────────────────────── */}
+      <div style={{ marginBottom: "24px" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "16px" }}>
+          <div style={{ width: "3px", height: "26px", background: C.yellow, boxShadow: neon(C.yellow) }} />
+          <div>
+            <div style={{ fontFamily: "Orbitron, sans-serif", fontSize: "12px", color: C.yellow, letterSpacing: "0.14em" }}>AD MANAGER · إدارة الإعلانات</div>
+            <div style={{ fontFamily: "Rajdhani, sans-serif", fontSize: "12px", color: C.dim, marginTop: "2px" }}>
+              تحكم بعرض إعلانات "شاهد إعلاناً" في شاشة الخسارة باللعبة
+            </div>
+          </div>
+        </div>
+
+        <div style={{ background: C.surf2, border: `1px solid ${C.border}`, borderRadius: "4px", padding: "16px" }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "12px" }}>
+            <div>
+              <div style={{ fontFamily: "Rajdhani, sans-serif", fontSize: "14px", color: C.text, fontWeight: 600, marginBottom: "3px" }}>
+                🎬 إعلانات المكافأة (Rewarded Ads)
+              </div>
+              <div style={{ fontFamily: "Rajdhani, sans-serif", fontSize: "12px", color: C.dim }}>
+                عند التفعيل، يظهر زر "شاهد إعلاناً واحصل على +50 نقطة" في شاشة نهاية اللعبة
+              </div>
+              <div style={{
+                display: "inline-flex", alignItems: "center", gap: "6px",
+                marginTop: "8px", padding: "4px 10px", borderRadius: "3px",
+                background: adsEnabled ? `${C.green}12` : `${C.dim}12`,
+                border: `1px solid ${adsEnabled ? C.green + "44" : C.border}`,
+              }}>
+                <div style={{ width: "7px", height: "7px", borderRadius: "50%", background: adsEnabled ? C.green : C.dim }} />
+                <span style={{ fontFamily: "Orbitron, sans-serif", fontSize: "9px", color: adsEnabled ? C.green : C.dim, letterSpacing: "0.1em" }}>
+                  {adsEnabled ? "ACTIVE — الإعلانات مفعّلة" : "INACTIVE — الإعلانات موقوفة"}
+                </span>
+              </div>
+            </div>
+
+            <div style={{ display: "flex", gap: "8px" }}>
+              <button
+                onClick={() => !adsSaving && toggleAds(true)}
+                disabled={adsSaving || adsEnabled}
+                style={{
+                  padding: "9px 18px",
+                  background: adsEnabled ? `${C.green}22` : `${C.green}12`,
+                  border: `1px solid ${adsEnabled ? C.green + "88" : C.green + "44"}`,
+                  color: C.green, fontFamily: "Orbitron, sans-serif", fontSize: "9px",
+                  letterSpacing: "0.1em", cursor: adsEnabled ? "default" : "pointer",
+                  borderRadius: "3px", opacity: adsSaving ? 0.5 : 1,
+                  transition: "all 0.2s",
+                }}>
+                {adsSaving ? "..." : "✓ تفعيل"}
+              </button>
+              <button
+                onClick={() => !adsSaving && toggleAds(false)}
+                disabled={adsSaving || !adsEnabled}
+                style={{
+                  padding: "9px 18px",
+                  background: !adsEnabled ? `${C.red}22` : `${C.red}12`,
+                  border: `1px solid ${!adsEnabled ? C.red + "88" : C.red + "44"}`,
+                  color: C.red, fontFamily: "Orbitron, sans-serif", fontSize: "9px",
+                  letterSpacing: "0.1em", cursor: !adsEnabled ? "default" : "pointer",
+                  borderRadius: "3px", opacity: adsSaving ? 0.5 : 1,
+                  transition: "all 0.2s",
+                }}>
+                {adsSaving ? "..." : "⏸ إيقاف"}
+              </button>
+            </div>
+          </div>
+
+          <div style={{ marginTop: "12px", padding: "10px 12px", borderRadius: "4px", background: "rgba(0,212,255,0.04)", border: `1px solid rgba(0,212,255,0.15)` }}>
+            <div style={{ fontFamily: "Orbitron, sans-serif", fontSize: "9px", color: C.blue, letterSpacing: "0.1em", marginBottom: "4px" }}>ℹ️ INTEGRATION INFO</div>
+            <div style={{ fontFamily: "Rajdhani, sans-serif", fontSize: "11px", color: C.dim, lineHeight: 1.6 }}>
+              الوضع الحالي: <strong style={{ color: C.yellow }}>Web Mock</strong> — الإعلانات تُحاكى لأغراض الاختبار (3 ثوانٍ انتظار + مكافأة مباشرة).
+              عند التحويل للموبايل، استبدل الدالة <code style={{ color: C.green, fontSize: "10px" }}>showRewardedAd()</code> في ملف <code style={{ color: C.green, fontSize: "10px" }}>src/lib/adsManager.ts</code> بـ Google AdMob SDK.
+            </div>
+          </div>
+        </div>
+      </div>
+
       {/* Section title */}
       <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "20px" }}>
         <div style={{ width: "3px", height: "26px", background: C.purple, boxShadow: neon(C.purple) }} />
