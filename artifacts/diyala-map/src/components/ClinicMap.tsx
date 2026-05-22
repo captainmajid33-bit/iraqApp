@@ -3892,7 +3892,7 @@ export function ClinicMap({
                         <circle cx="14" cy="14" r="10" stroke="#00d4ff" strokeWidth="2.5" strokeDasharray="22 14" strokeLinecap="round"/>
                       </svg>
                       <span style={{fontFamily:'Rajdhani,sans-serif',fontSize:'13px',color:'rgba(0,212,255,0.6)'}}>
-                        جاري البحث عن الأماكن في ديالى...
+                        جاري البحث عن الأماكن...
                       </span>
                     </div>
                   ) : placeResults.length > 0 ? (
@@ -6204,7 +6204,7 @@ export function ClinicMap({
             letterSpacing: '0.04em',
             color: '#f5c518',
             lineHeight: 1,
-          }}>تحدي</span>
+          }}>المعدل</span>
         </button>
       )}
 

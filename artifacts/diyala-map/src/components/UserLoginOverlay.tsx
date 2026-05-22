@@ -340,7 +340,7 @@ export function UserLoginOverlay({ onLogin }: { onLogin: (u: DiyalaUser) => void
             </div>
 
             <div style={{ fontFamily: 'Rajdhani, sans-serif', fontSize: '22px', fontWeight: 800, color: '#e8f8f5', lineHeight: 1.2 }}>
-              {isPhoneStep ? 'أدخل بياناتك للدخول إلى الخريطة' : 'أدخل رمز التحقق'}
+              {isPhoneStep ? 'أدخل بياناتك للدخول إلى تطبيق المعدل 👑' : 'أدخل رمز التحقق'}
             </div>
             {isPhoneStep ? (
               <div style={{ fontFamily: 'Rajdhani, sans-serif', fontSize: '13px', color: 'rgba(255,255,255,0.3)', marginTop: '5px' }}>

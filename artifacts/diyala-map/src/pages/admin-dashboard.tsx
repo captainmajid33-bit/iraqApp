@@ -2899,7 +2899,7 @@ function BountyMissionsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '11px 16px', background: `${C.yellow}0e`, borderBottom: `1px solid ${C.yellow}22` }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                 <span style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '10px', color: C.yellow, letterSpacing: '0.15em' }}>
-                  🏆 أسماء الفائزين بـ مهمة ديالى GTA الحالية
+                  🏆 أسماء الفائزين بـ مهمة المعدل الحالية
                 </span>
                 <span style={{ fontFamily: 'Rajdhani, sans-serif', fontSize: '12px', color: C.dim }}>
                   — {activePair.sponsor_name}
@@ -5245,7 +5245,7 @@ function GiftCardsTab({ toast }: { toast: ReturnType<typeof useToast> }) {
       th{background:#111;color:#fff;padding:10px 12px}
       @media print{button{display:none!important}}</style>
       </head><body>
-      <h2 style="text-align:center">كارتات شحن المحفظة — ديالى</h2>
+      <h2 style="text-align:center">كارتات شحن المحفظة — المعدل</h2>
       <button onclick="window.print()" style="margin-bottom:16px;padding:8px 20px;background:#111;color:#fff;border:none;cursor:pointer;border-radius:4px">🖨 طباعة</button>
       <table><thead><tr><th>الكود</th><th>القيمة</th><th>تاريخ الإنشاء</th></tr></thead>
       <tbody>${rows}</tbody></table>
@@ -6307,7 +6307,7 @@ export function AdminDashboard() {
         <div style={{ flex: 1, display: "flex", alignItems: "center", gap: "10px" }}>
           <div style={{ width: "7px", height: "7px", borderRadius: "50%", background: C.red, boxShadow: neon(C.red, 7) }} />
           <span style={{ fontFamily: "Orbitron, sans-serif", fontSize: "12px", color: C.purple, letterSpacing: "0.14em", textShadow: neon(C.purple, 8) }}>ADMIN PANEL</span>
-          <span style={{ color: C.dim, fontFamily: "Orbitron, sans-serif", fontSize: "11px" }}>· ديالى</span>
+          <span style={{ color: C.dim, fontFamily: "Orbitron, sans-serif", fontSize: "11px" }}>· المعدل</span>
         </div>
         <a href="/" target="_blank" style={{ fontFamily: "Orbitron, sans-serif", fontSize: "10px", color: C.blue, letterSpacing: "0.08em", textDecoration: "none", padding: "6px 12px", border: `1px solid ${C.blue}40`, borderRadius: "3px" }}>↗ الخريطة</a>
         <button onClick={logout} style={{ fontFamily: "Orbitron, sans-serif", fontSize: "10px", color: C.red, letterSpacing: "0.08em", background: `${C.red}10`, border: `1px solid ${C.red}40`, padding: "6px 14px", cursor: "pointer", borderRadius: "3px" }}>خروج</button>
@@ -6534,7 +6534,7 @@ export function AdminLogin() {
           {/* Header */}
           <div style={{ textAlign: "center", marginBottom: "32px" }}>
             <div style={{ fontSize: "9px", fontFamily: "Orbitron, sans-serif", color: "rgba(123,47,247,0.6)", letterSpacing: "0.25em", marginBottom: "12px" }}>
-              DIYALA · ADMIN PANEL
+              المعدل · ADMIN PANEL
             </div>
             <div style={{ fontSize: "26px", marginBottom: "10px" }}>🗺️</div>
             <div style={{ color: "rgba(226,232,240,0.45)", fontFamily: "Rajdhani, sans-serif", fontSize: "14px" }}>

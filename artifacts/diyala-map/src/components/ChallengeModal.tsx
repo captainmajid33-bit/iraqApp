@@ -944,7 +944,7 @@ export function ChallengeModal({ onClose }: Props) {
             fontFamily: 'Orbitron, sans-serif', fontSize: '14px',
             color: C.yellow, letterSpacing: '0.12em',
             textShadow: neon(C.yellow, 7),
-          }}>التحدي</span>
+          }}>تحدي المعدل</span>
         </div>
 
         {phase === 'playing' && (
@@ -1093,7 +1093,7 @@ export function ChallengeModal({ onClose }: Props) {
                 cursor: 'pointer', transition: 'all 0.2s',
               }}
             >
-              🏅 قائمة المتصدرين
+              🏅 قائمة متصدري المعدل
             </button>
 
             <button
@@ -1285,7 +1285,7 @@ export function ChallengeModal({ onClose }: Props) {
                 cursor: 'pointer', transition: 'all 0.2s',
               }}
             >
-              🏅 قائمة المتصدرين
+              🏅 قائمة متصدري المعدل
             </button>
 
             <button
@@ -1459,7 +1459,7 @@ export function ChallengeModal({ onClose }: Props) {
               fontFamily: 'Orbitron, sans-serif', fontSize: '13px',
               color: C.yellow, letterSpacing: '0.1em',
               textShadow: neon(C.yellow, 6),
-            }}>🏅 قائمة المتصدرين</div>
+            }}>🏅 قائمة متصدري المعدل</div>
             <button
               onClick={() => setPhase('menu')}
               style={{
