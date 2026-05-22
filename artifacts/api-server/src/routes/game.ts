@@ -664,4 +664,35 @@ router.post("/game/session/catch", async (req: Request, res: Response) => {
   }
 });
 
+// ── Friendly Duels (UI prep — in-memory, cleared on restart) ─────────────────
+const duelRooms = new Map<string, { creatorId: string; bet: number; createdAt: number }>();
+
+router.post("/game/duel/create", async (req: Request, res: Response) => {
+  try {
+    const { firebaseUid, bet } = req.body as { firebaseUid?: string; bet?: number };
+    if (!firebaseUid || typeof bet !== 'number' || bet < 100) {
+      res.status(400).json({ error: "invalid_params" }); return;
+    }
+    // Generate a short human-readable code (6 uppercase alphanum chars)
+    const chars  = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    let duelId   = '';
+    for (let i = 0; i < 6; i++) duelId += chars[Math.floor(Math.random() * chars.length)];
+    duelRooms.set(duelId, { creatorId: firebaseUid, bet, createdAt: Date.now() });
+    // Clean rooms older than 24h
+    const cutoff = Date.now() - 86_400_000;
+    for (const [k, v] of duelRooms) if (v.createdAt < cutoff) duelRooms.delete(k);
+    res.json({ duelId, bet });
+  } catch (err) {
+    req.log.error({ err }, "duel create error");
+    res.status(500).json({ error: "internal" });
+  }
+});
+
+router.get("/game/duel/:duelId", async (req: Request, res: Response) => {
+  const duelId = (req.params.duelId ?? '').toUpperCase();
+  const room   = duelRooms.get(duelId);
+  if (!room) { res.status(404).json({ error: "not_found" }); return; }
+  res.json({ duelId, ...room });
+});
+
 export default router;

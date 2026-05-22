@@ -16,7 +16,7 @@ interface Props {
   onClose: () => void;
 }
 
-type Phase = 'menu' | 'loading' | 'playing' | 'gameover' | 'leaderboard' | 'shop';
+type Phase = 'menu' | 'loading' | 'playing' | 'gameover' | 'leaderboard' | 'shop' | 'duel';
 
 interface GameProfile {
   firebaseUid:   string;
@@ -48,6 +48,7 @@ interface FallingItem {
   y:         number;
   speed:     number;
   collected: boolean;
+  type:      'food' | 'magnet';
 }
 
 interface LeaderEntry {
@@ -120,6 +121,13 @@ const ITEM_SPD_MIN  = 4.0; // horizontal item speed (px/frame)
 const ITEM_SPD_VAR  = 3.0;
 const BG_SCROLL_RUN = 3.5; // parallax speed when pressing
 const BG_SCROLL_IDL = 1.0; // parallax speed when idle
+const GRAVITY       = 0.62;// jump gravity (px/frame²)
+const JUMP_VEL      = 16;  // single jump upward velocity
+const JUMP_VEL2     = 12;  // double jump velocity
+const MAGNET_RAD    = 165; // magnet attraction radius (px)
+const MAGNET_DUR    = 5000;// magnet duration (ms)
+const DIFF_INTERVAL = 15000;// ms between difficulty steps
+const DIFF_BOOST    = 0.10; // 10% speed increase per step
 
 // ── Component ────────────────────────────────────────────────────────────────
 export function ChallengeModal({ onClose }: Props) {
@@ -134,8 +142,11 @@ export function ChallengeModal({ onClose }: Props) {
 
   // ── Profile / shop state ───────────────────────────────────────────────────
   const [profile,     setProfile]     = useState<GameProfile | null>(null);
-  const [walletBal,   setWalletBal]   = useState(0);
-  const [comboFlash,  setComboFlash]  = useState<string | null>(null);
+  const [walletBal,    setWalletBal]    = useState(0);
+  const [comboFlash,   setComboFlash]   = useState<string | null>(null);
+  const [duelCode,     setDuelCode]     = useState<string | null>(null);
+  const [duelBet,      setDuelBet]      = useState(500);
+  const [duelCreating, setDuelCreating] = useState(false);
   const [shopBuying,  setShopBuying]  = useState<string | null>(null);
   const [shopMsg,     setShopMsg]     = useState('');
   const [redeeming,   setRedeeming]   = useState(false);
@@ -179,13 +190,23 @@ export function ChallengeModal({ onClose }: Props) {
     H:            520,
     comboCount:   0,
     lastCatchTs:  0,
-    bgScrollX:    0,   // parallax scroll offset
-    speedBoost:   0,   // item speed multiplier (grows over time)
+    bgScrollX:      0,
+    speedBoost:     0,
+    jumpYOffset:    0,   // pixels above ground (0 = grounded)
+    jumpVelY:       0,   // upward velocity (positive = going up)
+    jumpCount:      0,   // 0=grounded, 1=jumped, 2=double-jumped
+    magnetActive:   false,
+    magnetEnd:      0,
+    diffMultiplier: 1.0, // progressive difficulty multiplier
+    lastDiffTime:   0,   // timestamp of last difficulty step
   });
 
-  const bgImgRef      = useRef<HTMLImageElement | null>(null);
-  const audioCtxRef   = useRef<AudioContext | null>(null);
-  const comboTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const bgImgRef        = useRef<HTMLImageElement | null>(null);
+  const audioCtxRef     = useRef<AudioContext | null>(null);
+  const comboTimerRef   = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const touchStartTsRef = useRef(0);
+  const holdTimerRef    = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastTapTsRef    = useRef(0);
 
   // ── Fetch game config ──────────────────────────────────────────────────────
   useEffect(() => {
@@ -377,6 +398,34 @@ export function ChallengeModal({ onClose }: Props) {
     setPhase('gameover');
   }, []);
 
+  // ── Trigger jump (called on quick tap) ────────────────────────────────────
+  const triggerJump = useCallback(() => {
+    const g = gs.current;
+    if (!g.running) return;
+    const now = Date.now();
+    if (g.jumpCount === 0) {
+      g.jumpVelY  = JUMP_VEL;
+      g.jumpCount = 1;
+    } else if (g.jumpCount === 1 && (now - lastTapTsRef.current < 350)) {
+      g.jumpVelY  = JUMP_VEL2;
+      g.jumpCount = 2;
+    }
+    lastTapTsRef.current = now;
+    try {
+      if (!audioCtxRef.current) audioCtxRef.current = new AudioContext();
+      const actx = audioCtxRef.current;
+      const osc  = actx.createOscillator();
+      const gain = actx.createGain();
+      osc.connect(gain); gain.connect(actx.destination);
+      osc.frequency.value = g.jumpCount === 2 ? 800 : 660;
+      osc.type = 'sine';
+      gain.gain.setValueAtTime(0.12, actx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, actx.currentTime + 0.1);
+      osc.start(actx.currentTime);
+      osc.stop(actx.currentTime + 0.1);
+    } catch {}
+  }, []);
+
   // ── Draw one frame — Horizontal Runner ────────────────────────────────────
   const drawFrame = useCallback((ts: number) => {
     const canvas = canvasRef.current;
@@ -386,102 +435,158 @@ export function ChallengeModal({ onClose }: Props) {
     const g = gs.current;
     const { W, H } = g;
 
-    // Character anchor points
-    const BASE_X = Math.round(W * 0.16);
-    const MAX_X  = Math.round(W * 0.60);
+    const BASE_X   = Math.round(W * 0.16);
+    const MAX_X    = Math.round(W * 0.60);
     const GROUND_Y = Math.round(H * 0.74);
     g.charY = GROUND_Y;
 
-    // ── Move character ────────────────────────────────────────────────────────
+    // ── Jump physics ──────────────────────────────────────────────────────────
+    if (g.jumpYOffset > 0 || g.jumpVelY > 0) {
+      g.jumpVelY   -= GRAVITY;
+      g.jumpYOffset = Math.max(0, g.jumpYOffset + g.jumpVelY);
+      if (g.jumpYOffset <= 0) {
+        g.jumpYOffset = 0;
+        g.jumpVelY   = 0;
+        g.jumpCount  = 0;
+      }
+    }
+    const charDrawY = g.charY - g.jumpYOffset;
+
+    // ── Horizontal rush ───────────────────────────────────────────────────────
     if (g.pressing === 'right') {
       g.charX = Math.min(MAX_X, g.charX + RUSH_SPEED);
     } else {
       g.charX = Math.max(BASE_X, g.charX - RETURN_SPEED);
     }
 
-    // ── Scroll parallax background ────────────────────────────────────────────
+    // ── Progressive difficulty (every 15 s) ───────────────────────────────────
+    if (g.lastDiffTime === 0) g.lastDiffTime = ts;
+    if (ts - g.lastDiffTime > DIFF_INTERVAL) {
+      g.diffMultiplier = Math.min(g.diffMultiplier * (1 + DIFF_BOOST), 2.8);
+      g.lastDiffTime   = ts;
+    }
+
+    // ── Parallax scroll ───────────────────────────────────────────────────────
     const scrollSpd = g.pressing === 'right' ? BG_SCROLL_RUN : BG_SCROLL_IDL;
-    g.bgScrollX = (g.bgScrollX + scrollSpd) % W;
+    g.bgScrollX = (g.bgScrollX + scrollSpd * g.diffMultiplier) % W;
 
-    // Speed boost grows over session time (items get faster after ~20s)
-    g.speedBoost = Math.min(3.5, (g.score * 0.08));
+    // Score-based speed boost
+    g.speedBoost = Math.min(2.5, g.score * 0.07);
 
-    // ── Spawn items from right ─────────────────────────────────────────────────
-    const spawnInterval = Math.max(500, 1050 - g.score * 8);
+    // ── Magnet attraction ─────────────────────────────────────────────────────
+    if (g.magnetActive && Date.now() < g.magnetEnd) {
+      for (const item of g.items) {
+        if (item.collected || item.type === 'magnet') continue;
+        const dx   = g.charX - item.x;
+        const dy   = charDrawY - item.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < MAGNET_RAD && dist > 1) {
+          const pull = Math.min(12, 900 / (dist + 1));
+          item.x += (dx / dist) * pull;
+          item.y += (dy / dist) * pull;
+        }
+      }
+    } else if (g.magnetActive) {
+      g.magnetActive = false;
+    }
+
+    // ── Spawn items ───────────────────────────────────────────────────────────
+    const baseInterval  = Math.max(460, 980 - g.score * 7);
+    const spawnInterval = baseInterval / g.diffMultiplier;
     if (ts - g.lastSpawn > spawnInterval) {
-      const variance = (Math.random() - 0.5) * 22;
+      const isMagnet = (g.nextId > 3) && (Math.random() < 0.12);
+      const rY = Math.random();
+      const itemY = isMagnet
+        ? GROUND_Y + (Math.random() - 0.5) * 12
+        : rY < 0.60
+          ? GROUND_Y + (Math.random() - 0.5) * 16
+          : rY < 0.84
+            ? GROUND_Y - (68 + Math.random() * 40)
+            : GROUND_Y - (128 + Math.random() * 40);
       g.items.push({
         id:        g.nextId++,
         x:         W + ITEM_W,
-        y:         GROUND_Y + variance,
-        speed:     ITEM_SPD_MIN + Math.random() * ITEM_SPD_VAR + g.speedBoost,
+        y:         itemY,
+        speed:     (ITEM_SPD_MIN + Math.random() * ITEM_SPD_VAR + g.speedBoost) * g.diffMultiplier,
         collected: false,
+        type:      isMagnet ? 'magnet' : 'food',
       });
       g.lastSpawn = ts;
     }
 
-    // ── Update items (move left) + collision ──────────────────────────────────
+    // ── Update items + collision ──────────────────────────────────────────────
     for (const item of g.items) {
       if (item.collected) continue;
       item.x -= item.speed;
-
       const dx = Math.abs(item.x - g.charX);
-      const dy = Math.abs(item.y - g.charY);
-      if (dx < (CHAR_W / 2 + ITEM_W / 2) * 0.78 && dy < (CHAR_H / 2 + ITEM_H / 2) * 0.80) {
+      const dy = Math.abs(item.y - charDrawY);
+      if (dx < (CHAR_W / 2 + ITEM_W / 2) * 0.80 && dy < (CHAR_H / 2 + ITEM_H / 2) * 0.82) {
         item.collected = true;
-
-        // ── Combo system ──────────────────────────────────────────────────────
-        const timeSinceLast = ts - g.lastCatchTs;
-        g.comboCount = timeSinceLast < 2200 ? Math.min(g.comboCount + 1, 10) : 1;
-        g.lastCatchTs = ts;
-        const combo = g.comboCount;
-        const multiplier = combo >= 3 ? combo : 1;
-        g.score += multiplier;
-        setScore(g.score);
-
-        // Play catch sound (Web Audio API — no file needed)
-        try {
-          if (!audioCtxRef.current) audioCtxRef.current = new AudioContext();
-          const actx = audioCtxRef.current;
-          const osc = actx.createOscillator();
-          const gain = actx.createGain();
-          osc.connect(gain); gain.connect(actx.destination);
-          osc.frequency.value = combo >= 3 ? 880 + (combo - 3) * 130 : 560;
-          osc.type = combo >= 3 ? 'triangle' : 'sine';
-          gain.gain.setValueAtTime(0.28, actx.currentTime);
-          gain.gain.exponentialRampToValueAtTime(0.001, actx.currentTime + 0.22);
-          osc.start(actx.currentTime);
-          osc.stop(actx.currentTime + 0.22);
-        } catch { /* audio blocked */ }
-
-        // Combo overlay
-        if (combo >= 3) {
+        if (item.type === 'magnet') {
+          g.magnetActive = true;
+          g.magnetEnd    = Date.now() + MAGNET_DUR;
+          try {
+            if (!audioCtxRef.current) audioCtxRef.current = new AudioContext();
+            const actx = audioCtxRef.current;
+            for (let i = 0; i < 3; i++) {
+              const mo = actx.createOscillator();
+              const mg = actx.createGain();
+              mo.connect(mg); mg.connect(actx.destination);
+              mo.frequency.value = 440 + i * 220;
+              mo.type = 'sine';
+              mg.gain.setValueAtTime(0.14, actx.currentTime + i * 0.07);
+              mg.gain.exponentialRampToValueAtTime(0.001, actx.currentTime + i * 0.07 + 0.18);
+              mo.start(actx.currentTime + i * 0.07);
+              mo.stop(actx.currentTime + i * 0.07 + 0.18);
+            }
+          } catch {}
           if (comboTimerRef.current) clearTimeout(comboTimerRef.current);
-          setComboFlash(`Combo ×${combo}!`);
-          comboTimerRef.current = setTimeout(() => setComboFlash(null), 950);
-        }
-
-        // Global session catch
-        const uid = userUidRef.current;
-        if (uid && sessionActiveRef.current && (sessionItemsRef.current ?? 1) > 0) {
-          if (sessionItemsRef.current !== null) sessionItemsRef.current = Math.max(0, sessionItemsRef.current - 1);
-          fetch('/api/game/session/catch', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ firebaseUid: uid, userName: userNameRef.current }),
-          })
-          .then(r => r.ok ? r.json() : null)
-          .then((res: { caught: boolean } | null) => {
-            if (res?.caught) setProfile(p => p ? { ...p, gamePoints: p.gamePoints + multiplier } : p);
-          }).catch(() => {});
+          setComboFlash('🧲 مغناطيس!');
+          comboTimerRef.current = setTimeout(() => setComboFlash(null), 1600);
+        } else {
+          const timeSinceLast = ts - g.lastCatchTs;
+          g.comboCount  = timeSinceLast < 2200 ? Math.min(g.comboCount + 1, 10) : 1;
+          g.lastCatchTs = ts;
+          const combo      = g.comboCount;
+          const multiplier = combo >= 3 ? combo : 1;
+          g.score += multiplier;
+          setScore(g.score);
+          try {
+            if (!audioCtxRef.current) audioCtxRef.current = new AudioContext();
+            const actx = audioCtxRef.current;
+            const osc  = actx.createOscillator();
+            const gain = actx.createGain();
+            osc.connect(gain); gain.connect(actx.destination);
+            osc.frequency.value = combo >= 3 ? 880 + (combo - 3) * 130 : 560;
+            osc.type = combo >= 3 ? 'triangle' : 'sine';
+            gain.gain.setValueAtTime(0.28, actx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.001, actx.currentTime + 0.22);
+            osc.start(actx.currentTime);
+            osc.stop(actx.currentTime + 0.22);
+          } catch {}
+          if (combo >= 3) {
+            if (comboTimerRef.current) clearTimeout(comboTimerRef.current);
+            setComboFlash(`Combo ×${combo}!`);
+            comboTimerRef.current = setTimeout(() => setComboFlash(null), 950);
+          }
+          const uid = userUidRef.current;
+          if (uid && sessionActiveRef.current && (sessionItemsRef.current ?? 1) > 0) {
+            if (sessionItemsRef.current !== null) sessionItemsRef.current = Math.max(0, sessionItemsRef.current - 1);
+            fetch('/api/game/session/catch', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ firebaseUid: uid, userName: userNameRef.current }),
+            }).then(r => r.ok ? r.json() : null)
+              .then((res: { caught: boolean } | null) => {
+                if (res?.caught) setProfile(p => p ? { ...p, gamePoints: p.gamePoints + multiplier } : p);
+              }).catch(() => {});
+          }
         }
       }
     }
-    // Remove items that passed off-screen left
     g.items = g.items.filter(it => !it.collected && it.x > -ITEM_W * 2);
 
-    // External catch queue
     if (externalCatchQueue.current > 0) {
-      const visible = g.items.filter(it => !it.collected);
+      const visible  = g.items.filter(it => !it.collected && it.type === 'food');
       const toRemove = Math.min(externalCatchQueue.current, visible.length);
       for (let i = 0; i < toRemove; i++) visible[i].collected = true;
       externalCatchQueue.current = Math.max(0, externalCatchQueue.current - toRemove);
@@ -492,25 +597,21 @@ export function ChallengeModal({ onClose }: Props) {
     // DRAW
     // ══════════════════════════════════════════════════════════════════════════
 
-    // ── Sky background ────────────────────────────────────────────────────────
     ctx.fillStyle = '#05080f';
     ctx.fillRect(0, 0, W, H);
 
-    // ── Parallax background image ─────────────────────────────────────────────
+    // Parallax background
     if (bgImgRef.current) {
       ctx.save();
       ctx.globalAlpha = 0.28;
       const bx = -(g.bgScrollX % W);
       ctx.drawImage(bgImgRef.current, bx,     0, W, H);
       ctx.drawImage(bgImgRef.current, bx + W, 0, W, H);
-      ctx.globalAlpha = 1;
       ctx.restore();
     } else {
-      // ── Built-in city silhouette (when no bg image) ───────────────────────
       const bx = -(g.bgScrollX % W);
       for (let pass = 0; pass < 2; pass++) {
         const ox = bx + pass * W;
-        // building silhouettes
         const bldgs = [
           { x: 0.05, w: 0.08, h: 0.28 }, { x: 0.15, w: 0.05, h: 0.38 },
           { x: 0.22, w: 0.09, h: 0.22 }, { x: 0.33, w: 0.06, h: 0.42 },
@@ -523,7 +624,6 @@ export function ChallengeModal({ onClose }: Props) {
           const bh = b.h * H * 0.55;
           ctx.fillRect(ox + b.x * W, GROUND_Y - bh, b.w * W, bh);
         }
-        // window lights
         ctx.fillStyle = '#f5c51833';
         for (const b of bldgs) {
           const bh = b.h * H * 0.55;
@@ -536,11 +636,17 @@ export function ChallengeModal({ onClose }: Props) {
       }
     }
 
-    // ── Scanline overlay ──────────────────────────────────────────────────────
+    // Scanlines
     ctx.fillStyle = 'rgba(0,0,0,0.14)';
     for (let y = 0; y < H; y += 4) ctx.fillRect(0, y, W, 2);
 
-    // ── Road / ground strip ───────────────────────────────────────────────────
+    // Difficulty red tint (grows with speed)
+    if (g.diffMultiplier > 1.08) {
+      ctx.fillStyle = `rgba(255,45,120,${Math.min(0.07, (g.diffMultiplier - 1) * 0.04)})`;
+      ctx.fillRect(0, 0, W, H);
+    }
+
+    // Road
     const roadTop = GROUND_Y - CHAR_H / 2 - 6;
     const roadH   = H - roadTop;
     const roadGrad = ctx.createLinearGradient(0, roadTop, 0, H);
@@ -549,7 +655,6 @@ export function ChallengeModal({ onClose }: Props) {
     ctx.fillStyle = roadGrad;
     ctx.fillRect(0, roadTop, W, roadH);
 
-    // road lane dashes (scrolling)
     ctx.strokeStyle = 'rgba(0,212,255,0.18)';
     ctx.lineWidth   = 2;
     ctx.setLineDash([22, 18]);
@@ -558,7 +663,6 @@ export function ChallengeModal({ onClose }: Props) {
     ctx.beginPath(); ctx.moveTo(0, laneY); ctx.lineTo(W, laneY); ctx.stroke();
     ctx.setLineDash([]);
 
-    // road top glow line
     const glowGrad = ctx.createLinearGradient(0, roadTop - 3, 0, roadTop + 8);
     glowGrad.addColorStop(0, '#00f5d488');
     glowGrad.addColorStop(1, 'transparent');
@@ -568,7 +672,7 @@ export function ChallengeModal({ onClose }: Props) {
     ctx.lineWidth = 1.5;
     ctx.beginPath(); ctx.moveTo(0, roadTop); ctx.lineTo(W, roadTop); ctx.stroke();
 
-    // ── Speed streaks when pressing ───────────────────────────────────────────
+    // Speed streaks
     if (g.pressing === 'right') {
       ctx.save();
       ctx.globalAlpha = 0.18;
@@ -585,64 +689,88 @@ export function ChallengeModal({ onClose }: Props) {
       ctx.restore();
     }
 
-    // ── Draw items ────────────────────────────────────────────────────────────
-    for (const item of g.items) {
-      if (item.collected) continue;
-      // bobbing effect
-      const bob = Math.sin(ts * 0.006 + item.id) * 4;
+    // Magnet halo
+    if (g.magnetActive && Date.now() < g.magnetEnd) {
+      const fracLeft = (g.magnetEnd - Date.now()) / MAGNET_DUR;
       ctx.save();
-      if (itemImgRef.current) {
-        ctx.shadowColor = '#f5c51899';
-        ctx.shadowBlur  = 14;
-        ctx.drawImage(itemImgRef.current, item.x - ITEM_W / 2, item.y - ITEM_H / 2 + bob, ITEM_W, ITEM_H);
-      } else {
-        ctx.font         = '34px sans-serif';
-        ctx.textAlign    = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.shadowColor  = C.yellow;
-        ctx.shadowBlur   = 16;
-        ctx.fillText('🍔', item.x, item.y + bob);
-      }
-      // glow halo
-      ctx.shadowBlur = 0;
-      const halo = ctx.createRadialGradient(item.x, item.y + bob, 4, item.x, item.y + bob, ITEM_W * 0.8);
-      halo.addColorStop(0, '#f5c51822');
-      halo.addColorStop(1, 'transparent');
-      ctx.fillStyle = halo;
-      ctx.fillRect(item.x - ITEM_W, item.y + bob - ITEM_H, ITEM_W * 2, ITEM_H * 2);
+      ctx.globalAlpha = Math.min(1, fracLeft * 2) * 0.45 + Math.sin(ts * 0.012) * 0.07;
+      const mh = ctx.createRadialGradient(g.charX, charDrawY, 10, g.charX, charDrawY, MAGNET_RAD);
+      mh.addColorStop(0, '#f5c51822'); mh.addColorStop(0.65, '#f5c51811'); mh.addColorStop(1, 'transparent');
+      ctx.fillStyle = mh;
+      ctx.beginPath(); ctx.arc(g.charX, charDrawY, MAGNET_RAD, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = `rgba(245,197,24,${0.35 + Math.sin(ts * 0.012) * 0.12})`;
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([6, 9]);
+      ctx.lineDashOffset = -(ts * 0.06) % 15;
+      ctx.beginPath(); ctx.arc(g.charX, charDrawY, MAGNET_RAD, 0, Math.PI * 2); ctx.stroke();
+      ctx.setLineDash([]);
       ctx.restore();
     }
 
-    // ── Draw character ────────────────────────────────────────────────────────
-    const rushing = g.pressing === 'right';
+    // Items
+    for (const item of g.items) {
+      if (item.collected) continue;
+      const bob = Math.sin(ts * 0.006 + item.id) * 4;
+      ctx.save();
+      if (item.type === 'magnet') {
+        ctx.shadowColor = '#f5c518cc'; ctx.shadowBlur = 20;
+        ctx.font = '36px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText('🧲', item.x, item.y + bob);
+        ctx.shadowBlur = 0;
+        ctx.strokeStyle = `rgba(245,197,24,${0.5 + Math.sin(ts * 0.01 + item.id) * 0.2})`;
+        ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(item.x, item.y + bob, ITEM_W * 0.65, 0, Math.PI * 2); ctx.stroke();
+      } else if (itemImgRef.current) {
+        ctx.shadowColor = '#f5c51899'; ctx.shadowBlur = 14;
+        ctx.drawImage(itemImgRef.current, item.x - ITEM_W / 2, item.y - ITEM_H / 2 + bob, ITEM_W, ITEM_H);
+      } else {
+        ctx.font = '34px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.shadowColor = C.yellow; ctx.shadowBlur = 16;
+        ctx.fillText('🍔', item.x, item.y + bob);
+      }
+      ctx.restore();
+    }
+
+    // Jump dotted line indicator
+    if (g.jumpYOffset > 5) {
+      ctx.save();
+      ctx.globalAlpha = 0.22;
+      ctx.strokeStyle = '#00f5d4';
+      ctx.lineWidth   = 1.5;
+      ctx.setLineDash([4, 6]);
+      ctx.beginPath(); ctx.moveTo(g.charX, g.charY); ctx.lineTo(g.charX, charDrawY); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.restore();
+    }
+
+    // Character
+    const rushing  = g.pressing === 'right';
+    const airborne = g.jumpYOffset > 5;
     ctx.save();
-    ctx.shadowColor = rushing ? '#00d4ff88' : '#00f5d455';
-    ctx.shadowBlur  = rushing ? 20 : 12;
+    ctx.shadowColor = rushing ? '#00d4ff88' : airborne ? '#f5c51888' : '#00f5d455';
+    ctx.shadowBlur  = rushing ? 22 : airborne ? 18 : 12;
     if (charImgRef.current) {
-      // Flip horizontally when rushing right (face right direction)
       if (rushing) {
         ctx.translate(g.charX + CHAR_W / 2, 0);
         ctx.scale(-1, 1);
-        ctx.drawImage(charImgRef.current, -CHAR_W / 2, g.charY - CHAR_H / 2, CHAR_W, CHAR_H);
+        ctx.drawImage(charImgRef.current, -CHAR_W / 2, charDrawY - CHAR_H / 2, CHAR_W, CHAR_H);
       } else {
-        ctx.drawImage(charImgRef.current, g.charX - CHAR_W / 2, g.charY - CHAR_H / 2, CHAR_W, CHAR_H);
+        ctx.drawImage(charImgRef.current, g.charX - CHAR_W / 2, charDrawY - CHAR_H / 2, CHAR_W, CHAR_H);
       }
     } else {
-      ctx.font         = '44px sans-serif';
-      ctx.textAlign    = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(rushing ? '🏃' : '🧍', g.charX, g.charY);
+      ctx.font = '44px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(rushing ? '🏃' : airborne ? '🦅' : '🧍', g.charX, charDrawY);
     }
     ctx.restore();
 
-    // ── Character ground shadow ───────────────────────────────────────────────
+    // Ground shadow (shrinks while airborne)
+    const shadowScale = Math.max(0.2, 1 - g.jumpYOffset / 170);
     ctx.save();
-    ctx.globalAlpha = 0.35;
-    const shGrad = ctx.createRadialGradient(g.charX, roadTop + 2, 0, g.charX, roadTop + 2, CHAR_W * 0.55);
-    shGrad.addColorStop(0, '#00f5d444');
-    shGrad.addColorStop(1, 'transparent');
+    ctx.globalAlpha = 0.35 * shadowScale;
+    const shGrad = ctx.createRadialGradient(g.charX, roadTop + 2, 0, g.charX, roadTop + 2, CHAR_W * 0.55 * shadowScale);
+    shGrad.addColorStop(0, '#00f5d444'); shGrad.addColorStop(1, 'transparent');
     ctx.fillStyle = shGrad;
-    ctx.fillRect(g.charX - CHAR_W * 0.6, roadTop - 2, CHAR_W * 1.2, 8);
+    ctx.fillRect(g.charX - CHAR_W * 0.6 * shadowScale, roadTop - 2, CHAR_W * 1.2 * shadowScale, 8);
     ctx.restore();
   }, []);
 
@@ -703,8 +831,15 @@ export function ChallengeModal({ onClose }: Props) {
     g.running    = true;
     g.comboCount = 0;
     g.lastCatchTs= 0;
-    g.bgScrollX  = 0;
-    g.speedBoost = 0;
+    g.bgScrollX      = 0;
+    g.speedBoost     = 0;
+    g.jumpYOffset    = 0;
+    g.jumpVelY       = 0;
+    g.jumpCount      = 0;
+    g.magnetActive   = false;
+    g.magnetEnd      = 0;
+    g.diffMultiplier = 1.0;
+    g.lastDiffTime   = 0;
     g.W = W; g.H = H;
 
     setScore(0);
@@ -855,8 +990,9 @@ export function ChallengeModal({ onClose }: Props) {
               marginBottom: '10px',
             }}>التحدي</div>
             <div style={{ color: C.dim, fontSize: '13px', lineHeight: 1.7, maxWidth: '280px', margin: '0 auto' }}>
-              اصطد أكبر عدد من العناصر خلال {config?.duration ?? 60} ثانية!<br/>
-              استخدم زري ← و → للتحرك
+              اصطد أكبر قدر من العناصر خلال {config?.duration ?? 60} ثانية!<br/>
+              اضغط باستمرار → للانطلاق • اضغط بسرعة للقفز<br/>
+              ضغطتان متتاليتان = قفزة مزدوجة 🦅 • المغناطيس 🧲 يجذب كل شيء!
             </div>
           </div>
 
@@ -961,6 +1097,21 @@ export function ChallengeModal({ onClose }: Props) {
                 </span>
               )}
             </button>
+
+            <button
+              onClick={() => { setDuelCode(null); setDuelBet(500); setPhase('duel'); }}
+              style={{
+                padding: '14px', borderRadius: '6px',
+                background: `${C.red}11`,
+                border: `1px solid ${C.red}44`,
+                color: C.red, fontFamily: 'Orbitron, sans-serif',
+                fontSize: '12px', letterSpacing: '0.1em',
+                cursor: 'pointer', transition: 'all 0.2s',
+                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px',
+              }}
+            >
+              ⚔ تحدي صديق
+            </button>
           </div>
         </div>
       )}
@@ -1028,18 +1179,43 @@ export function ChallengeModal({ onClose }: Props) {
               fontFamily: 'Orbitron, sans-serif', fontSize: '10px',
               color: 'rgba(0,212,255,0.40)', letterSpacing: '0.06em',
             }}>
-              اضغط مع الإمساك → للأمام  •  اترك → تراجع
+              امسك → للانطلاق  •  اضغط سريعاً = قفزة  •  مزدوجة = قفزة عالية ☝
             </div>
           )}
 
           <canvas
             ref={canvasRef}
-            onMouseDown={pressRight}
-            onMouseUp={() => { gs.current.pressing = 'left'; }}
-            onMouseLeave={() => { gs.current.pressing = null; }}
-            onTouchStart={e => { e.preventDefault(); pressRight(); }}
-            onTouchEnd={e => { e.preventDefault(); gs.current.pressing = 'left'; }}
-            onTouchCancel={e => { e.preventDefault(); gs.current.pressing = null; }}
+            onMouseDown={() => {
+              touchStartTsRef.current = Date.now();
+              holdTimerRef.current = setTimeout(() => { gs.current.pressing = 'right'; }, 180);
+            }}
+            onMouseUp={() => {
+              const dur = Date.now() - touchStartTsRef.current;
+              if (holdTimerRef.current) { clearTimeout(holdTimerRef.current); holdTimerRef.current = null; }
+              gs.current.pressing = null;
+              if (dur < 180) triggerJump();
+            }}
+            onMouseLeave={() => {
+              if (holdTimerRef.current) { clearTimeout(holdTimerRef.current); holdTimerRef.current = null; }
+              gs.current.pressing = null;
+            }}
+            onTouchStart={e => {
+              e.preventDefault();
+              touchStartTsRef.current = Date.now();
+              holdTimerRef.current = setTimeout(() => { gs.current.pressing = 'right'; }, 180);
+            }}
+            onTouchEnd={e => {
+              e.preventDefault();
+              const dur = Date.now() - touchStartTsRef.current;
+              if (holdTimerRef.current) { clearTimeout(holdTimerRef.current); holdTimerRef.current = null; }
+              gs.current.pressing = null;
+              if (dur < 180) triggerJump();
+            }}
+            onTouchCancel={e => {
+              e.preventDefault();
+              if (holdTimerRef.current) { clearTimeout(holdTimerRef.current); holdTimerRef.current = null; }
+              gs.current.pressing = null;
+            }}
             style={{
               flex: 1, width: '100%', display: 'block',
               touchAction: 'none', cursor: 'pointer',
@@ -1133,6 +1309,148 @@ export function ChallengeModal({ onClose }: Props) {
               🔄 العب مجدداً
             </button>
           </div>
+        </div>
+      )}
+
+      {/* ── FRIENDLY DUEL ────────────────────────────────────────────────────── */}
+      {phase === 'duel' && (
+        <div style={{
+          flex: 1, display: 'flex', flexDirection: 'column',
+          alignItems: 'center', justifyContent: 'center',
+          gap: '22px', padding: '28px 24px',
+        }}>
+          <div style={{ textAlign: 'center' }}>
+            <div style={{ fontSize: '56px', marginBottom: '10px' }}>⚔</div>
+            <div style={{
+              fontFamily: 'Orbitron, sans-serif', fontSize: '18px',
+              color: C.red, letterSpacing: '0.12em',
+              textShadow: neon(C.red, 10), marginBottom: '8px',
+            }}>تحدي صديق</div>
+            <div style={{ color: C.dim, fontSize: '12px', lineHeight: 1.7, maxWidth: '260px', margin: '0 auto' }}>
+              أنشئ رابط تحدي خاص وشاركه مع صديق — من يحصل على أعلى نقطة يفوز بالرهان!
+            </div>
+          </div>
+
+          {!duelCode ? (
+            <div style={{
+              width: '100%', maxWidth: '300px',
+              background: `${C.red}0d`, border: `1px solid ${C.red}33`,
+              borderRadius: '10px', padding: '20px 18px',
+              display: 'flex', flexDirection: 'column', gap: '14px',
+            }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                <label style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '11px', color: C.dim, letterSpacing: '0.08em' }}>
+                  مبلغ الرهان (دينار عراقي)
+                </label>
+                <input
+                  type="number"
+                  min={100} max={50000} step={100}
+                  value={duelBet}
+                  onChange={e => setDuelBet(Math.max(100, Number(e.target.value)))}
+                  style={{
+                    background: '#0a0f1c', border: `1px solid ${C.red}44`,
+                    borderRadius: '6px', padding: '10px 14px',
+                    color: C.red, fontFamily: 'Orbitron, sans-serif',
+                    fontSize: '16px', textAlign: 'center', outline: 'none',
+                    width: '100%', boxSizing: 'border-box',
+                  }}
+                />
+              </div>
+              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                {[500, 1000, 2000, 5000].map(v => (
+                  <button key={v} onClick={() => setDuelBet(v)} style={{
+                    flex: 1, padding: '6px 0', borderRadius: '5px',
+                    background: duelBet === v ? `${C.red}33` : `${C.red}0d`,
+                    border: `1px solid ${duelBet === v ? C.red : C.red + '33'}`,
+                    color: C.red, fontFamily: 'Orbitron, sans-serif',
+                    fontSize: '11px', cursor: 'pointer',
+                  }}>{v.toLocaleString()}</button>
+                ))}
+              </div>
+              <button
+                disabled={duelCreating}
+                onClick={async () => {
+                  setDuelCreating(true);
+                  try {
+                    const uid = auth.currentUser?.uid ?? 'guest';
+                    const r = await fetch('/api/game/duel/create', {
+                      method: 'POST', headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ firebaseUid: uid, bet: duelBet }),
+                    });
+                    const data = await r.json();
+                    if (data.duelId) setDuelCode(data.duelId);
+                  } catch { /* ignore */ } finally { setDuelCreating(false); }
+                }}
+                style={{
+                  padding: '14px', borderRadius: '6px',
+                  background: duelCreating ? `${C.red}11` : `linear-gradient(135deg, ${C.red}33, ${C.red}18)`,
+                  border: `1.5px solid ${C.red}88`,
+                  color: C.red, fontFamily: 'Orbitron, sans-serif',
+                  fontSize: '13px', letterSpacing: '0.1em',
+                  cursor: duelCreating ? 'not-allowed' : 'pointer',
+                  textShadow: neon(C.red, 6), boxShadow: neon(C.red, 5),
+                  transition: 'all 0.2s',
+                }}
+              >
+                {duelCreating ? '⏳ جاري الإنشاء...' : '🔗 أنشئ رابط التحدي'}
+              </button>
+            </div>
+          ) : (
+            <div style={{
+              width: '100%', maxWidth: '300px',
+              background: `${C.green}0d`, border: `1px solid ${C.green}44`,
+              borderRadius: '10px', padding: '20px 18px',
+              display: 'flex', flexDirection: 'column', gap: '14px',
+              textAlign: 'center',
+            }}>
+              <div style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '12px', color: C.dim }}>
+                رمز التحدي
+              </div>
+              <div style={{
+                fontFamily: 'Orbitron, sans-serif', fontSize: '28px',
+                color: C.green, letterSpacing: '0.22em',
+                textShadow: neon(C.green, 12),
+              }}>{duelCode}</div>
+              <div style={{ fontSize: '11px', color: C.dim }}>
+                الرهان: <span style={{ color: C.yellow }}>{duelBet.toLocaleString()} د.ع</span>
+              </div>
+              <button
+                onClick={() => {
+                  const link = `${window.location.origin}?duel=${duelCode}`;
+                  navigator.clipboard?.writeText(link).catch(() => {});
+                  if (comboTimerRef.current) clearTimeout(comboTimerRef.current);
+                  setComboFlash('✅ تم نسخ الرابط!');
+                  comboTimerRef.current = setTimeout(() => setComboFlash(null), 1800);
+                }}
+                style={{
+                  padding: '12px', borderRadius: '6px',
+                  background: `${C.green}18`, border: `1px solid ${C.green}55`,
+                  color: C.green, fontFamily: 'Orbitron, sans-serif',
+                  fontSize: '12px', letterSpacing: '0.08em',
+                  cursor: 'pointer', textShadow: neon(C.green, 5),
+                }}
+              >
+                📋 انسخ رابط التحدي
+              </button>
+              <button onClick={startGame} style={{
+                padding: '14px', borderRadius: '6px',
+                background: `linear-gradient(135deg, ${C.yellow}22, ${C.yellow}11)`,
+                border: `1.5px solid ${C.yellow}88`,
+                color: C.yellow, fontFamily: 'Orbitron, sans-serif',
+                fontSize: '13px', letterSpacing: '0.1em',
+                cursor: 'pointer', textShadow: neon(C.yellow, 7),
+                boxShadow: neon(C.yellow, 5), transition: 'all 0.2s',
+              }}>
+                ▶ ابدأ وسجّل نتيجتك
+              </button>
+            </div>
+          )}
+
+          <button onClick={() => setPhase('menu')} style={{
+            background: 'transparent', border: 'none',
+            color: C.dim, fontFamily: 'Orbitron, sans-serif',
+            fontSize: '11px', cursor: 'pointer', letterSpacing: '0.08em',
+          }}>← رجوع للقائمة</button>
         </div>
       )}
 
