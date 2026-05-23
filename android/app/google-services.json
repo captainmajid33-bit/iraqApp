@@ -1,0 +1,67 @@
+{
+  "project_info": {
+    "project_number": "904460783186",
+    "project_id": "diyalaapp",
+    "storage_bucket": "diyalaapp.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:904460783186:android:e1550efbbe0d3e6feb198b",
+        "android_client_info": {
+          "package_name": "com.diyala.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDCuYduurpCaFlyJ54-x5ewKlv8uLGGrPk"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:904460783186:android:b6f944130254c2a3eb198b",
+        "android_client_info": {
+          "package_name": "com.diyala.map"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDCuYduurpCaFlyJ54-x5ewKlv8uLGGrPk"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:904460783186:android:1e9122af84e9689aeb198b",
+        "android_client_info": {
+          "package_name": "com.example.diyala_ai_app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDCuYduurpCaFlyJ54-x5ewKlv8uLGGrPk"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
