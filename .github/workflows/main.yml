@@ -14,9 +14,13 @@ jobs:
         run: npm install
       - name: Sync Capacitor
         run: npx cap sync android
-      - name: Fix Gradle Version
+      - name: Apply Compatibility Fixes
         run: |
-          sed -i 's/gradle-8.7-all.zip/gradle-8.11.1-all.zip/g' android/gradle/wrapper/gradle-wrapper.properties
+          cd android
+          # تحديث الـ Gradle Wrapper
+          sed -i 's/gradle-8.7-all.zip/gradle-8.11.1-all.zip/g' gradle/wrapper/gradle-wrapper.properties
+          # تحديث الـ Android Gradle Plugin في ملف build.gradle الرئيسي
+          sed -i 's/8.3.2/8.9.1/g' build.gradle
       - name: Build with Gradle
         run: |
           cd android
