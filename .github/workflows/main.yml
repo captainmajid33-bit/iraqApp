@@ -14,15 +14,13 @@ jobs:
         run: npm install
       - name: Sync Capacitor
         run: npx cap sync android
-      - name: Force Gradle Update
+      - name: Force Update Environment
         run: |
           cd android
-          rm -rf gradle/wrapper/gradle-wrapper.properties
-          echo "distributionBase=GRADLE_USER_HOME" > gradle/wrapper/gradle-wrapper.properties
-          echo "distributionPath=wrapper/dists" >> gradle/wrapper/gradle-wrapper.properties
-          echo "distributionUrl=https\://services.gradle.org/distributions/gradle-8.11.1-all.zip" >> gradle/wrapper/gradle-wrapper.properties
-          echo "zipStoreBase=GRADLE_USER_HOME" >> gradle/wrapper/gradle-wrapper.properties
-          echo "zipStorePath=wrapper/dists" >> gradle/wrapper/gradle-wrapper.properties
+          # تحديث نسخة الـ Gradle Wrapper
+          sed -i 's/gradle-8.7-all.zip/gradle-8.11.1-all.zip/g' gradle/wrapper/gradle-wrapper.properties
+          # تحديث إصدار الـ Android Gradle Plugin إلى 8.9.1 في ملفات البناء
+          sed -i 's/8.3.2/8.9.1/g' build.gradle
       - name: Build with Gradle
         run: |
           cd android
