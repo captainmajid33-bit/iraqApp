@@ -16,16 +16,19 @@ jobs:
         run: npx cap sync android
       - name: Force Gradle Update
         run: |
-          # مسح الملف القديم نهائياً
-          rm android/gradle/wrapper/gradle-wrapper.properties
-          # كتابة ملف جديد بالإعدادات الصحيحة
-          cat <<EOF > android/gradle/wrapper/gradle-wrapper.properties
+          cd android
+          # 1. تحديث الـ Gradle Wrapper
+          rm gradle/wrapper/gradle-wrapper.properties
+          cat <<EOF > gradle/wrapper/gradle-wrapper.properties
           distributionBase=GRADLE_USER_HOME
           distributionPath=wrapper/dists
           distributionUrl=https\://services.gradle.org/distributions/gradle-8.11.1-all.zip
           zipStoreBase=GRADLE_USER_HOME
           zipStorePath=wrapper/dists
           EOF
+          # 2. تحديث الـ Android Gradle Plugin في ملف build.gradle الرئيسي
+          # نقوم بالبحث عن السطر الذي يحتوي على نسخة 8.3.2 ونبدله بـ 8.9.1
+          sed -i 's/8.3.2/8.9.1/g' build.gradle || true
       - name: Build with Gradle
         run: |
           cd android
