@@ -1,0 +1,10 @@
+{
+  "appId": "com.diyala.app",
+  "appName": "DiyalaApp",
+  "webDir": "src",
+  "plugins": {
+    "SplashScreen": {
+      "launchAutoHide": false
+    }
+  }
+}
