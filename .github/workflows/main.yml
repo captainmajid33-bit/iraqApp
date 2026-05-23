@@ -17,9 +17,7 @@ jobs:
       - name: Force Gradle Update
         run: |
           cd android
-          # حذف ملفات الـ Wrapper القديمة تماماً
           rm -rf gradle/wrapper/gradle-wrapper.properties
-          # إنشاء ملف جديد بالإصدار المطلوب
           echo "distributionBase=GRADLE_USER_HOME" > gradle/wrapper/gradle-wrapper.properties
           echo "distributionPath=wrapper/dists" >> gradle/wrapper/gradle-wrapper.properties
           echo "distributionUrl=https\://services.gradle.org/distributions/gradle-8.11.1-all.zip" >> gradle/wrapper/gradle-wrapper.properties
@@ -29,7 +27,7 @@ jobs:
         run: |
           cd android
           chmod +x gradlew
-          ./gradlew assembleDebug
+          ./gradlew assembleDebug --warning-mode all
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
