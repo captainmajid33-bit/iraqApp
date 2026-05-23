@@ -14,13 +14,17 @@ jobs:
         run: npm install
       - name: Sync Capacitor
         run: npx cap sync android
-      - name: Apply Compatibility Fixes
+      - name: Force Gradle Update
         run: |
           cd android
-          # تحديث الـ Gradle Wrapper
-          sed -i 's/gradle-8.7-all.zip/gradle-8.11.1-all.zip/g' gradle/wrapper/gradle-wrapper.properties
-          # تحديث الـ Android Gradle Plugin في ملف build.gradle الرئيسي
-          sed -i 's/8.3.2/8.9.1/g' build.gradle
+          # حذف ملفات الـ Wrapper القديمة تماماً
+          rm -rf gradle/wrapper/gradle-wrapper.properties
+          # إنشاء ملف جديد بالإصدار المطلوب
+          echo "distributionBase=GRADLE_USER_HOME" > gradle/wrapper/gradle-wrapper.properties
+          echo "distributionPath=wrapper/dists" >> gradle/wrapper/gradle-wrapper.properties
+          echo "distributionUrl=https\://services.gradle.org/distributions/gradle-8.11.1-all.zip" >> gradle/wrapper/gradle-wrapper.properties
+          echo "zipStoreBase=GRADLE_USER_HOME" >> gradle/wrapper/gradle-wrapper.properties
+          echo "zipStorePath=wrapper/dists" >> gradle/wrapper/gradle-wrapper.properties
       - name: Build with Gradle
         run: |
           cd android
