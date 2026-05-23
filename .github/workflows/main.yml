@@ -15,7 +15,11 @@ jobs:
       - name: Sync Capacitor
         run: npx cap sync android
       - name: Build with Gradle
-        run: cd android && chmod +x gradlew && ./gradlew assembleDebug
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleDebug -PandroidxCoreVersion=1.13.0
+        # السطر أعلاه يجبر النظام على استخدام الإصدار 1.13.0 المتوافق
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
