@@ -5,35 +5,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-      - name: set up JDK 17
+      - name: set up JDK 21
         uses: actions/setup-java@v3
         with:
-          java-version: '17'
+          java-version: '21'
           distribution: 'temurin'
       - name: Install Dependencies
         run: npm install
       - name: Sync Capacitor
         run: npx cap sync android
-      - name: Force Gradle Update
-        run: |
-          cd android
-          # 1. تحديث الـ Gradle Wrapper
-          rm gradle/wrapper/gradle-wrapper.properties
-          cat <<EOF > gradle/wrapper/gradle-wrapper.properties
-          distributionBase=GRADLE_USER_HOME
-          distributionPath=wrapper/dists
-          distributionUrl=https\://services.gradle.org/distributions/gradle-8.11.1-all.zip
-          zipStoreBase=GRADLE_USER_HOME
-          zipStorePath=wrapper/dists
-          EOF
-          # 2. تحديث الـ Android Gradle Plugin في ملف build.gradle الرئيسي
-          # نقوم بالبحث عن السطر الذي يحتوي على نسخة 8.3.2 ونبدله بـ 8.9.1
-          sed -i 's/8.3.2/8.9.1/g' build.gradle || true
       - name: Build with Gradle
         run: |
           cd android
           chmod +x gradlew
-          ./gradlew assembleDebug --warning-mode all
+          ./gradlew assembleDebug
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
